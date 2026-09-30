@@ -107,3 +107,8 @@ def test_slm_cost_through_adapters_is_labelled_extrapolated(tmp_path, monkeypatc
     assert b3["slm_cost_basis"]["basis"] == "measured"
     assert b4["slm_cost_basis"]["basis"] == "extrapolated from per-adapter load tests"
     assert b4["slm_cost_basis"]["call_engines"] == ["slm:qwen3-8b+lora:c0"]
+    # even when the load test measured that very adapter: a B4/B5 server serves many adapters at once
+    adapter = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM,
+                                      "combined": {"rule": "r", "engines": ["slm:qwen3-8b+lora:c0"], "loadtests": ["lt"]}})
+    alone = read_result(j3.run("agent-B4x", None, str(adapter), config), "J3")["result"]
+    assert alone["slm_cost_basis"]["basis"] == "extrapolated from per-adapter load tests"
