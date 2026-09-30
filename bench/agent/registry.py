@@ -36,6 +36,8 @@ class RegistryError(HarnessError):
     """The registry could not be read or written: a failure of the harness."""
 
 
+SECRET_MIN_LENGTH = 8  # a key is longer; shorter values are placeholders ("x", "1", "EMPTY"), and
+# replacing every "1" of a record would corrupt it
 _KEY_LIKE = re.compile(r"\b(sk|hf)[-_][A-Za-z0-9_\-*.]{6,}")
 
 
@@ -48,7 +50,7 @@ def redact(text: str, config: Dict[str, Any]) -> str:
     names = [((spec or {}).get("endpoint") or {}).get("api_key_env") for spec in specs]
     for name in [*names, "OPENAI_API_KEY"]:  # the retrieval embeddings' key too
         value = os.environ.get(name) if name else None
-        if value:
+        if value and len(value) >= SECRET_MIN_LENGTH:
             text = text.replace(value, "<redacted>")
     return _KEY_LIKE.sub("<redacted>", text)
 

@@ -199,6 +199,8 @@ def test_what_is_committed_never_carries_a_key(monkeypatch):
             "Incorrect API key provided: sk-proj-abc1***wxyz; hf_AbCdEf123456")
     assert registry.redact(text, config) == ("refused: <redacted>; embeddings: <redacted>; "
                                              "Incorrect API key provided: <redacted>; <redacted>")
+    monkeypatch.setenv("OPENAI_API_KEY", "1")  # a local server's placeholder, not a secret
+    assert registry.redact('{"question_ids": ["1", "12"]}', config) == '{"question_ids": ["1", "12"]}'  # intact
 
 
 def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):

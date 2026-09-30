@@ -46,7 +46,9 @@ def _now() -> datetime:
 # redirects the retrieval embeddings (the chat models get theirs from C2 explicitly), and LangChain
 # tracing ships every prompt to LangSmith. Unset or off, whatever the shell or a .env had.
 REDIRECTING_ENV = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
-TRACING_OFF = {"LANGCHAIN_TRACING_V2": "false", "LANGSMITH_TRACING": "false"}
+# LangSmith takes the first of these it finds (langsmith.utils.get_env_var), so all four are set
+TRACING_OFF = {name: "false" for name in ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2", "LANGSMITH_TRACING",
+                                          "LANGCHAIN_TRACING")}
 
 
 def _prepare_chess(config: Dict[str, Any], db_root: Path):

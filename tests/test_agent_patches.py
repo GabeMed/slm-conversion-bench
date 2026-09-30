@@ -299,14 +299,16 @@ bench_runner._prepare_chess(config, bench_paths.bird_root(config))
 import runner.database_manager, database_utils.db_catalog.preprocess, preprocess
 import workflow.agents.information_retriever.tool_kit.retrieve_context
 e = os.environ
+from langsmith.utils import tracing_is_enabled
 print(e["DB_ROOT_PATH"] == str(bench_paths.bird_root(config)), e.get("BENCH_ONLY_IN_DOTENV"),
-      e.get("OPENAI_API_BASE"), e.get("OPENAI_BASE_URL"), e["LANGCHAIN_TRACING_V2"], e["LANGSMITH_TRACING"])
+      e.get("OPENAI_API_BASE"), e.get("OPENAI_BASE_URL"), tracing_is_enabled())
 """
     env = {**os.environ, "OPENAI_BASE_URL": "http://shell.example/v1", "OPENAI_API_BASE": "http://shell.example/v1",
-           "LANGCHAIN_TRACING_V2": "true", "LANGSMITH_TRACING": "true"}
+           "LANGSMITH_TRACING_V2": "true", "LANGCHAIN_TRACING_V2": "true", "LANGSMITH_TRACING": "true",
+           "LANGCHAIN_TRACING": "true"}
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=child)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.split()[-6:] == ["True", "None", "None", "None", "false", "false"]
+    assert result.stdout.split()[-5:] == ["True", "None", "None", "None", "False"]  # LangSmith's own verdict
 
 
 # ---------------------------------------------------------------- 13 and 10b, end to end
@@ -445,3 +447,18 @@ def test_without_the_gold_the_agent_makes_exactly_the_published_calls(monkeypatc
     assert GOLD in (published / "questions.json").read_text()  # the gold did reach the state this time
     assert calls_of(ours) == calls_of(published)
     assert (ours / "predictions.json").read_text() == (published / "predictions.json").read_text()
+
+
+def test_chromas_own_settings_never_read_a_dotenv(monkeypatch, repo, tmp_path):
+    """Chroma's settings read `./.env`; one pointing the vector DB at a server must change nothing."""
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    (workdir / ".env").write_text("CHROMA_API_IMPL=chromadb.api.fastapi.FastAPI\nCHROMA_SERVER_HOST=127.0.0.1\n"
+                                  "CHROMA_SERVER_HTTP_PORT=9\n")
+    monkeypatch.chdir(workdir)
+    assert hooks.chroma_settings(tmp_path / "db").chroma_api_impl == "chromadb.api.segment.SegmentAPI"
+    runner.preprocess(str(repo[0]), ["tiny"])  # builds the vector DB here, with that .env in the working directory
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    run_dir = runner.run_agent(str(repo[0]), "B0", "train", ids=["1"])  # and queries it
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "done" and manifest["tool_errors"] == {}

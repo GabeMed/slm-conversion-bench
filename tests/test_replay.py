@@ -117,6 +117,7 @@ def test_routed_by_an_arm_with_the_few_shot_on_cheap_alt(monkeypatch, repo, sour
     monkeypatch.setattr(clusters, "embed", by_column_filter)
     _, manifest, calls = replayed(monkeypatch, repo, source, arm="B5")
     assert manifest["status"] == "done" and set(manifest["facts"]) == {"choice", "centroids", "adapters", "allocation"}
+    assert manifest["few_shot_k"] == 1 and set(manifest["few_shot_sha256"]) == set(CALL_SITES)
     teacher = {identity(c): c for c in read_calls(paths.RUNS / source / "calls.jsonl") if c["attempt"] == 1}
     for call in calls:
         if call["engine"] == "cheap_alt":

@@ -148,6 +148,7 @@ def test_b2_is_one_call_per_question_on_the_complete_schema(monkeypatch, repo, e
     assert [(c["question_id"], c["call_site"], c["invocation_key"], c["engine"]) for c in calls] == [
         ("1", "generate_candidate", "b2:0", engine), ("2", "generate_candidate", "b2:0", engine)]
     (prompt,) = calls[0]["prompt_messages"]  # no few-shot prefix, cheap_alt included
+    assert (manifest["few_shot"], manifest["few_shot_k"], manifest["few_shot_sha256"]) == (None, None, None)
     assert prompt["content"].startswith("You are an experienced database expert")
     assert "CREATE TABLE gas_t" in prompt["content"] and "CREATE TABLE other_u" in prompt["content"]
     assert "price segment" not in prompt["content"]  # no retrieval: no column description from the vector DB
@@ -350,3 +351,4 @@ def test_an_api_error_in_b2_fails_the_run(monkeypatch, repo):
     run_dir = runner.run_agent(str(repo), "B2", "train", ids=["1", "2"], engine="production_llm")
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "failed" and list(manifest["harness_errors"]) == ["1"]  # stopped at the first
+    assert manifest["tool_errors"] == {} and "HarnessError" in manifest["failures"]["1"]  # never the model's

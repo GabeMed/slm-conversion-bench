@@ -511,6 +511,15 @@ def _local_embeddings(model: str, revision: str):
     return Local()
 
 
+def chroma_settings(persist_directory: Path):
+    """Patch 14: the settings of CHESS's vector DB, given explicitly. Chroma's own settings are a
+    pydantic BaseSettings that reads `./.env` (`env_file=".env"`), which could point the vector DB
+    at a remote server; here no `.env` is read, and nothing is sent as telemetry."""
+    import chromadb.config
+    return chromadb.config.Settings(_env_file=None, is_persistent=True, persist_directory=str(persist_directory),
+                                    anonymized_telemetry=False)
+
+
 def vector_db_dirname() -> str:
     """One vector DB per provider, so a DB built with one embedding is never queried with another."""
     return f"context_vector_db_{_config['embeddings']['provider']}"

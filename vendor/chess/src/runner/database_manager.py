@@ -94,7 +94,8 @@ class DatabaseManager:
                 vector_db_path = self.db_directory_path / hooks.vector_db_dirname()  # PATCH 10
                 if not vector_db_path.is_dir():
                     raise hooks.HarnessError(f"{vector_db_path} does not exist: run `bench preprocess`")
-                self.vector_db = Chroma(persist_directory=str(vector_db_path), embedding_function=hooks.embeddings("context"))
+                self.vector_db = Chroma(persist_directory=str(vector_db_path), embedding_function=hooks.embeddings("context"),
+                                       client_settings=hooks.chroma_settings(vector_db_path))  # PATCH 14: no .env
                 return "success"
             except Exception as e:
                 self.vector_db = "error"
