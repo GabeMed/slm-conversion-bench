@@ -169,6 +169,7 @@ def test_b2_keeps_going_when_the_model_fails_a_question(monkeypatch, repo):
             return ""  # empty output, every attempt
     run_dir, manifest, calls = run(monkeypatch, repo, "B2", ("1", "2"), model=Unparseable(), engine="production_llm")
     assert manifest["status"] == "done" and set(manifest["tool_errors"]) == {"1", "2"}
+    assert manifest["errors_by_call_site"] == {"generate_candidate": {"empty output": 4}}  # visible without C1
     assert json.loads((run_dir / "predictions.json").read_text()) == {"1": None, "2": None}
     assert [c["attempt"] for c in calls] == [1, 2, 1, 2]
 

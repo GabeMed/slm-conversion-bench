@@ -360,10 +360,17 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
             data.check_database(config, db_id)
         except Exception:
             changed.append(db_id)
+    errors: Dict[str, Dict[str, int]] = {}
+    for call in calls:  # a systematic rejection (a 400 on every call) is visible here, not only in C1
+        if call.get("error"):
+            kinds = errors.setdefault(call["call_site"], {})
+            kind = call["error"].split(":")[0]
+            kinds[kind] = kinds.get(kind, 0) + 1
     manifest.update({
         "finished_at": _now().isoformat(), "status": status(c1_errors, changed),
         "stopped_by": stopped_by, "problems": problems,
         "n_calls": len(calls), "call_sites_seen": sorted({c["call_site"] for c in calls}),
+        "errors_by_call_site": errors,
         "c1_errors": c1_errors, **fields, "harness_errors": outcome["harness_errors"],
         "databases_changed": changed,
     })

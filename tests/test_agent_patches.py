@@ -374,3 +374,20 @@ def test_local_embeddings_load_the_pinned_revision_on_cpu(monkeypatch):
     hooks.configure(config)
     hooks.embeddings("entity").embed_query("x")
     assert loaded == [("org/pinned-model", {"revision": "a" * 40, "device": "cpu"})]
+
+
+def test_without_the_gold_the_agent_makes_exactly_the_published_calls(monkeypatch, repo):
+    """Patch 13 changes no call: with the gold in the state (as published) and without it, the same
+    prompts, the same answers, the same predictions. Only logging and the evaluation node, the last
+    node before the end, ever read it."""
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NotTheGold())
+
+    def calls_of(run_dir):
+        return sorted((c["question_id"], c["call_site"], c["invocation_key"], json.dumps(c["prompt_messages"]),
+                       c["response_text"]) for c in read_calls(run_dir / "calls.jsonl"))
+    ours = runner.run_agent(str(repo[0]), "B0", "train", ids=["1", "2"])
+    monkeypatch.setattr(runner, "agent_task", dict)  # the published behaviour: the whole question, gold included
+    published = runner.run_agent(str(repo[0]), "B0", "train", ids=["1", "2"])
+    assert GOLD in (published / "questions.json").read_text()  # the gold did reach the state this time
+    assert calls_of(ours) == calls_of(published)
+    assert (ours / "predictions.json").read_text() == (published / "predictions.json").read_text()
