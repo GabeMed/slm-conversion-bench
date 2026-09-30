@@ -1,0 +1,5 @@
+# Serving knobs that change no output (modal_apps/serve_vllm.py), kept out of the registered config.yaml so
+# they can change after `bench prereg`. Each can be overridden at deploy time by its environment variable:
+#   BENCH_MIN_CONTAINERS=1 BENCH_CANDIDATE=qwen3-8b modal deploy -m modal_apps.serve_vllm
+min_containers: 0         # BENCH_MIN_CONTAINERS; 1 while agent runs use the server (a cold start answers 503)
+scaledown_window_s: 300   # BENCH_SCALEDOWN_WINDOW_S

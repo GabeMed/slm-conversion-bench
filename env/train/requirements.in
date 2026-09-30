@@ -1,0 +1,18 @@
+# Training (S5), the LoRA parity reference (P-4) and the load test (AIPerf), locally and in the
+# Modal images: one set of pins for both, so the CPU acceptance run and the GPU run use the same code
+# and the same library versions (design §1.1). The vLLM serving image pins vLLM on its own
+# (modal_apps/serve_vllm.py): vLLM brings its own torch.
+#
+# Lock (universal: macOS for the local run, Linux for Modal):
+#   uv pip compile --universal --python-version 3.12 env/train/requirements.in -o env/train/requirements.lock
+# Install:
+#   uv venv .venv-train --python 3.12
+#   uv pip install --python .venv-train/bin/python -r env/train/requirements.lock -e ".[test]"
+trl==1.14.1
+peft==0.21.1
+aiperf==0.13.0
+modal==1.6.0
+torch
+transformers
+accelerate
+datasets

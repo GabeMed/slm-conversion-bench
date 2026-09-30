@@ -18,15 +18,28 @@ roles:
     params: {max_tokens: 4096, timeout_s: 600}
   slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
     # served under `name` (--served-model-name); adapters under their own served names
+    # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
+    # `chat_template_kwargs`: how the template renders, the same when serving and training (thinking off);
+    # `endpoint.headers_env`: each header sent with the value of its environment variable (Modal proxy auth);
+    # `endpoint.api_key_env`: vLLM's own key, the second layer (the value stored as VLLM_API_KEY in the Modal secret)
     - name: qwen3-8b
       base: Qwen3-8B
-      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      hf: {repo: Qwen/Qwen3-8B, revision: b968826d9c46dd6066d109eabc6255188de91218}
+      chat_template_kwargs: {enable_thinking: false}
+      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
+                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
     - name: granite-4.2-8b
       base: Granite-4.2-8B
-      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      hf: {repo: ibm-granite/granite-4.2-8b, revision: f8de16cdcdbc6c779ca517604e050d82cc119e44}
+      chat_template_kwargs: {enable_thinking: false}
+      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
+                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
   slm_reserve: [Nemotron-3-Nano-4B]
+  slm_reserve_hf:              # F3: its weights, pinned; a hybrid (Mamba) model with no gate_proj, so
+                               # promoting it needs its own train.lora.target_modules (bench train refuses a module it lacks)
+    Nemotron-3-Nano-4B: {repo: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16, revision: dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f}
 
 # CHESS IR -> SS -> CG, as published (run/configs/CHESS_IR_SS_CG.yaml), with every engine routed
 # by C4. Temperatures live in `call_sites`, never here.
@@ -156,3 +169,68 @@ arms:                          # the facts each arm uses: judgments/<J>/<sha256>
   B3: {choice: null}           # J6 (S4)
   B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
   B5: {choice: null, centroids: null, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
+
+# F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
+# bench/preflight.py). Values are proposals; the author confirms them before runs.
+modal:
+  gpu_prices:                  # modal.com/pricing, per GPU-second; the manifests' cost = seconds x price
+    as_of: "2026-09-30"
+    usd_per_s: {L40S: 0.000542, H100: 0.001097}
+  volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
+  secrets:
+    vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
+    proxy_auth: slm-bench-proxy-auth       # holds the variables the candidates' headers_env names (a Modal proxy auth token),
+                                           # for the load client that runs in Modal
+    hf_token: null                         # the pinned candidates are ungated
+  apps: {serve: slm-bench-serve, train: slm-bench-train, loadtest: slm-bench-loadtest}
+
+serving:                       # vLLM, one candidate per server, its adapters beside it (modal_apps/serve_vllm.py)
+  vllm_version: 0.30.0
+  base_image: nvidia/cuda:13.0.3-devel-ubuntu24.04   # CUDA 13, as vLLM 0.30's wheels
+  gpu: L40S
+  cpu: 8
+  max_model_len: 32768
+  gpu_memory_utilization: 0.90
+  prefix_caching: true         # SPEC 6.6: the load test runs with the prefix cache on
+  generation_config: vllm      # only the request's parameters apply, never the model's sampling defaults
+  max_concurrent_requests: 256 # per container; above it the Modal proxy answers 503
+  # min_containers and scaledown_window_s change no output: they live in modal_apps/deploy.yaml (and env
+  # overrides), so they can change after `bench prereg` without touching this file
+  startup_timeout_s: 1800
+  download_timeout_s: 3600
+  warmup_timeout_s: 600
+  unauthenticated: false       # Modal proxy auth (the candidates' headers_env); the server refuses to start with neither
+                               # proxy auth nor a VLLM_API_KEY
+
+train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
+  gpu: L40S
+  timeout_s: 21600
+  seed: 20260930
+  precision: bf16              # on a GPU; a CPU run trains in float32
+  lora: {r: 16, alpha: 32, dropout: 0.05,
+         target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]}
+  sft:
+    learning_rate: 2.0e-4
+    num_train_epochs: 2
+    max_steps: null            # set only to cut a run short (the CPU acceptance run)
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    max_length: 32768          # = serving.max_model_len; a longer row is refused, never truncated
+    lr_scheduler_type: cosine
+    warmup_steps: 0.03         # a fraction of the steps
+    gradient_checkpointing: true
+    logging_steps: 10
+
+loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's input
+  aiperf_version: 0.13.0
+  concurrency: [1, 4, 8, 16, 32]   # one run per level
+  request_count: 500           # per level: that many calls, each level its own (no prompt replayed twice,
+  warmup_request_count: 20     # so the prefix cache holds only what real traffic would share); warm-up calls apart
+  stream: false                # the agent does not stream (bench/agent/hooks.py): latency is the whole request
+  request_timeout_s: 600
+  ready_timeout_s: 1800        # a cold server loads its weights before the first answer
+  client: {cpu: 4, timeout_s: 7200}   # the Modal container that runs AIPerf beside the server
+
+preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
+  lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
+  schedule: {train_hours_max: 12}   # all adapters must train overnight (SPEC 7.3, Day 1 night)
