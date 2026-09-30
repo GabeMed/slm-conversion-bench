@@ -1,0 +1,251 @@
+"""The Modal apps: the serving plan and the vLLM command (design §5.1, "Serving"), the container helpers,
+and a structure test of the SDK objects (images, functions, volumes and secrets by name) built without
+deploying and without an account. The SDK part runs where `modal` is installed (env/train)."""
+import importlib
+import json
+import sys
+import threading
+import warnings
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # modal_apps/ sits beside bench/
+
+from bench import paths  # noqa: E402
+from bench.contracts import facts  # noqa: E402
+from modal_apps import common  # noqa: E402
+from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, rel, save  # noqa: E402
+
+
+def _lock_pins(path):
+    return dict(line.split("==", 1) for line in Path(path).read_text().splitlines() if "==" in line and not line.startswith("#"))
+
+
+def test_the_images_pin_the_design_versions_and_the_config_says_the_same():
+    train, serve = _lock_pins(common.TRAIN_LOCK), _lock_pins(common.SERVE_LOCK)
+    assert (train["trl"], train["peft"], train["aiperf"], train["modal"]) == ("1.14.1", "0.21.1", "0.13.0", "1.6.0")
+    from bench.contracts.config import load_config
+
+    config = load_config(paths.ROOT / "config.yaml")
+    assert serve["vllm"] == config["serving"]["vllm_version"] == "0.30.0"
+    assert train["aiperf"] == config["loadtest"]["aiperf_version"]
+    assert serve["transformers"] == train["transformers"]  # one chat-template renderer for training and serving
+
+
+def test_lora_rank_is_the_smallest_vllm_accepts():
+    assert [common.lora_rank(r) for r in (1, 8, 9, 16, 17, 320, 512)] == [1, 8, 16, 16, 32, 320, 512]
+    with pytest.raises(common.SettingsError):
+        common.lora_rank(513)
+
+
+@pytest.fixture
+def serving(tmp_path, monkeypatch):
+    """A synthetic repo with the tiny candidate and one trained adapter, c0."""
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    fake_adapter("c0", config)
+    monkeypatch.setenv("BENCH_CONFIG", str(config_path))
+    monkeypatch.setenv("BENCH_CANDIDATE", TINY_NAME)
+    monkeypatch.delenv(common.ENV, raising=False)
+    return config_path, config
+
+
+def test_the_serving_plan_and_the_vllm_command(serving):
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    sha = facts.sha256_dir(paths.ROOT / "train" / "adapters" / "c0" / "adapter")
+    assert plan["adapters"] == [{"cluster": "c0", "served_name": "c0", "sha256": sha, "r": 8}]
+    cmd = common.vllm_command(plan)
+    arg = {flag: cmd[i + 1] for i, flag in enumerate(cmd[:-1]) if flag.startswith("--")}
+    assert cmd[:3] == ["vllm", "serve", TINY["repo"]]
+    assert arg["--revision"] == arg["--tokenizer-revision"] == TINY["revision"]
+    assert arg["--served-model-name"] == TINY_NAME  # the router's slm:<name>
+    assert arg["--lora-modules"] == f"c0=/adapters/{sha}"  # the router's slm:<name>+lora:<served_name>
+    assert (arg["--max-loras"], arg["--max-cpu-loras"], arg["--max-lora-rank"]) == ("1", "1", "8")
+    assert "--enable-lora" in cmd and "--enable-prefix-caching" in cmd and "--enable-prompt-tokens-details" in cmd
+    assert json.loads(arg["--default-chat-template-kwargs"]) == {"enable_thinking": False}
+    assert arg["--generation-config"] == "vllm" and arg["--max-model-len"] == str(config["serving"]["max_model_len"])
+    # the agent's own <tool_call> text must reach it untouched: no tool or reasoning parser strips it
+    assert not {"--enable-auto-tool-choice", "--tool-call-parser", "--reasoning-parser"} & set(cmd)
+    no_cache = common.vllm_command({**plan, "prefix_caching": False, "adapters": [], "chat_template_kwargs": {}})
+    assert "--no-enable-prefix-caching" in no_cache and "--enable-lora" not in no_cache
+    assert "--default-chat-template-kwargs" not in no_cache
+
+
+def test_the_adapters_fact_decides_what_is_served_once_it_is_this_candidates(serving):
+    config_path, config = serving
+    fake_adapter("c1", config)
+    from bench.train import register_adapters
+
+    fact_path, _ = register_adapters(config)
+    config["arms"]["B4"]["adapters"] = rel(fact_path)
+    config = save(config, config_path)
+    (paths.ROOT / "train" / "adapters" / "stray").mkdir()
+    assert [a["cluster"] for a in common.adapters_to_serve(config, TINY_NAME)] == ["c0", "c1"]
+    assert common.adapters_to_serve(config, "qwen3-8b") == []  # another candidate: its own adapters (none)
+    (paths.ROOT / "train" / "adapters" / "c1" / "adapter" / "adapter_model.safetensors").write_bytes(b"x")
+    with pytest.raises(common.SettingsError, match="c1/adapter is not the adapter"):
+        common.adapters_to_serve(config, TINY_NAME)
+
+
+def test_settings_are_computed_locally_and_carried_into_the_container(serving, monkeypatch):
+    local = common.load("serve")
+    assert local["plan"]["name"] == TINY_NAME and local["volumes"]["adapters"] == "slm-bench-adapters"
+    monkeypatch.setenv(common.ENV, json.dumps(local))
+    monkeypatch.setenv("BENCH_CONFIG", "/nonexistent.yaml")  # a container never reads config.yaml
+    assert common.load("serve") == local
+    monkeypatch.delenv(common.ENV)
+    monkeypatch.delenv("BENCH_CANDIDATE")
+    monkeypatch.setenv("BENCH_CONFIG", str(serving[0]))
+    with pytest.raises(common.SettingsError, match="BENCH_CANDIDATE"):
+        common.load("serve")
+
+
+def test_the_container_serves_only_adapters_whose_bytes_are_the_plans(serving, tmp_path):
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    with pytest.raises(common.SettingsError, match="not on the adapters volume.*upload train/adapters/c0/adapter"):
+        common.check_adapters(plan, str(volume))
+    import shutil
+
+    shutil.copytree(paths.ROOT / "train" / "adapters" / "c0" / "adapter", volume / plan["adapters"][0]["sha256"])
+    common.check_adapters(plan, str(volume))
+    (volume / plan["adapters"][0]["sha256"] / "adapter_config.json").write_text("{}")
+    with pytest.raises(common.SettingsError):
+        common.check_adapters(plan, str(volume))
+
+
+class FakeVLLMServer:
+    def __init__(self, healthy_after=0):
+        self.healthy_after, self.gets, self.posts = healthy_after, 0, []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _answer(self, status, body=b"{}"):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                fake.gets += 1
+                self._answer(200 if fake.gets > fake.healthy_after else 503)
+
+            def do_POST(self):
+                fake.posts.append((self.headers.get("Authorization"), json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                self._answer(200, b'{"choices": []}')
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+
+def test_wait_healthy_then_warm_up_the_base_and_every_adapter(serving):
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    server = FakeVLLMServer(healthy_after=2)
+    try:
+        common.wait_healthy(server.base, None, timeout_s=5, poll_s=0.01)
+        assert server.gets == 3
+        assert common.warm_up(server.base, plan, "k") == [TINY_NAME, "c0"]
+        assert [(auth, body["model"], body["temperature"]) for auth, body in server.posts] == [
+            ("Bearer k", TINY_NAME, 0.0), ("Bearer k", "c0", 0.0)]
+    finally:
+        server.server.shutdown()
+
+    class Exited:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    with pytest.raises(common.SettingsError, match="vllm exited with 1"):
+        common.wait_healthy("http://127.0.0.1:9", Exited(), timeout_s=5, poll_s=0.01)
+
+
+# ---------------------------------------------------------------- the SDK objects, offline
+
+def _dockerfile(image, version="2025.06"):
+    """The Dockerfile commands of every layer of an image, rendered offline by the pinned SDK (1.6.0)."""
+    from modal._utils.async_utils import synchronizer
+
+    layer, commands = synchronizer._translate_in(image), []
+    while layer is not None:
+        cells = dict(zip(layer._load.__code__.co_freevars, [c.cell_contents for c in layer._load.__closure__ or []]))
+        if cells.get("dockerfile_function") is not None:
+            commands = list(cells["dockerfile_function"](version).commands) + commands
+        parents = [d for d in layer._deps() if type(d).__name__ == "_Image"]
+        layer = parents[0] if parents else None
+    return commands
+
+
+def _spec(obj):
+    from modal._utils.async_utils import synchronizer
+
+    inner = synchronizer._translate_in(obj)
+    return (getattr(inner, "_service_function", None) or inner)._spec
+
+
+def _names(spec):
+    return ({path: repr(v) for path, v in spec.volumes.items()}, sorted(repr(s) for s in spec.secrets))
+
+
+@pytest.fixture
+def apps(serving, monkeypatch):
+    pytest.importorskip("modal")
+    for name in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    modules = ("modal_apps.serve_vllm", "modal_apps.train", "modal_apps.loadtest")
+    for name in modules:
+        sys.modules.pop(name, None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loaded = [importlib.import_module(name) for name in modules]
+    yield serving[1], loaded
+    for name in modules:
+        sys.modules.pop(name, None)
+
+
+def test_the_apps_build_their_objects_without_an_account(apps):
+    config, (serve, train, load) = apps
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # registered_functions: deprecated after 1.6, the pinned version
+        assert (serve.app.name, sorted(serve.app.registered_functions)) == (f"slm-bench-serve-{TINY_NAME}", ["Server", "download"])
+        assert (train.app.name, sorted(train.app.registered_functions)) == ("slm-bench-train", ["peft_reference", "train_adapter"])
+        assert (load.app.name, sorted(load.app.registered_functions)) == ("slm-bench-loadtest", ["run_aiperf"])
+    hf, adapters, vllm = ("modal.Volume.from_name('slm-bench-hf-cache')", "modal.Volume.from_name('slm-bench-adapters')",
+                          "modal.Volume.from_name('slm-bench-vllm-cache')")
+    key = ["modal.Secret.from_name('slm-bench-vllm-api-key')"]
+
+    server = _spec(serve.Server)
+    assert server.gpus == config["serving"]["gpu"] and server.cpu == config["serving"]["cpu"]
+    offline = "Secret.from_dict([HF_HUB_OFFLINE])"  # the server's env: weights only from the volume, never downloaded
+    assert _names(server) == ({common.HF_CACHE: hf, common.VLLM_CACHE: vllm, common.ADAPTERS: adapters}, sorted([offline, *key]))
+    assert _names(_spec(serve.download)) == ({common.HF_CACHE: hf}, [])
+    for fn in (train.train_adapter, train.peft_reference):
+        spec = _spec(fn)
+        assert spec.gpus == config["train"]["gpu"]
+        assert _names(spec) == ({common.HF_CACHE: hf, common.ADAPTERS: adapters}, [])
+    client = _spec(load.run_aiperf)
+    assert client.gpus is None and client.cpu == config["loadtest"]["client"]["cpu"]
+    assert _names(client) == ({common.HF_CACHE: hf}, key)
+    assert load.image is train.image  # the load client runs in the training image (AIPerf is pinned there)
+
+
+def test_the_images_install_the_locks_and_carry_the_plan(apps):
+    config, (serve, train, _) = apps
+    serve_commands = _dockerfile(serve.image)
+    assert serve_commands[0] == f"FROM {config['serving']['base_image']}"
+    assert any(f"--requirements /.uv/0/{common.SERVE_LOCK.name}" in c for c in serve_commands)
+    carried = next(c for c in serve_commands if c.startswith(f"ENV {common.ENV}="))
+    plan = json.loads(carried.split("=", 1)[1].strip("'"))["plan"]
+    assert plan == serve.PLAN and common.vllm_command(plan)[common.vllm_command(plan).index("--lora-modules") + 1].startswith("c0=")
+    train_commands = _dockerfile(train.image)
+    assert any(f"--requirements /.uv/0/{common.TRAIN_LOCK.name}" in c for c in train_commands)
+    assert json.loads(next(c for c in train_commands if c.startswith(f"ENV {common.ENV}=")).split("=", 1)[1].strip("'")) == train.SETTINGS
