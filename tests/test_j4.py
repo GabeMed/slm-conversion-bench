@@ -41,13 +41,23 @@ def test_discordance_difference_margin_and_power_from_the_paired_table():
     assert result["testable"] is True and result["noninferior"] is False
 
 
-def test_without_a_pilot_the_margin_comes_from_the_pairs_and_power_is_the_design_power():
+def test_without_a_pilot_there_is_no_preregistered_margin_and_no_verdict():
+    # SPEC 6.4 fixes the margin from the pilot before the test: a margin taken from the pairs being
+    # judged is descriptive only
     a, b = arms(300, 60, 40, 100)  # A ahead by 0.04
     result = noninferiority(a, b, 5, seed=1, n_boot=2000)
-    assert result["d_pilot"] is None
+    assert (result["d_pilot"], result["margin_from"], result["noninferior"]) == (None, "pairs", None)
     assert result["delta"] == pytest.approx(0.0497295, abs=1e-6)  # 2.4864749 * sqrt(0.20 / 500)
     assert result["power"] == pytest.approx(0.80, abs=1e-6)       # Phi(z0.80), by construction
-    assert result["ci_low"] == pytest.approx(0.04 - 0.0328, abs=0.005) and result["noninferior"] is True
+    assert result["ci_low"] == pytest.approx(0.04 - 0.0328, abs=0.005)
+    with_pilot = noninferiority(a, b, 5, seed=1, n_boot=2000, d_pilot=0.20)
+    assert (with_pilot["margin_from"], with_pilot["noninferior"]) == ("pilot", True)
+
+
+def test_a_bootstrap_needs_resamples():
+    a, b = arms(3, 1, 0, 1)
+    with pytest.raises(JudgeError, match="n_boot"):
+        noninferiority(a, b, 5, seed=1, n_boot=0, d_pilot=0.1)
 
 
 def test_the_bootstrap_quantile_against_the_exact_binomial():

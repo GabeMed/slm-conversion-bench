@@ -1,12 +1,14 @@
 """J4 · statistics (SPEC 6.4): is arm A non-inferior to arm B on the same questions?
 
 - d: the paired discordance, the fraction of questions exactly one of the two arms gets right;
-- Δ = (z0.95 + z0.80)·√(d/n), with d from the pilot when given (the SPEC fixes the margin before
+- Δ = (z0.95 + z0.80)·√(d/n), with d from the pilot (`d_pilot`: the SPEC fixes the margin before
   the test, from ~50 calibration questions) and n the number of paired questions; above
-  `delta_cap_pp` the comparison is "not testable with this n" (only descriptive);
+  `delta_cap_pp` the comparison is "not testable with this n" (only descriptive). Without a pilot,
+  Δ is computed from the pairs being judged, reported as such (`margin_from: "pairs"`), and gives
+  no verdict: a margin chosen after seeing the data is not the pre-registered one;
 - diff = EX_A − EX_B, and its one-sided 95% lower bound by a paired bootstrap with the question as
   the unit (resample questions, keep both arms' answers together);
-- non-inferior when that bound is above −Δ;
+- non-inferior when that bound is above −Δ (a pilot margin within the cap, else None);
 - power: of this test at a true difference of 0, with the discordance observed here,
   Φ(Δ/√(d/n) − z0.95). Without a pilot it is 0.80 by construction.
 
@@ -44,9 +46,11 @@ def noninferiority(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool],
                    seed: int, n_boot: int, *, d_pilot: Optional[float] = None) -> Dict[str, Any]:
     """A (the candidate) against B (the reference), paired by question_id: both must cover the
     same questions. `d_pilot` is the discordance measured on the pilot; without it the margin uses
-    the discordance of these pairs."""
+    the discordance of these pairs and there is no verdict (`noninferior` is None)."""
     if set(correct_a) != set(correct_b) or not correct_a:
         raise JudgeError("the two arms must be scored on the same questions, and on at least one")
+    if n_boot < 1:
+        raise JudgeError(f"n_boot must be at least 1, not {n_boot}")
     ids = sorted(correct_a)
     diffs = [int(bool(correct_a[q])) - int(bool(correct_b[q])) for q in ids]
     n = len(ids)
@@ -59,6 +63,8 @@ def noninferiority(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool],
         power = _Z.cdf(delta / math.sqrt(d / n) - _Z.inv_cdf(CONFIDENCE))
     else:  # the arms never disagree: the bound is 0, above -Δ exactly when Δ > 0
         power = 1.0 if delta > 0 else 0.0
+    verdict = rule["testable"] and d_pilot is not None
     return {"n": n, "a_only": a_only, "b_only": b_only, "d": d, "d_pilot": d_pilot,
+            "margin_from": "pairs" if d_pilot is None else "pilot",
             "delta": delta, "testable": rule["testable"], "diff": sum(diffs) / n, "ci_low": ci_low,
-            "noninferior": ci_low > -delta if rule["testable"] else None, "power": power}
+            "noninferior": ci_low > -delta if verdict else None, "power": power}
