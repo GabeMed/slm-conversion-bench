@@ -52,6 +52,7 @@ def test_aiperf_replays_a_runs_calls_against_llamacpp(tmp_path, monkeypatch):
     assert manifest["payloads_repeat"] is True  # two source calls cannot fill 4 requests without repeating
     assert manifest["served_model"]["id"] == config["roles"]["production_llm"]["model"]
     assert manifest["endpoint_kind"] == "llamacpp" and manifest["gpu"] is None
+    assert isinstance(manifest["observed"]["prompt_cache_read_pct"], (int, float))  # from llama.cpp's own usage
     export = json.loads((run_dir / "profile_export_aiperf.json").read_text())
     assert export["aiperf_version"].startswith("0.13.0")
     assert export["request_count"]["avg"] == 4 and export["was_cancelled"] is False

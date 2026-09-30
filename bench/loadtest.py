@@ -18,8 +18,10 @@ prefix cache holds only what real traffic shares, never an exact repeat carried 
 `--on modal` runs it in a Modal CPU container (`modal_apps/loadtest.py`) against the deployed vLLM server,
 so the client sits in the same cloud as the server. Either way it first waits for the server to list the
 model (a cold vLLM loads its weights first), records the model card the server lists (for an adapter, the
-path it was loaded from), and warms it up before measuring. The GPU and the prefix cache in the manifest
-are the configuration's (`serving`), which the OpenAI API cannot confirm.
+path it was loaded from), and warms it up before measuring. The manifest keeps what was configured
+(`gpu`, `prefix_cache`) apart from what was observed (`observed`): the GPUs the Modal server reports it
+got, and the share of prompt tokens the server says it read from its cache (AIPerf's
+`overall_usage_prompt_cache_read_pct`, from the servers' own `usage`).
 """
 import hashlib
 import json
@@ -137,6 +139,14 @@ def run_aiperf(run_dir: Path, cmd: List[str]) -> int:
 
 # ---------------------------------------------------------------- the execution
 
+def observed(run_dir: Path, server_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the run saw, not what was configured: the server's own GPUs (Modal only) and its cache reads."""
+    export = json.loads((run_dir / EXPORT).read_text()) if (run_dir / EXPORT).is_file() else {}
+    cache = export.get("overall_usage_prompt_cache_read_pct")
+    return {"gpus": (server_state or {}).get("gpus"), "vllm_command": (server_state or {}).get("vllm_command"),
+            "prompt_cache_read_pct": cache.get("avg") if isinstance(cache, dict) else cache}
+
+
 def _slug(engine: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", engine)
 
@@ -236,7 +246,8 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
             args = {"url": url, "model": spec["model"], "concurrency": level, "request_count": settings["request_count"],
                     "warmup": warmup, "tokenizer": tok, "timeout_s": settings["request_timeout_s"],
                     "stream": settings["stream"], "base_url": endpoint["base_url"],
-                    "ready_timeout_s": settings["ready_timeout_s"]}
+                    "ready_timeout_s": settings["ready_timeout_s"],
+                    "candidate": engine[len("slm:"):].partition("+lora:")[0] if engine.startswith("slm:") else None}
             status = "failed"
             try:
                 if remote:
@@ -245,8 +256,10 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                         (run_dir / rel).parent.mkdir(parents=True, exist_ok=True)
                         (run_dir / rel).write_bytes(content)
                     returncode, waited, card = result["returncode"], result["ready_after_s"], result["served_model"]
+                    server_state = result.get("server_state")
                 else:
                     waited, card = wait_ready(endpoint["base_url"], api_key, spec["model"], settings["ready_timeout_s"])
+                    server_state = None
                     warm_up(endpoint["base_url"], api_key, warmup, settings["request_timeout_s"])
                     cmd = aiperf_command(str(Path(sys.executable).parent / "aiperf"), url, spec["model"], level,
                                          settings["request_count"], tok, settings["request_timeout_s"],
@@ -254,7 +267,8 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                     returncode = run_aiperf(run_dir, cmd)
                 status = "done" if returncode == 0 and (run_dir / EXPORT).is_file() else "failed"
                 manifest.update({"aiperf_returncode": returncode, "ready_after_s": round(waited, 1),
-                                 "served_model": {k: card.get(k) for k in ("id", "root", "parent")}})
+                                 "served_model": {k: card.get(k) for k in ("id", "root", "parent")},
+                                 "observed": observed(run_dir, server_state)})
             except Exception as e:
                 manifest["stopped_by"] = f"{type(e).__name__}: {e}"
                 raise

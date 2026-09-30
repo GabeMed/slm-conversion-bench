@@ -12,7 +12,8 @@ GPU; it answers only requests carrying the key of the Modal secret `modal.secret
     modal deploy -m modal_apps.serve_vllm
 
 then set the candidate's `endpoint.base_url` to the printed URL + `/v1`, and its `endpoint.api_key_env` to
-a local variable holding the same key. Before any latency measurement the container warms itself up (a
+a local variable holding the same key. At start the container records the GPUs it got and the command it
+runs on the vLLM-cache volume (`bench-serving/<name>.json`), which the load test reads back. Before any latency measurement the container warms itself up (a
 request to the base and to each adapter) and AIPerf warms up again.
 """
 import json
@@ -66,6 +67,11 @@ class Server:
         base = f"http://127.0.0.1:{common.PORT}"
         common.wait_healthy(base, self.process, PLAN["startup_timeout_s"])
         common.warm_up(base, PLAN, os.environ.get("VLLM_API_KEY"), PLAN["warmup_timeout_s"])
+        smi = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
+        state = common.state_path(common.VLLM_CACHE, PLAN["name"])
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps(common.serving_state(PLAN, smi.stdout), indent=2))
+        vllm_cache.commit()  # the load client reads it: the GPU it measured is observed, not declared
 
     @modal.exit()
     def stop(self):

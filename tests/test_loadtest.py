@@ -186,7 +186,8 @@ def _fake_aiperf(returncode=0, calls=None):
         (calls if calls is not None else []).append((run_dir, cmd))
         assert (run_dir / "payloads.jsonl").is_file()
         if returncode == 0:
-            (run_dir / "profile_export_aiperf.json").write_text(json.dumps({"request_count": {"avg": 6}}))
+            (run_dir / "profile_export_aiperf.json").write_text(json.dumps(
+                {"request_count": {"avg": 6}, "overall_usage_prompt_cache_read_pct": {"unit": "%", "avg": 37.5}}))
         return returncode
     return run
 
@@ -206,6 +207,7 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     assert manifest["tokenizer"] == TINY and manifest["where"] == "local" and manifest["aiperf_returncode"] == 0
     assert manifest["run_id"].startswith(f"loadtest-slm_{TINY_NAME}_lora_c0-c1-")
     assert manifest["served_model"] == {"id": "c0", "root": "/adapters/c0", "parent": "base"}  # what the server said
+    assert manifest["observed"] == {"gpus": None, "vllm_command": None, "prompt_cache_read_pct": 37.5}
     levels = [[json.loads(line) for line in (d / "payloads.jsonl").read_text().splitlines()] for d in run_dirs]
     assert {p["model"] for p in levels[0]} == {"c0"} and levels[0][0]["max_tokens"] == 64
     # the warm-up calls (sent before each level), then level 1 and level 2 each on their own calls
@@ -268,7 +270,8 @@ def test_on_modal_the_client_runs_beside_the_server_and_its_artifacts_come_back(
     artifacts = {"profile_export_aiperf.json": b'{"request_count": {"avg": 6}}', "logs/aiperf.log": b"ok"}
     calls = fake_modal_app(monkeypatch, "loadtest", run_aiperf=lambda raw, args: {
         "returncode": 0, "ready_after_s": 42.0, "files": artifacts,
-        "served_model": {"id": "c0", "root": "/adapters/abc", "parent": TINY_NAME, "object": "model"}})
+        "served_model": {"id": "c0", "root": "/adapters/abc", "parent": TINY_NAME, "object": "model"},
+        "server_state": {"gpus": ["NVIDIA H200"], "vllm_command": ["vllm", "serve"], "revision": "r", "adapters": {}}})
     source = _source_run(calls=SOURCE)
     run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", source, "modal", concurrency=[8])
     (raw, args), = calls["run_aiperf"]
@@ -276,8 +279,10 @@ def test_on_modal_the_client_runs_beside_the_server_and_its_artifacts_come_back(
     endpoint = config["roles"]["slm_candidates"][-1]["endpoint"]
     assert (args["base_url"], args["url"], args["model"], args["concurrency"]) == (
         endpoint["base_url"], endpoint["base_url"][:-3], "c0", 8)
-    assert len(args["warmup"]) == 2 and calls["app.run"] == [{}]
+    assert len(args["warmup"]) == 2 and calls["app.run"] == [{}] and args["candidate"] == TINY_NAME
     assert (run_dirs[0] / "logs" / "aiperf.log").read_bytes() == b"ok"
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text())
     assert (manifest["where"], manifest["status"], manifest["ready_after_s"]) == ("modal", "done", 42.0)
     assert manifest["served_model"] == {"id": "c0", "root": "/adapters/abc", "parent": TINY_NAME}
+    assert manifest["gpu"] == config["serving"]["gpu"]  # configured...
+    assert manifest["observed"]["gpus"] == ["NVIDIA H200"]  # ...and what the server says it got

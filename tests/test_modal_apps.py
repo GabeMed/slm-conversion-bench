@@ -234,7 +234,7 @@ def test_the_apps_build_their_objects_without_an_account(apps):
         assert _names(spec) == ({common.HF_CACHE: hf, common.ADAPTERS: adapters}, [])
     client = _spec(load.run_aiperf)
     assert client.gpus is None and client.cpu == config["loadtest"]["client"]["cpu"]
-    assert _names(client) == ({common.HF_CACHE: hf}, key)
+    assert _names(client) == ({common.HF_CACHE: hf, common.VLLM_CACHE: vllm}, key)  # reads the server's state
     assert load.image is train.image  # the load client runs in the training image (AIPerf is pinned there)
 
 
@@ -288,3 +288,12 @@ def test_the_plan_id_changes_with_anything_the_training_depends_on(tmp_path, mon
     assert plan_id(plan) == plan_id(json.loads(json.dumps(plan)))
     assert plan_id(plan) != plan_id({**plan, "dataset": {**plan["dataset"], "sha256": "0" * 64}})
     assert plan_id(plan) != plan_id({**plan, "base": {**plan["base"], "revision": "b" * 40}})
+
+
+def test_the_server_records_the_gpus_it_got_and_what_it_runs(serving):
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    state = common.serving_state(plan, "NVIDIA H200\n\n")  # asked for H100, got H200 (infra.md: Modal may do this)
+    assert state["gpus"] == ["NVIDIA H200"] and state["vllm_command"] == common.vllm_command(plan)
+    assert state["adapters"] == {"c0": plan["adapters"][0]["sha256"]} and state["revision"] == TINY["revision"]
+    assert common.state_path("/root/.cache/vllm", TINY_NAME) == Path(f"/root/.cache/vllm/bench-serving/{TINY_NAME}.json")

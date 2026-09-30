@@ -22,6 +22,7 @@ HF_CACHE = "/root/.cache/huggingface"
 VLLM_CACHE = "/root/.cache/vllm"
 ADAPTERS = "/adapters"  # the adapters volume: one directory per adapter, named by its sha256_dir
 RESULTS = "results"     # beside them: <plan id>.json once a training finished, <plan id>.started while it runs
+STATE_DIR = "bench-serving"  # on the vLLM-cache volume: what each running server observed about itself
 PORT = 8000
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)  # vllm/config/lora.py:MaxLoRARanks @ v0.30.0
 SERVING_KEYS = ("vllm_version", "base_image", "gpu", "cpu", "max_model_len", "gpu_memory_utilization",
@@ -212,3 +213,15 @@ def store_training(root: str, plan_id: str, result: Dict[str, Any]) -> None:
     results = Path(root) / RESULTS
     (results / f"{plan_id}.json").write_text(json.dumps(result, sort_keys=True))
     (results / f"{plan_id}.started").unlink(missing_ok=True)
+
+
+def serving_state(plan: Dict[str, Any], nvidia_smi: str) -> Dict[str, Any]:
+    """What a serving container records about itself at start, for the executions that measure it: the
+    GPUs it actually got (Modal may substitute a type), the command it runs, the adapters it serves."""
+    return {"gpus": [line.strip() for line in nvidia_smi.splitlines() if line.strip()],
+            "vllm_command": vllm_command(plan), "revision": plan["revision"],
+            "adapters": {a["served_name"]: a["sha256"] for a in plan["adapters"]}}
+
+
+def state_path(root: str, name: str) -> Path:
+    return Path(root) / STATE_DIR / f"{name}.json"
