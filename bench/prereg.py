@@ -73,7 +73,11 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
         raise PreregError("the working tree has uncommitted changes: commit them, so the registration "
                           "hashes what the repository holds")
     config_file = (root / config_path).resolve()
+    if not config_file.is_relative_to(root):
+        raise PreregError(f"the configuration must be inside the repository, so the commit holds it: {config_path}")
     config = load_config(config_file)
+    if not isinstance((config.get("stats") or {}).get("n_boot"), int):
+        raise PreregError("the configuration has no stats.n_boot: the delta rule needs the bootstrap size")
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in barrier.REGISTERED.items()},
                 "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config)}

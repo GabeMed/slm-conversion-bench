@@ -110,6 +110,27 @@ def test_bench_data_records_the_gold_check_and_joins_difficulty(full_repo):
     assert data.run(full_repo) == summary  # rebuilding gives the same facts
 
 
+def test_bench_data_refuses_a_mini_dev_that_is_not_test_plus_exclusions(full_repo):
+    path = paths.RAW / "mini_dev.json"
+    items = json.loads(path.read_text())
+    items[-1]["question_id"] = 1600  # a Mini-Dev whose second exclusion is not the configured one
+    path.write_text(json.dumps(items))
+    config = {**full_repo, "data": {**full_repo["data"], "mini_dev": {**full_repo["data"]["mini_dev"], "sha256": sha256(path)}}}
+    with pytest.raises(DataError, match="Mini-Dev ids"):
+        data.run(config)
+
+
+def test_bench_data_does_not_rewrite_a_different_gold_check(full_repo):
+    data.run(full_repo)
+    manifest = json.loads(paths.DATA_MANIFEST.read_text())
+    manifest["gold_check"]["sqlite_version"] = "3.0.0"  # recorded elsewhere, with another SQLite
+    paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    before = paths.DATA_MANIFEST.read_bytes()
+    with pytest.raises(DataError, match="gold check differs"):
+        data.run(full_repo)
+    assert paths.DATA_MANIFEST.read_bytes() == before
+
+
 # ---------------------------------------------------------------- the real pinned inputs
 
 REAL = all((paths.RAW / f"{name}.json").exists() for name in ("bird_dev_questions", "plat_sql_test", "mini_dev"))

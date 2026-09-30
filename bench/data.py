@@ -204,6 +204,13 @@ def run(config: dict) -> dict:
                  "test": sorted(test, key=lambda q: int(q["question_id"]))}
     gold_check = check_golds(questions, lambda db_id: paths.sqlite_path(config, db_id),
                              config["eval"]["timeout_s"], fixed_date(config))
+    if paths.DATA_MANIFEST.exists():
+        recorded_check = json.loads(paths.DATA_MANIFEST.read_text()).get("gold_check")
+        if recorded_check is not None and recorded_check != gold_check:
+            changed = sorted(k for k in set(recorded_check) | set(gold_check) if recorded_check.get(k) != gold_check.get(k))
+            raise DataError(f"the gold check differs from data/MANIFEST.json in {changed} (another SQLite or a slower "
+                            f"machine?); data/MANIFEST.json is left as recorded. Remove its gold_check to record it "
+                            f"anew, on purpose: the pre-registration hashes this file")
     manifest = {"inputs": inputs, "databases": db_hashes, "gold_check": gold_check}
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     paths.SPLITS.write_text(json.dumps(splits, indent=1) + "\n")

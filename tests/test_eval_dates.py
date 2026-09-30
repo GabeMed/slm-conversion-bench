@@ -3,7 +3,9 @@
 and the machine's time zone, and every result says whether a substitution happened. Golds with
 LIMIT are flagged too, for the sensitivity analysis."""
 import datetime
+import os
 import sqlite3
+import time
 
 import pytest
 
@@ -30,6 +32,10 @@ def test_the_fixed_date_is_preregistered_as_an_iso_date_string():
     ("SELECT date(), datetime( ), julianday(), unixepoch(), time()",
      f"SELECT date({STAMP}), datetime({STAMP}), julianday({STAMP}), unixepoch({STAMP}), time({STAMP})"),
     ("SELECT strftime('%Y') - strftime('%Y', dob)", f"SELECT strftime('%Y', {STAMP}) - strftime('%Y', dob)"),
+    ('SELECT strftime("%Y") - 1', f'SELECT strftime("%Y", {STAMP}) - 1'),
+    # an apostrophe inside a comment opens no string literal
+    ("SELECT -- the member's age\n STRFTIME('%Y', 'now') /* it's */ - CURRENT_DATE",
+     f"SELECT -- the member's age\n STRFTIME('%Y', {STAMP}) /* it's */ - '{DAY}'"),
 ])
 def test_now_and_its_synonyms_become_the_fixed_date(sql, expected):
     assert fix_date(sql, DAY) == (expected, True)
@@ -39,6 +45,7 @@ def test_now_and_its_synonyms_become_the_fixed_date(sql, expected):
     "SELECT 'CURRENT_DATE', 'now()', 'right now', \"CURRENT_TIMESTAMP\" FROM t",  # literals and identifiers
     "SELECT current_dates, my_date() FROM [current_date] WHERE x LIKE '%now%'",
     "SELECT date(dob), strftime('%Y', dob) FROM t",
+    "SELECT dob FROM t -- as of CURRENT_DATE, i.e. date('now')\n",
 ])
 def test_only_the_current_moment_is_substituted(sql):
     assert fix_date(sql, DAY) == (sql, False)
@@ -70,9 +77,25 @@ def test_prediction_and_gold_both_see_the_fixed_date(db):
     assert results["3"]["gold_sql"] == "SELECT CURRENT_DATE"  # the record keeps the SQL as written
 
 
-def test_the_machine_time_zone_does_not_move_the_date(db, monkeypatch):
+@pytest.fixture
+def west_of_greenwich():
+    """The process in a zone behind UTC, applied with tzset (glibc's localtime_r reads it only then),
+    and restored the same way so no later test inherits it."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Sao_Paulo"
+    time.tzset()
+    yield
+    if previous is None:
+        del os.environ["TZ"]
+    else:
+        os.environ["TZ"] = previous
+    time.tzset()
+
+
+def test_the_machine_time_zone_does_not_move_the_date(db, west_of_greenwich):
     # at midnight UTC, 'localtime' west of Greenwich is the day before: the evaluator pins UTC
-    monkeypatch.setenv("TZ", "America/Sao_Paulo")
+    assert sqlite3.connect(":memory:").execute("SELECT date('2026-01-01 00:00:00', 'localtime')").fetchone() == \
+        ("2025-12-31",)  # the zone is in force outside the evaluator
     gold = {"1": {"db_id": "t", "SQL": "SELECT date('now')"}}
     results = score({"1": "SELECT date('now', 'localtime')"}, gold, lambda _: db, 5, "2026-01-01")
     assert results[0]["correct"] is True
@@ -84,6 +107,7 @@ def test_the_machine_time_zone_does_not_move_the_date(db, monkeypatch):
     ("SELECT name FROM t ORDER BY dob DESC LIMIT 1", True),
     ("select name from t order by dob limit 1 offset 2", True),
     ("SELECT 'no LIMIT here' FROM t", False),
+    ("SELECT name FROM t -- LIMIT 1 would be wrong", False),
     ("SELECT name FROM t", False),
 ])
 def test_golds_with_limit_are_flagged(sql, expected):

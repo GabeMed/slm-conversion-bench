@@ -22,12 +22,16 @@ from bench.contracts.calls import read_calls, validate_calls
 from bench.contracts.config import config_sha256
 from bench.provenance import git_state
 
-# String literals and quoted identifiers come first, so nothing inside them is ever rewritten.
-_QUOTED = r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|`[^`]*`|\[[^\]]*\]"
+# Comments, string literals and quoted identifiers come first, so nothing inside them is rewritten
+# (and an apostrophe in a comment opens no literal).
+_STRING = r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\""
+_QUOTED = r"--[^\n]*|/\*.*?(?:\*/|$)|" + _STRING + r"|`[^`]*`|\[[^\]]*\]"
 _NOW = re.compile(_QUOTED + r"|\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b"
                   r"|\b(?:date|time|datetime|julianday|unixepoch)\s*\(\s*\)"  # no argument: SQLite reads 'now'
-                  r"|\bstrftime\s*\(\s*'(?:[^']|'')*'\s*\)", re.IGNORECASE)  # a format only: 'now' as well
-_LIMIT = re.compile(_QUOTED + r"|\bLIMIT\b", re.IGNORECASE)
+                  r"|\bstrftime\s*\(\s*(?:" + _STRING + r")\s*\)",  # a format only: 'now' as well
+                  re.IGNORECASE | re.DOTALL)
+_LIMIT = re.compile(_QUOTED + r"|\bLIMIT\b", re.IGNORECASE | re.DOTALL)
+_SKIPPED = ("'", '"', "`", "[", "--", "/*")
 
 
 def fixed_date(config: Dict[str, Any]) -> str:
@@ -50,7 +54,7 @@ def fix_date(sql: str, day: str) -> Tuple[str, bool]:
     def replace(match: "re.Match[str]") -> str:
         nonlocal replaced
         token = match.group(0)
-        if token[0] in "'\"`[":
+        if token.startswith(_SKIPPED):
             if token[0] in "'\"" and token[1:-1].lower() == "now":
                 replaced = True
                 return stamp
@@ -64,7 +68,7 @@ def fix_date(sql: str, day: str) -> Tuple[str, bool]:
 
 def gold_has_limit(sql: str) -> bool:
     """LIMIT outside string literals: ties at the cut can make a right answer look wrong, for every arm."""
-    return any(m.group(0)[0] not in "'\"`[" for m in _LIMIT.finditer(sql))
+    return any(not m.group(0).startswith(_SKIPPED) for m in _LIMIT.finditer(sql))
 
 
 @contextmanager
@@ -190,7 +194,8 @@ def _write(kind: str, source_run_id: str, run_manifest: Dict[str, Any], config: 
     recorded = json.loads(paths.DATA_MANIFEST.read_text())["databases"]
     manifest = {
         "run_id": run_id, "type": "eval", **extra, "source_run_id": source_run_id,
-        "source_type": run_manifest.get("type"), "arm": run_manifest.get("arm"), "split": run_manifest["split"],
+        "source_type": run_manifest.get("type"), "arm": run_manifest.get("arm"), "engine": run_manifest.get("engine"),
+        "mode": run_manifest.get("mode"), "split": run_manifest["split"],
         **git_state(), "source_commit": run_manifest["commit"], "config_sha256": run_manifest["config_sha256"],
         "prereg_hash": run_manifest.get("prereg_hash"),
         "fixed_date": day, "timeout_s": config["eval"]["timeout_s"], "sqlite_version": sqlite3.sqlite_version,
@@ -251,7 +256,9 @@ def evaluate_per_call(source_run_id: str) -> Path:
         raise data.DataError(f"the calls.jsonl of {source_run_id} is not valid C1: {errors[:3]}")
     entries = per_call_predictions(calls)
     in_run = run_manifest.get("question_ids")
-    if in_run is not None and not {e["question_id"] for e in entries} <= set(in_run):
+    if in_run is None:
+        raise data.DataError(f"the manifest of {source_run_id} does not list its question ids")
+    if not {e["question_id"] for e in entries} <= set(in_run):
         raise data.DataError(f"calls of {source_run_id} for questions outside its question ids")
     databases = _check_paired([e["question_id"] for e in entries], gold, config, run_manifest["split"])
 
@@ -268,5 +275,4 @@ def evaluate_per_call(source_run_id: str) -> Path:
                             "call_id": entry["call_id"], "attempt": entry["attempt"],
                             **{k: v for k, v in result.items() if k not in ("question_id", "correct")}})
         return results
-    return _write("eval-per-call", source_run_id, run_manifest, config, databases, score_calls, per_call=True,
-                  engine=run_manifest.get("engine"))
+    return _write("eval-per-call", source_run_id, run_manifest, config, databases, score_calls, per_call=True)

@@ -145,6 +145,15 @@ def test_evaluate_scores_a_finished_run(repo):
     assert manifest["fixed_date"] == repo[2]["eval"]["fixed_date"] and manifest["sqlite_version"] == sqlite3.sqlite_version
 
 
+def test_evaluate_records_the_engine_of_a_single_call_run(repo):
+    run_id = _finished_run(repo)
+    manifest_path = paths.RUNS / run_id / "manifest.json"
+    manifest_path.write_text(json.dumps({**json.loads(manifest_path.read_text()), "arm": "B2", "mode": "single_call",
+                                         "engine": "cheap_alt"}))
+    manifest = json.loads((evaluate(run_id) / "manifest.json").read_text())
+    assert (manifest["arm"], manifest["engine"], manifest["mode"]) == ("B2", "cheap_alt", "single_call")
+
+
 def test_evaluate_uses_the_runs_configuration_not_todays(repo):
     run_id = _finished_run(repo)
     (repo[0] / "config.yaml").write_text("changed: after the run\n")  # e.g. a fact pointed at in `arms`
