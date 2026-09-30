@@ -101,6 +101,14 @@ def test_the_lower_bound_is_the_500th_smallest_of_10000():
     assert lower_quantile(values) == 0.0499
     assert lower_quantile([i / 20000 for i in range(20000)]) == 0.04995  # the 1000th, not the 1001st
     assert lower_quantile([3.0, 1.0, 2.0]) == 1.0                       # ceil(0.15) = 1: the smallest
+    assert lower_quantile(list(range(30))) == 1                         # ceil(1.5) = 2: the 2nd, not the 1st
+
+
+def test_the_bootstrap_bound_is_that_quantile(monkeypatch):
+    from bench.judge import j4
+    monkeypatch.setattr(j4, "lower_quantile", lambda values: -0.123)
+    a, b = arms(30, 6, 4, 10)
+    assert noninferiority(a, b, 5, seed=1, n_boot=40, d_pilot=0.1)["ci_low"] == -0.123
 
 
 def test_a_given_margin_is_used_as_is():
@@ -111,6 +119,7 @@ def test_a_given_margin_is_used_as_is():
     # Phi(0.0176173 / sqrt(0.20 / 500) - 1.6448536) = Phi(0.8808650 - 1.6448536) = Phi(-0.7639886) = 0.2224
     assert result["power"] == pytest.approx(0.2224, abs=1e-4)
     assert result["noninferior"] is True  # ci_low about 0.0072 > -0.0176
+    assert noninferiority(a, b, 5, seed=1, n_boot=200, margin=0.05)["delta"] == 0.05  # the cap itself is allowed
 
 
 @pytest.mark.parametrize("kwargs", [{"margin": -0.001}, {"margin": 0.0501}, {"d_pilot": -0.01}, {"d_pilot": 1.01},

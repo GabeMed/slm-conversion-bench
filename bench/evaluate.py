@@ -44,9 +44,12 @@ def fixed_date(config: Dict[str, Any]) -> str:
     """The pre-registered date, refused when unset: without it, EX would depend on the day of the eval."""
     value = config["eval"].get("fixed_date")
     try:
-        return date.fromisoformat(value).isoformat()
+        day = date.fromisoformat(value).isoformat()
     except (TypeError, ValueError):
+        day = None
+    if day is None or day != value:  # also refuses what Python would normalise (20260930, 2026-W40-3)
         raise data.DataError(f"eval.fixed_date must be a pre-registered YYYY-MM-DD string, not {value!r}")
+    return day
 
 
 def fix_date(sql: str, day: str) -> Tuple[str, bool]:
@@ -124,7 +127,7 @@ def score_one(question: Dict[str, Any], predicted: Optional[str], path: Path, ti
     """One prediction against the gold of its own question, both at the fixed date; `gold` is the
     question's `run_gold`, when already executed in this eval."""
     executed_at = datetime.now(timezone.utc).isoformat()
-    gold_rows, gold_error, gold_substituted = gold or run_gold(question, path, timeout_s, day)
+    gold_rows, gold_error, gold_substituted = gold if gold is not None else run_gold(question, path, timeout_s, day)
     pred_substituted = False
     if predicted is None:
         pred_rows, pred_error = None, "no prediction"

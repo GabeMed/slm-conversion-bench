@@ -53,7 +53,8 @@ def _config_chain(config_file: Path) -> List[Path]:
 
 
 def _check_committed(root: Path, chain: List[Path]) -> None:
-    """Every file of the chain must be what the registration commit holds."""
+    """Every file of the chain must be what the registration commit holds: inside the repository,
+    tracked, not matched by .gitignore; a modified one is already refused by the clean-tree check."""
     for path in chain:
         if not path.is_relative_to(root):
             raise PreregError(f"{path.name} is outside the repository: the commit cannot hold the configuration")
@@ -62,8 +63,6 @@ def _check_committed(root: Path, chain: List[Path]) -> None:
             raise PreregError(f"{rel} is not tracked: the commit would not hold the configuration")
         if _git_ok(root, "check-ignore", "-q", "--no-index", "--", rel):
             raise PreregError(f"{rel} is ignored by git: a configuration file must not be")
-        if not _git_ok(root, "diff", "--quiet", "HEAD", "--", rel):
-            raise PreregError(f"{rel} has uncommitted changes")
 
 
 def _sha256(path: Path) -> str:
@@ -110,8 +109,6 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
         raise PreregError("the working tree has uncommitted changes: commit them, so the registration "
                           "hashes what the repository holds")
     config_file = (root / config_path).resolve()
-    if not config_file.is_relative_to(root):
-        raise PreregError(f"the configuration must be inside the repository, so the commit holds it: {config_path}")
     _check_committed(root, _config_chain(config_file))
     config = load_config(config_file)
     for key in ("n_boot", "pilot_size"):

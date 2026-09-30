@@ -24,6 +24,15 @@ def test_the_fixed_date_is_preregistered_as_an_iso_date_string():
     assert datetime.date.fromisoformat(fixed).isoformat() == fixed
 
 
+@pytest.mark.parametrize("value", [None, "", "2026-9-30", "20260930", "2026-W40-3", "2026-09-30T00:00"])
+def test_the_fixed_date_must_be_a_plain_iso_date(value):
+    from bench.data import DataError
+    from bench.evaluate import fixed_date
+    with pytest.raises(DataError, match="fixed_date"):
+        fixed_date({"eval": {"fixed_date": value}})
+    assert fixed_date({"eval": {"fixed_date": "2026-09-30"}}) == "2026-09-30"
+
+
 @pytest.mark.parametrize("sql,expected", [
     ("SELECT STRFTIME('%Y', CURRENT_TIMESTAMP)", f"SELECT STRFTIME('%Y', {STAMP})"),
     ("SELECT current_date, CURRENT_TIME", f"SELECT '{DAY}', '00:00:00'"),

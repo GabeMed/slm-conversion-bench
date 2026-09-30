@@ -17,7 +17,8 @@ from bench.judge import j4
 from bench.prereg import PreregError, register
 from synthetic import make_repo, sha256
 
-CONFIG = load_config(paths.ROOT / "config.yaml")
+# distinct seeds, so reading one seed key for another shows (config.yaml gives all three one value)
+CONFIG = {**load_config(paths.ROOT / "config.yaml"), "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303}}
 
 
 def git(cwd, *args):
@@ -102,7 +103,7 @@ def test_registering_again_changes_nothing_and_replacing_needs_asking(repo):
 def test_register_refuses_a_configuration_outside_the_repository_or_without_stats(repo, tmp_path):
     outside = tmp_path / "elsewhere.yaml"
     outside.write_text(yaml.safe_dump(CONFIG))
-    with pytest.raises(PreregError, match="inside the repository"):
+    with pytest.raises(PreregError, match="outside the repository"):
         register(str(outside), root=repo)
     (repo / "config.yaml").write_text(yaml.safe_dump({k: v for k, v in CONFIG.items() if k != "stats"}))
     git(repo, "commit", "-q", "-am", "no stats")

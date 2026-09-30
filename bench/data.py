@@ -9,6 +9,7 @@ the Mini-Dev, which Arcwise-Plat-SQL does not have.
 import hashlib
 import json
 import shutil
+import sqlite3
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -218,10 +219,13 @@ def run(config: dict) -> dict:
     recorded = json.loads(paths.DATA_MANIFEST.read_text()) if paths.DATA_MANIFEST.exists() else {}
     if "gold_check" in recorded:
         if _gold_identity(recorded["gold_check"]) != _gold_identity(registered):
-            raise DataError(f"the gold check differs from data/MANIFEST.json: golds failing with an execution error "
-                            f"{_gold_identity(recorded['gold_check'])} recorded, {_gold_identity(registered)} now. "
-                            f"data/MANIFEST.json is left as recorded; remove its gold_check and gold_observed to "
-                            f"record them anew, on purpose: the pre-registration hashes this file")
+            then = (recorded.get("gold_observed") or {}).get("sqlite_version")
+            raise DataError(f"the gold check differs from data/MANIFEST.json: (fixed date, golds checked, golds failing "
+                            f"with an execution error) {_gold_identity(recorded['gold_check'])} recorded, "
+                            f"{_gold_identity(registered)} now; SQLite {then} then, {sqlite3.sqlite_version} now. "
+                            f"data/MANIFEST.json is left as recorded. If the SQLite here lacks what the golds use, "
+                            f"use another; if the data changed on purpose, remove gold_check and gold_observed to "
+                            f"record them anew: the pre-registration hashes this file")
         # the same fact: keep the file byte for byte (an error's wording and this machine's observations may differ)
         registered, observed = recorded["gold_check"], recorded.get("gold_observed", observed)
     manifest = {"inputs": inputs, "databases": db_hashes, "gold_check": registered, "gold_observed": observed}

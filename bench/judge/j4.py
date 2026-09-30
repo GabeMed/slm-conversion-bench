@@ -45,7 +45,7 @@ def lower_quantile(values: list) -> float:
     """The inverted-CDF quantile at 1 − CONFIDENCE: the k-th smallest value, k = ⌈len·α⌉ in integers."""
     ordered = sorted(values)
     k = -(-len(ordered) * _ALPHA.numerator // _ALPHA.denominator)
-    return ordered[max(k, 1) - 1]
+    return ordered[k - 1]
 
 
 def _lower_bound(diffs: list, seed: int, n_boot: int) -> float:
@@ -59,8 +59,10 @@ def noninferiority(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool],
                    margin: Optional[float] = None) -> Dict[str, Any]:
     """A (the candidate) against B (the reference), paired by question_id: both must cover the
     same questions. `d_pilot` is the discordance measured on the pilot, in [0, 1]; `margin`, in EX
-    units within [0, delta_cap_pp / 100], is used as is instead. With neither, the margin uses the
-    discordance of these pairs and there is no verdict (`noninferior` is None)."""
+    units within [0, delta_cap_pp / 100], is used as is instead, and is testable by construction: a
+    caller deriving it (J7's Δ(498)/2) checks first that the Δ it came from is within the cap
+    (`margin(...)["testable"]`), or the comparison is not testable (SPEC 6.4). With neither, the
+    margin uses the discordance of these pairs and there is no verdict (`noninferior` is None)."""
     if set(correct_a) != set(correct_b) or not correct_a:
         raise JudgeError("the two arms must be scored on the same questions, and on at least one")
     if n_boot < 1:

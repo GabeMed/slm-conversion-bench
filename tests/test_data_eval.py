@@ -11,7 +11,7 @@ import pytest
 from bench import data, paths
 from bench.agent.runner import final_sql, run_agent
 from bench.barrier import TestSplitLocked
-from bench.contracts.config import config_sha256, load_config  # noqa: F401
+from bench.contracts.config import config_sha256, load_config
 from bench.data import DataError, build_splits, calib_sample, pilot_sample
 from bench.evaluate import evaluate, execute, score
 from synthetic import GOLD, make_repo

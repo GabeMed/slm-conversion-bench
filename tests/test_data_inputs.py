@@ -142,14 +142,21 @@ def test_what_another_machine_observes_neither_refuses_nor_rewrites(full_repo):
     assert paths.DATA_MANIFEST.read_bytes() == before  # the registered file keeps its hash
 
 
-def test_a_changed_set_of_failing_golds_is_refused(full_repo):
+@pytest.mark.parametrize("recorded", [
+    {"errors": []},                                            # recorded when gold 7 still executed
+    {"fixed_date": "2025-01-01"},                              # recorded under another fixed date
+    {"checked": {"train": 834, "calib": 200, "test": 497}},   # recorded over other questions
+])
+def test_a_changed_gold_check_is_refused(full_repo, recorded):
     data.run(full_repo)
     manifest = json.loads(paths.DATA_MANIFEST.read_text())
-    manifest["gold_check"]["errors"] = []  # recorded when gold 7 still executed
+    manifest["gold_check"].update(recorded)
+    manifest["gold_observed"]["sqlite_version"] = "3.31.0"
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     before = paths.DATA_MANIFEST.read_bytes()
-    with pytest.raises(DataError, match="gold check differs"):
+    with pytest.raises(DataError, match="gold check differs") as refused:
         data.run(full_repo)
+    assert f"SQLite 3.31.0 then, {sqlite3.sqlite_version} now" in str(refused.value)  # a suspect worth naming
     assert paths.DATA_MANIFEST.read_bytes() == before
 
 
