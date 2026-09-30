@@ -72,6 +72,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from bench import paths
 from bench.contracts.concordance import GOLD_CALL_SITES as GOLD_SITES
 from bench.contracts.facts import read_fact
+from bench.contracts.router import ARM_FACTS
 from bench.provenance import scrub
 from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
                               run_dir)
@@ -139,7 +140,7 @@ def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callabl
     return plain(noninferiority({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids}, *settings))["d"]
 
 
-NEEDS = {"B3": ("choice",), "B4": ("choice", "centroids", "adapters"), "B5": ("choice", "centroids", "adapters", "allocation")}
+NEEDS = ARM_FACTS  # the facts each trained arm runs on (C4)
 FACT_SOURCE = {"choice": "j6", "centroids": "j5", "adapters": "j7 or plan.adapters", "allocation": "j7"}
 
 
@@ -210,8 +211,11 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
     if reads.get("per_call"):
         entry, replay_several = bind("the per-call evaluation", reads["per_call"]["replay"]["run_id"])
         facts_of("the per-call evaluation's replay (routed as B4)", entry, NEEDS["B4"])
-        if "B0" in arms and reads["per_call"]["teacher"]["run_id"] != arms["B0"]["run_id"]:
+        teacher = reads["per_call"]["teacher"]["run_id"]
+        if "B0" in arms and teacher != arms["B0"]["run_id"]:
             raise JudgmentError("the per-call evaluation replays another teacher run than the plan's B0")
+        _, teacher_several = bind("the per-call evaluation's teacher", teacher)  # bound even with no B0 arm
+        replay_several = sorted(set((replay_several or []) + (teacher_several or []))) or None
     pilots = dict(pilot_plan)
     if judged.get("j6") and reads.get("j6"):
         zeroshot = reads["j6"].get(judged["j6"]["choice"]) or {}
@@ -278,9 +282,17 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     per_call = judged["per_call"]
     if per_call and (per_call.get("mode"), per_call.get("arm"), per_call.get("split")) != ("replay", "B4", split):
         raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
+    if judged["j7"]:
+        if (reads["j7"].get("j8") or {}).get("sha256") != (sources.get("j8") or {}).get("sha256"):
+            raise JudgmentError("the plan's J7 ordered engines by another load test than the plan's j8")
+        j7_prices = judged["j7"].get("prices") or {}
+        if arms and (j7_prices.get("as_of"), j7_prices.get("sha256")) not in tables:
+            raise JudgmentError("the plan's J7 ordered engines by another price table than the arms were priced with")
     registry = test_registry()
     replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged))
-    coverage = None if not per_call else per_call.get("call_sites")
+    if per_call and "call_sites" not in per_call:
+        raise JudgmentError("the per-call J2 result does not record which call sites the replay covered")
+    coverage = None if not per_call else per_call["call_sites"]
     uncovered = sorted(set(ROUTINE + GOLD_SITES) - set(coverage)) if coverage is not None else []
 
     settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
@@ -310,8 +322,9 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         if ids:
             d = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
                                      {q: gold["by_question"]["teacher"][q] for q in ids}, *settings))["d"]
+        several = sorted(set((replay_several or []) + ((arms.get("B0") or {}).get("several_runs") or []))) or None
         gold_tests[site] = {**plain(noninferiority(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
-                                                   *settings, d_pilot=d)), "several_runs": replay_several}
+                                                   *settings, d_pilot=d)), "several_runs": several}
     utilizations_cfg = [f"{round(u * 100)}%" for u in config["cost"]["utilizations"]]
     return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int),
             "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"), "per_call_uncovered": uncovered,
@@ -354,6 +367,16 @@ def outcome(test: Optional[Dict[str, Any]]) -> str:
 def _several(data, *tests) -> Optional[str]:
     runs = sorted({r for t in tests if t for r in (t.get("several_runs") or [])})
     return f"no verdict (several test runs of one configuration: {', '.join(runs)})" if runs else None
+
+
+def several_of(data, arms: List[str]) -> Optional[str]:
+    """No verdict, naming them, when any of these arms' configurations has several registered test
+    runs (SPEC 6.1): the one reading every row that rests on an arm's test run uses."""
+    named = [a for a in dict.fromkeys(arms) if a and (data["arms"].get(a) or {}).get("several_runs")]
+    if not named:
+        return None
+    runs = sorted({r for a in named for r in data["arms"][a]["several_runs"]})
+    return f"no verdict (several test runs of one configuration of {', '.join(named)}: {', '.join(runs)})"
 
 
 def _cost(data, arm, u) -> Optional[float]:
@@ -407,10 +430,9 @@ def cost_verdict(data, verdict: str, arms: List[str]) -> str:
     the labels of every arm's cost; inconclusive when any rests on an upper-bound cost, unless the
     verdict is already no data or no verdict."""
     arms = [a for a in dict.fromkeys(arms) if a]
-    runs = sorted({r for a in arms for r in (data["arms"].get(a, {}).get("several_runs") or [])})
-    if runs:
-        named = [a for a in arms if data["arms"].get(a, {}).get("several_runs")]
-        return f"no verdict (several test runs of one configuration of {', '.join(named)}: {', '.join(runs)})"
+    several = several_of(data, arms)
+    if several:
+        return several
     labels = cost_labels(data, arms)
     if any(label.startswith("upper bound") for label in labels) and not verdict.startswith(("no data", "no verdict")):
         verdict = "inconclusive (rests on an upper-bound cost)"
@@ -461,7 +483,8 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
                  "result": (f"B5 replaceable: {_pct(fraction['calls'])} of calls, {_pct(fraction['tokens'])} of tokens, "
                             f"{_pct(fraction['cost_at_production_price'])} of cost; B5 against B0: {outcome(t5)}")
                  if fraction else "—",
-                 "verdict": "descriptive (the SPEC fixes no number for 'high')" if fraction else "no data", "power": "—"})
+                 "verdict": (several_of(data, ["B5", "B0"]) or "descriptive (the SPEC fixes no number for 'high')")
+                 if fraction else "no data", "power": "—"})
 
     rows.append(_appendix_b(data))
     rows.append(_a5(data))
@@ -519,7 +542,8 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
                  if j5 else "—",
                  "verdict": "descriptive" if j5 else "no data", "power": "—"})
     rows.append({"claim": "AV1: a same-generation LLM always wins (p.7)",
-                 "result": f"B4 − B0: {_pp(t4['diff'])}" if t4 else "—", "verdict": "descriptive (not a direct test)" if t4 else "no data",
+                 "result": f"B4 − B0: {_pp(t4['diff'])}" if t4 else "—",
+                 "verdict": (several_of(data, ["B4", "B0"]) or "descriptive (not a direct test)") if t4 else "no data",
                  "power": "—"})
     return rows
 
@@ -533,7 +557,7 @@ def _a5(data) -> Dict[str, str]:
     worse = [s for s in sites if b4f[s]["rate"] < b0f[s]["rate"]]
     result = ("B4 below B0 on " + ", ".join(f"{s} ({_pct(b4f[s]['rate'])} vs {_pct(b0f[s]['rate'])})" for s in worse)
               if worse else f"B4 at least B0 on all {len(sites)} call sites")
-    return {**row, "result": result, "verdict": "refutes" if worse else "confirms"}
+    return {**row, "result": result, "verdict": several_of(data, ["B4", "B0"]) or ("refutes" if worse else "confirms")}
 
 
 def _appendix_b(data) -> Dict[str, str]:
@@ -749,7 +773,7 @@ def render(data: Dict[str, Any]) -> str:
         if a:
             costs = ", ".join(f"{u + ': ' if u else ''}{_usd(c)}" for u, c in
                               sorted(a["cost_per_correct"].items(), key=lambda kv: float(kv[0].rstrip("%") or 0)))
-            labels = cost_labels(data, [arm])
+            labels = [label for label in cost_labels(data, [arm]) if not label.startswith("estimated")]
             usage = a["cost_label"] + (f"; {'; '.join(labels)}" if labels else "")
             rows.append([arm, a["n"], _pct(a["ex"])] + [_pct(a["by_difficulty"].get(d)) for d in difficulties]
                         + [costs, usage])

@@ -215,13 +215,26 @@ def test_run_curate_refuses_overlapping_sources_and_a_changed_snapshot(tmp_path,
 
 def test_curation_runs_the_sql_at_the_pre_registered_date(tmp_path, monkeypatch):
     _, config_path, config = make_repo(tmp_path, monkeypatch)
-    today = "SELECT id FROM gas_t WHERE date('now') = '2026-09-30'"  # rows only on the fixed date
+    today = "SELECT id FROM gas_t WHERE date('now') = '2001-02-03'"  # rows only on the fixed date, far from any run
     calls = [call("agent-d", "1", "generate_candidate", "t:0", response=today, parsed={"SQL": today})]
     fixed = teacher_config(config)
-    assert fixed["eval"]["fixed_date"] == "2026-09-30"
+    fixed["eval"]["fixed_date"] = "2001-02-03"
     out = run_curate([b0_train_run(fixed, "agent-d", calls)], str(config_path))
     assert [e["question_id"] for e in read_jsonl(out / "examples.jsonl")] == ["1"]
     undated = json.loads(json.dumps(fixed))
     undated["eval"]["fixed_date"] = None
-    with pytest.raises(CurationError, match="no eval.fixed_date"):
+    with pytest.raises(CurationError, match="eval.fixed_date must be"):
         run_curate([b0_train_run(undated, "agent-u", calls)], str(config_path))
+
+
+def test_sources_run_under_different_fixed_dates_are_refused(tmp_path, monkeypatch):
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    first = teacher_config(config)
+    other = json.loads(json.dumps(first))
+    other["eval"]["fixed_date"] = "2001-02-03"
+    one = [call("agent-1", "1", "select_tables", parsed={"table_names": ["gas_t"]})]
+    two = [call("agent-2", "2", "select_tables", parsed={"table_names": ["gas_t"]})]
+    a = b0_train_run(first, "agent-1", one, question_ids=["1"])
+    b = b0_train_run(other, "agent-2", two, question_ids=["2"])
+    with pytest.raises(CurationError, match="different fixed dates"):
+        run_curate([a, b], str(config_path))

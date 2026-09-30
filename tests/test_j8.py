@@ -104,4 +104,6 @@ def test_naming_a_sweep_never_drops_an_engine_with_one(tmp_path, monkeypatch):
     assert result["combined"]["sweeps"] == ["sweep-c0-b", "sweep-c1"]
     with pytest.raises(JudgmentError, match="name exactly one"):
         j8.run(runs, config, sweeps=["sweep-c0-a", "sweep-c0-b"])
+    with pytest.raises(JudgmentError, match="no load test given is of the sweeps named"):  # a typo is not ignored
+        j8.run(runs, config, sweeps=["sweep-c0-b", "sweep-c0-typo"])
     assert len(result["gpu_prices_sha256"]) == 64
