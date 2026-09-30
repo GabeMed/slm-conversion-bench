@@ -200,11 +200,44 @@ def test_router_refuses_unknown_arms_and_call_sites():
     ("adapters", {"slm": "s", "choice": "c", "centroids": "c", "adapters": {
         "c0": {"served_name": "x", "sha256": "1" * 64}, "c1": {"served_name": "x", "sha256": "2" * 64}}}),
     ("adapters", {"slm": "s", "choice": "c", "centroids": "c", "adapters": {"c0": {"served_name": "x", "sha256": "weights"}}}),
+    ("adapters", {"slm": "qwen3-8b", "choice": "c", "centroids": "c", "adapters": {"c0": {"served_name": "qwen3-8b", "sha256": "1" * 64}}}),
+    ("centroids", {"embedding": {**EMBEDDING, "trust_remote_code": "yes"}, "clusters": {"a": [1.0]}}),
     ("unknown", {}),
 ])
 def test_fact_shapes_are_checked(fact_root, name, payload):
     with pytest.raises(facts.FactError):
         facts.write_fact("J", name, payload)
+
+
+def test_sha256_dir_refuses_an_empty_or_missing_directory(tmp_path):
+    with pytest.raises(facts.FactError):
+        facts.sha256_dir(tmp_path / "typo")
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(facts.FactError):
+        facts.sha256_dir(tmp_path / "empty")
+
+
+def test_the_embedding_is_built_exactly_as_the_fact_says(monkeypatch):
+    import sys
+    import types
+    built = []
+
+    class FakeST:
+        def __init__(self, model, revision, device, trust_remote_code):
+            built.append((model, revision, device, trust_remote_code))
+            self.tokenizer = types.SimpleNamespace(truncation_side=None)
+
+        def encode(self, texts, normalize_embeddings, convert_to_numpy):
+            assert normalize_embeddings
+            return types.SimpleNamespace(tolist=lambda: [[1.0, 0.0] for _ in texts])
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeST))
+    monkeypatch.setattr(clusters, "_models", {})
+    for truncation, side in (("tail", "left"), ("head", "right")):
+        spec = {**EMBEDDING, "truncation": truncation, "max_seq_length": 8192, "trust_remote_code": True}
+        assert clusters.embed(["x"], spec) == [[1.0, 0.0]]
+        model = clusters._model(spec)
+        assert (model.max_seq_length, model.tokenizer.truncation_side) == (8192, side)
+    assert built == [("m", "a" * 40, "cpu", True)] * 2
 
 
 def test_sha256_dir_identifies_the_directory(tmp_path):

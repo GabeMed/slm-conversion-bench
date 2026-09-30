@@ -42,9 +42,10 @@ class HarnessError(RuntimeError):
 
     def __init__(self, message: str):
         super().__init__(message)
-        if _run is not None:
-            with _run.lock:
-                _run.harness_errors.append(scrub(message))
+        run = _run
+        if run is not None:
+            with run.lock:
+                run.harness_errors.append(scrub(message))
 
 
 @dataclass

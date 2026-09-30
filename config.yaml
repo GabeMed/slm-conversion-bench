@@ -137,5 +137,5 @@ eval:
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B3: {choice: null}           # J6 (S4)
-  B4: {centroids: null, adapters: null}                    # J5 (S3), S5
-  B5: {centroids: null, adapters: null, allocation: null}  # J5, S5, J7 (S6)
+  B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
+  B5: {choice: null, centroids: null, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)

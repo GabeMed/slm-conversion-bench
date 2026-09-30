@@ -135,9 +135,9 @@ def test_a_harness_failure_inside_chess_fails_the_run(monkeypatch, repo):
             raise FactError("arms.B5.allocation is not set in the configuration")
         return real_route(arm, call_site, messages, config)
     monkeypatch.setattr(hooks, "route", route)
-    _, manifest, _ = run(monkeypatch, repo)
-    assert manifest["status"] == "failed"
-    assert set(manifest["harness_errors"]) == {"1", "2"} and "allocation" in manifest["harness_errors"]["1"][0]
+    run_dir, manifest, _ = run(monkeypatch, repo)
+    assert manifest["status"] == "failed" and "allocation" in manifest["harness_errors"]["1"][0]
+    assert list(json.loads((run_dir / "predictions.json").read_text())) == ["1"]  # stopped: 2 never ran
 
 
 def test_embedding_failures_fail_the_run(monkeypatch, repo):
@@ -209,3 +209,61 @@ def test_each_run_points_chess_at_its_own_databases(repo, tmp_path):
     assert str(DatabaseManager("dev", "tiny").db_path).startswith(str(paths.bird_root(repo[1])))
     runner._prepare_chess(repo[1], other_root)
     assert str(DatabaseManager("dev", "tiny").db_path).startswith(str(other_root))
+
+
+def test_a_question_that_raises_fails_the_run_and_stops_it(monkeypatch, repo):
+    def broken(state):
+        raise KeyError("SQL_meta_infos")
+    monkeypatch.setattr(runner, "final_sql", broken)
+    run_dir, manifest, _ = run(monkeypatch, repo)
+    assert manifest["status"] == "failed" and "KeyError" in manifest["failures"]["1"]
+    assert list(json.loads((run_dir / "predictions.json").read_text())) == ["1"]
+
+
+def test_invalid_c1_lines_fail_the_run(monkeypatch, repo):
+    monkeypatch.setattr(runner, "validate_calls", lambda calls: ["line 1: broken"])
+    _, manifest, _ = run(monkeypatch, repo, ids=("1",))
+    assert (manifest["status"], manifest["c1_errors"]) == ("failed", 1)
+
+
+def test_an_interrupted_run_keeps_what_finished(monkeypatch, repo):
+    class Interrupting(ScriptedChess):
+        def invoke(self, messages):
+            if messages[-1].content.startswith("<system>") and hooks._run.question_id == "2":
+                raise KeyboardInterrupt  # on the agent's own call, in the main thread, as a Ctrl-C would
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Interrupting())
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_agent(str(repo[0]), "B0", "train", ids=["1", "2"])
+    (run_dir,) = list(paths.RUNS.iterdir())
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert (manifest["status"], manifest["stopped_by"]) == ("interrupted", "KeyboardInterrupt: ")
+    assert json.loads((run_dir / "predictions.json").read_text()) == {"1": f" {GOLD} "}
+
+
+def test_openai_embeddings_without_a_key_stop_the_run_before_it_starts(repo, monkeypatch):
+    import yaml
+    config = yaml.safe_load(repo[0].read_text())
+    config["embeddings"]["provider"] = "openai"
+    repo[0].write_text(yaml.safe_dump(config))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(hooks.HarnessError, match="OPENAI_API_KEY"):
+        runner.run_agent(str(repo[0]), "B0", "train", ids=["1"])
+
+
+def test_preprocessing_must_match_the_configuration(repo, monkeypatch):
+    import yaml
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    stamp = paths.bird_root(repo[1]) / "dev_databases" / "tiny" / "preprocessed" / "STAMP.json"
+    stamp.unlink()
+    with pytest.raises(DataError, match="preprocessed/STAMP.json"):
+        runner.run_agent(str(repo[0]), "B0", "train", ids=["1"])
+    runner.preprocess(str(repo[0]), ["tiny"])
+    config = yaml.safe_load(repo[0].read_text())
+    config["embeddings"]["fake_size"] = 32  # another embedding: the vector DB must be rebuilt
+    repo[0].write_text(yaml.safe_dump(config))
+    with pytest.raises(DataError, match="context_vector_db_fake/STAMP.json"):
+        runner.run_agent(str(repo[0]), "B0", "train", ids=["1"])
+    runner.preprocess(str(repo[0]), ["tiny"])
+    _, manifest, _ = run(monkeypatch, repo, ids=("1",))
+    assert manifest["status"] == "done"

@@ -10,18 +10,19 @@ The four facts that cross fronts, and their shapes:
 
 **`centroids`** (J5, S3) → `assign` in B4 and B5:
     {"embedding": {"model": <hf id>, "revision": <40-hex commit>, "max_seq_length": <int>,
-                   "truncation": "head" | "tail", "text": "prompt"},
+                   "truncation": "head" | "tail", "text": "prompt", "trust_remote_code": <bool>},
      "clusters": {"<cluster>": [float, ...]}}
 Vectors are unit-norm and live in the **prompt-only** space that `clusters.embed` produces with that
 `embedding` block, whatever features formed the clusters (the SPEC forms clusters on prompt and
 action, and assigns on the prompt only). `truncation` says which end of an over-long prompt is
-kept (`head` keeps the start, `tail` the end).
+kept (`head` keeps the start, `tail` the end). `trust_remote_code` (default false) runs the model
+repository's own code, pinned by the revision; many long-context embedding models need it.
 
 **`choice`** (J6, S4) → B3, B4, B5:  `{"slm": "<roles.slm_candidates[].name>"}`
 
 **`adapters`** (S5) → B4, B5:
     {"slm": <candidate name>, "choice": <sha of the choice fact>, "centroids": <sha of the centroids fact>,
-     "adapters": {"<cluster>": {"served_name": <non-empty, unique>, "sha256": <sha256_dir of the adapter>}}}
+     "adapters": {"<cluster>": {"served_name": <non-empty, unique, not the base's name>, "sha256": <sha256_dir of the adapter>}}}
 One adapter per centroid cluster; each served by vLLM under `served_name`.
 
 **`allocation`** (J7, S6) → B5:
@@ -56,8 +57,11 @@ def canonical(payload: Any) -> bytes:
 
 def sha256_dir(path: Path) -> str:
     """The identity of a directory (an adapter): sha256 over its sorted (relative path, file sha256) pairs."""
+    files = sorted(p for p in Path(path).rglob("*") if p.is_file())
+    if not files:
+        raise FactError(f"{path} has no files: not an adapter")
     digest = hashlib.sha256()
-    for file in sorted(p for p in Path(path).rglob("*") if p.is_file()):
+    for file in files:
         digest.update(f"{file.relative_to(path).as_posix()}\0{hashlib.sha256(file.read_bytes()).hexdigest()}\n".encode())
     return digest.hexdigest()
 
@@ -102,6 +106,7 @@ def validate_fact(name: str, payload: Dict[str, Any]) -> None:
                  "centroids.embedding.max_seq_length must be a positive integer")
         _require(embedding.get("truncation") in TRUNCATION, f"centroids.embedding.truncation must be in {TRUNCATION}")
         _require(embedding.get("text") in EMBEDDED_TEXT, f"centroids.embedding.text must be in {EMBEDDED_TEXT}")
+        _require(isinstance(embedding.get("trust_remote_code", False), bool), "centroids.embedding.trust_remote_code must be a boolean")
         _require(bool(clusters), "centroids.clusters must not be empty")
         _require(len({len(v) for v in clusters.values()}) == 1, "centroids.clusters must share one dimension")
         for cluster, vector in clusters.items():
@@ -116,6 +121,7 @@ def validate_fact(name: str, payload: Dict[str, Any]) -> None:
         served = [a.get("served_name") for a in adapters.values()]
         _require(all(isinstance(s, str) and s for s in served), "every adapter needs a non-empty served_name")
         _require(len(set(served)) == len(served), "served names must be unique")
+        _require(payload["slm"] not in served, "an adapter cannot be served under the base's name (B4 would silently become B3)")
         _require(all(isinstance(a.get("sha256"), str) and _SHA256.match(a["sha256"]) for a in adapters.values()),
                  "every adapter needs its sha256 (bench.contracts.facts.sha256_dir)")
     elif name == "allocation":

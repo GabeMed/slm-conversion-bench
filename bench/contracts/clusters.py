@@ -21,10 +21,12 @@ def prompt_text(messages: Sequence[Dict[str, str]]) -> str:
 
 
 def _model(embedding: Dict):
-    key = (embedding["model"], embedding["revision"], embedding["max_seq_length"], embedding["truncation"])
+    trust = embedding.get("trust_remote_code", False)
+    key = (embedding["model"], embedding["revision"], embedding["max_seq_length"], embedding["truncation"], trust)
     if key not in _models:
         from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer(embedding["model"], revision=embedding["revision"], device="cpu")
+        model = SentenceTransformer(embedding["model"], revision=embedding["revision"], device="cpu",
+                                    trust_remote_code=trust)
         model.max_seq_length = embedding["max_seq_length"]
         model.tokenizer.truncation_side = "right" if embedding["truncation"] == "head" else "left"
         _models[key] = model

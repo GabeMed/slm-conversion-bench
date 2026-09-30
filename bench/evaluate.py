@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import barrier, data, paths
-from bench.contracts.config import config_sha256, validate_config
+from bench.contracts.config import config_sha256
 from bench.provenance import git_state
 
 
@@ -58,7 +58,7 @@ def evaluate(source_run_id: str) -> Path:
     source = paths.RUNS / source_run_id
     run_manifest = json.loads((source / "manifest.json").read_text())
     config = json.loads((source / "config.json").read_text())  # the run's own snapshot, not today's config.yaml
-    if config_sha256(config) != run_manifest["config_sha256"] or validate_config(config):
+    if config_sha256(config) != run_manifest["config_sha256"]:  # validated when the run loaded it
         raise data.DataError(f"the configuration snapshot of {source_run_id} does not match its manifest")
     split = run_manifest["split"]
     barrier.ensure_split_allowed(split)
