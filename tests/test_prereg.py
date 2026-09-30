@@ -123,7 +123,7 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
         register("config.yaml", root=repo)
 
 
-@pytest.mark.parametrize("rel", ANALYSIS + ["bench/report.py"])
+@pytest.mark.parametrize("rel", ANALYSIS + ["bench/report.py", "bench/judge/j9.py"])
 def test_editing_any_analysis_file_changes_the_registration(repo, rel):
     first = register("config.yaml", root=repo)
     path = repo / rel
@@ -135,6 +135,17 @@ def test_editing_any_analysis_file_changes_the_registration(repo, rel):
     second = register("config.yaml", root=repo, replace=True)
     manifest = json.loads((repo / "prereg" / "manifest.json").read_text())
     assert second["hash"] != first["hash"] and manifest["analysis_code"][rel] == sha256(path)
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_analysis_code_the_commit_would_not_hold_is_refused(repo, ignored):
+    if ignored:
+        (repo / ".gitignore").write_text("bench/judge/local_*.py\n")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-q", "-m", "ignore local judges")
+    (repo / "bench" / "judge" / "local_j9.py").write_text("READING = 'changed'\n")
+    with pytest.raises(PreregError, match="ignored by git: bench/judge/local_j9.py" if ignored else "uncommitted"):
+        register("config.yaml", root=repo)
 
 
 def test_register_refuses_without_the_analysis_code(repo):

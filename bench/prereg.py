@@ -74,6 +74,11 @@ def _sha256(path: Path) -> str:
 
 def analysis_code(root: Path) -> Dict[str, str]:
     """The sha256 of every tracked file of the analysis code, by path."""
+    ignored = [rel for rel in _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--",
+                                   *ANALYSIS_CODE).splitlines()
+               if "__pycache__/" not in rel and not rel.endswith(".pyc")]
+    if ignored:  # code that would run here but that the registered commit does not hold
+        raise PreregError(f"analysis code ignored by git: {', '.join(sorted(ignored))}")
     files = sorted(_git(root, "ls-files", "--", *ANALYSIS_CODE).splitlines())
     missing = [rel for rel in REQUIRED_ANALYSIS if rel not in files]
     if missing:
