@@ -139,3 +139,40 @@ arms:                          # the facts each arm uses: judgments/<J>/<sha256>
   B3: {choice: null}           # J6 (S4)
   B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
   B5: {choice: null, centroids: null, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
+
+# ---------------------------------------------------------------- F4: S2, S3, the judgments, the report
+# (bench/curate.py, bench/embed.py, bench/judge/j2-j8, bench/report.py). `prices.table` above is read
+# by J3 as {<model, as C1 records it>: {input_per_mtok, cached_input_per_mtok, output_per_mtok,
+# batch_discount}} in USD per million tokens, dated by `prices.as_of`.
+curation:                      # S2 (SPEC §4 S2)
+  sql_timeout_s: 60            # the success filter runs the teacher's SQL, read-only
+  mask:                        # sensitive data: pattern -> placeholder, detections counted
+    email: {pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', placeholder: '[EMAIL]'}
+    phone: {pattern: '(?<![\w.])\+\d{1,3}[ .-]?(?:\(\d{1,4}\)|\d{1,4})[ .-]?\d{3,4}[ .-]?\d{3,4}(?![\w.])', placeholder: '[PHONE]'}
+    ipv4: {pattern: '(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\w.])', placeholder: '[IP]'}
+    card: {pattern: '(?<![\w-])(?:\d[ -]?){12,18}\d(?![\w-])', placeholder: '[CARD]', check: luhn}
+  near_duplicate: {shingle_words: 5, num_perm: 128, threshold: 0.9, template_share: 0.5}
+  rule_of_thumb: [10000, 100000]  # examples per task (paper p.9), reported against, not a floor
+clustering:                    # S3 (J5) and the `embed` execution
+  # the embedding J5 writes into the centroids fact, and so the one `assign` uses: 8192 tokens
+  # of context, keeping the end of a longer prompt, where CHESS puts what varies (design §5.1)
+  embedding: {model: BAAI/bge-m3, revision: 5617a9f61b028005a4858fdac845db406aefb181,
+              max_seq_length: 8192, truncation: tail, text: prompt, trust_remote_code: false}
+  batch_size: 1                # one text per call, as the router embeds: the same vectors
+  k_min: 2                     # the number of clusters is chosen by silhouette in [k_min, k_max]
+  k_max: 40
+  n_init: 10
+  silhouette_sample: 5000
+  seed: 20260930
+selection:                     # S4 (J6): higher per-call-site score on calib; tie -> smaller footprint
+  tie_tolerance: 0.0           # scores closer than this are a tie
+  footprint_gb: {qwen3-8b: null, granite-4.2-8b: null}  # before runs
+  triage: []                   # before runs: the desk triage (SPEC §4 S4a), one mapping per candidate
+allocation:                    # S6 (J7)
+  min_calls: null              # before runs: fewest calib calls of a cluster part to count as evidence
+noninferiority:                # how F4 calls J4 (F2's bench/judge/j4.py), in J7 and the report
+  n_boot: 10000
+cost:                          # J3 and J8 (SPEC §6.6)
+  gpu_price_per_hour: {}       # before runs: {<gpu, as the loadtest manifest names it>: USD per hour}
+  p95_slo_ms: null             # before runs: sustained throughput is the highest with p95 latency within this
+  utilizations: [0.2, 0.5, 1.0]
