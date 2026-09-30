@@ -74,6 +74,7 @@ def per_call_eval(eval_run_id: str, source_run_id: str, calls: List[dict], corre
     rows = [{"question_id": c["question_id"], "call_site": c["call_site"], "invocation_key": c["invocation_key"],
              "correct": bool(c["parsed_ok"] and correct(c))}
             for c in calls if c["call_site"] in GOLD_SITES and c["parsed_ok"]]
-    write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "per_call": True, "status": None},
+    write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "per_call": True, "status": None,
+                            "finished_at": "2026-09-30T12:00:00+00:00"},
               files={"results.jsonl": rows})
     return eval_run_id

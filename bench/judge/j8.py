@@ -19,8 +19,9 @@ the execution's SLM calls per question times it. That holds as far as the load t
 is the execution's (F3 replays a source execution's calls; the manifest records which).
 
 **One sweep per engine**: F3 runs an engine's load levels as one sweep (`sweep_id`), in order on one
-warm server. J8 takes exactly one sweep of each engine; several sweeps of one engine are refused
-unless the invocation names the one to use (`sweeps`).
+warm server. J8 takes exactly one sweep of each engine: an engine with one sweep is always kept;
+several sweeps of one engine are refused unless the invocation names exactly one of them
+(`sweeps`); naming sweeps only chooses among an engine's own, it never drops an engine.
 
 **One engine per load test** (F3): the base (`slm:<candidate>`, B3's traffic) or one adapter
 (`slm:<candidate>+lora:<name>`). J8 takes the load tests of one or more engines of **one base on one
@@ -29,10 +30,11 @@ among the engines measured (the conservative one). B4 and B5 spread their calls 
 on one server, which no single-engine load test measures, so their SLM cost from J8 is an
 **extrapolation**; the result records the engines and load tests it combined, and J3 labels it.
 """
+import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-from bench.judge.base import JudgmentError, reference, require_done, run_dir, write_result
+from bench.judge.base import JudgmentError, canonical, reference, require_done, run_dir, write_result
 
 JUDGMENT = "J8"
 EXPORT = "profile_export_aiperf.json"
@@ -65,26 +67,28 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[Li
     cost = config["cost"]
     if cost.get("p95_slo_ms") is None:
         raise JudgmentError("cost.p95_slo_ms is not set: sustained throughput needs its pre-registered bound")
-    levels, gpus, reads = [], set(), {}
+    levels = []
     for run_id in sorted(loadtest_run_ids):
         found = require_done(run_id, type="loadtest")
         if found.get("prefix_cache") is not True:
             raise JudgmentError(f"{run_id} did not run with the prefix cache on (SPEC §6.6)")
-        gpus.add(found["gpu"])
         export = json.loads((run_dir(run_id) / EXPORT).read_text())
         if not found.get("sweep_id"):
             raise JudgmentError(f"{run_id} records no sweep_id: J8 takes one sweep per engine")
-        if sweeps and found["sweep_id"] not in sweeps:
-            continue
         levels.append({"run_id": run_id, "engine": found["engine"], "concurrency": found["concurrency"],
                        "sweep_id": found["sweep_id"], "source_run_id": found.get("source_run_id"), **level(export)})
-        reads[run_id] = reference(run_id)
-    if not levels:
-        raise JudgmentError(f"none of the load tests is of the sweeps named: {sorted(sweeps or [])}")
+    kept = []
     for engine in sorted({lv["engine"] for lv in levels}):
         found_sweeps = sorted({lv["sweep_id"] for lv in levels if lv["engine"] == engine})
         if len(found_sweeps) > 1:
-            raise JudgmentError(f"{engine} has several sweeps {found_sweeps}: name the one to use")
+            named = [sweep for sweep in found_sweeps if sweep in (sweeps or [])]
+            if len(named) != 1:
+                raise JudgmentError(f"{engine} has several sweeps {found_sweeps}: name exactly one of them")
+            found_sweeps = named
+        kept += [lv for lv in levels if lv["engine"] == engine and lv["sweep_id"] == found_sweeps[0]]
+    levels = kept
+    reads = {lv["run_id"]: reference(lv["run_id"]) for lv in levels}
+    gpus = {require_done(lv["run_id"])["gpu"] for lv in levels}
     engines = sorted({lv["engine"] for lv in levels})
     bases = {e.split("+lora:")[0] for e in engines}
     if len(bases) != 1 or len(gpus) != 1:
@@ -99,6 +103,7 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[Li
     combined = {u: max(result["cost_per_request"][u] for result in per_engine.values())
                 for u in next(iter(per_engine.values()))["cost_per_request"]}
     result = {"engine": bases.pop(), "gpu": gpu, "gpu_prices_as_of": prices["as_of"], "price_per_hour": per_second * 3600,
+              "gpu_prices_sha256": hashlib.sha256(canonical(prices)).hexdigest(),
               "source_run_ids": sorted({lv.get("source_run_id") for lv in levels if lv.get("source_run_id")}),
               "engines": per_engine, "cost_per_request": combined,
               "combined": {"rule": "the highest cost per request among the engines measured", "engines": engines,

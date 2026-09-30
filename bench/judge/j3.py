@@ -14,9 +14,10 @@ correct query.
   `source: api` and `cached_input: null` had its cache **not reported**: it is priced with no cache
   discount, so the arm's cost is an `upper_bound` (`cache_not_reported` counts them).
 - **The SLM** has no token price: each SLM call costs the load test's cost per request (J8) at each
-  utilization of `cost.utilizations`, so an arm with SLM calls has one total per API variant and
-  utilization (`standard@50%`). The SLM cost is `measured` only when every SLM call ran on the one
-  engine J8 measured and that engine is the base (B3); calls through adapters (B4, B5) spread over
+  utilization of `cost.utilizations` (J8 must have measured every SLM engine the calls used), so an arm with SLM calls has one total per API variant and
+  utilization (`standard@50%`), the highest cost per request among the engines these calls used
+  (J8 judges each engine apart). The SLM cost is `measured` only when every SLM call ran on one
+  engine and that engine is the base (B3); calls through adapters (B4, B5) spread over
   several adapters on one server, which no single-engine load test measures, so their cost is
   `extrapolated from per-adapter load tests` (`slm_cost_basis`).
 - **Per correct query**: the total over the execution divided by its correct questions, read from
@@ -170,11 +171,20 @@ def slm_cost_per_request(j8_path: Optional[str], calls: List[dict]) -> Tuple[Opt
     j8 = read_result(j8_path, "J8")
     if engines != {j8["result"]["engine"].split("+lora:")[0]}:
         raise JudgmentError(f"the load test measured {j8['result']['engine']!r}, the calls used {sorted(engines)}")
-    measured = engines_used(calls) == set(j8["result"].get("combined", {}).get("engines") or [j8["result"]["engine"]]) \
-        and not any("+lora:" in e for e in engines_used(calls))
-    basis = {"basis": "measured" if measured else "extrapolated from per-adapter load tests",
-             "call_engines": sorted(engines_used(calls)), "combined": j8["result"].get("combined")}
-    return j8["result"]["cost_per_request"], {"j8": result_reference(j8_path), "slm_cost_basis": basis}
+    measured_engines = set(j8["result"].get("combined", {}).get("engines") or [j8["result"]["engine"]])
+    uncovered = sorted(engines_used(calls) - measured_engines)
+    if uncovered:
+        raise JudgmentError(f"the load test did not measure every SLM engine the calls used: {uncovered}")
+    used = sorted(engines_used(calls))
+    per_engine = j8["result"].get("engines") or {}
+    if per_engine:  # the engines these calls used, not every engine the load test measured
+        cost = {u: max(per_engine[e]["cost_per_request"][u] for e in used) for u in per_engine[used[0]]["cost_per_request"]}
+    else:
+        cost = j8["result"]["cost_per_request"]
+    measured = len(used) == 1 and "+lora:" not in used[0]
+    basis = {"basis": "measured" if measured else "extrapolated from per-adapter load tests", "call_engines": used,
+             "rule": "the highest cost per request among the engines the calls used", "combined": j8["result"].get("combined")}
+    return cost, {"j8": result_reference(j8_path), "slm_cost_basis": basis}
 
 
 def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config: Dict[str, Any]):

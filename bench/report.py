@@ -71,6 +71,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import paths
 from bench.contracts.concordance import GOLD_CALL_SITES as GOLD_SITES
+from bench.contracts.facts import read_fact
 from bench.provenance import scrub
 from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
                               run_dir)
@@ -138,53 +139,95 @@ def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callabl
     return plain(noninferiority({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids}, *settings))["d"]
 
 
-def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any], judged: Dict[str, Any],
-                       reads: Dict[str, Any], pilot_plan: Dict[str, str]) -> None:
-    """A test report is bound to what the test registry recorded (SPEC 6.1, REQ-013): every arm's run
-    is a `done` entry, each configuration's registered runs are all known (several of one
-    configuration: no verdict), the facts the B3–B5 runs recorded are the ones the plan names, the
-    per-call evaluation replays the plan's B0 run, and the pilot finished before the first test
-    execution started. Marks `several_runs` on the arms concerned; raises on everything else."""
-    if split != "test":
-        return
-    if not registry["available"]:
-        raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
-    entries = {r["run_id"]: r for r in registry["runs"]}
-    for arm, found in arms.items():
-        entry = entries.get(found["run_id"])
-        if entry is None or entry["status"] != "done":
-            raise JudgmentError(f"{arm}'s run {found['run_id']} is not a done entry of the test registry "
-                                f"({'not registered' if entry is None else entry['status']})")
-        key = (entry["type"], entry["arm"], entry["engine"], entry["prereg_hash"])
-        same = sorted(r["run_id"] for r in registry["runs"] if (r["type"], r["arm"], r["engine"], r["prereg_hash"]) == key)
-        found["several_runs"] = same if len(same) > 1 else None
+NEEDS = {"B3": ("choice",), "B4": ("choice", "centroids", "adapters"), "B5": ("choice", "centroids", "adapters", "allocation")}
+FACT_SOURCE = {"choice": "j6", "centroids": "j5", "adapters": "j7 or plan.adapters", "allocation": "j7"}
+
+
+def _expected_facts(plan: Dict[str, Any], judged: Dict[str, Any]) -> Dict[str, str]:
+    """The fact shas the plan's judgments name."""
     expected = {}
     if judged.get("j6"):
         expected["choice"] = judged["j6"]["choice_fact"]["sha256"]
     if judged.get("j5"):
         expected["centroids"] = judged["j5"]["centroids"]["sha256"]
+    adapters = [judged["j7"]["adapters"]] if judged.get("j7") else []
+    if plan.get("adapters"):
+        adapters.append(read_fact(str(paths.ROOT / plan["adapters"]), "adapters")[1])
+    if len(set(adapters)) > 1:
+        raise JudgmentError(f"the plan's adapters fact {adapters[-1]!r} is not the one its J7 allocated on {adapters[0]!r}")
+    if adapters:
+        expected["adapters"] = adapters[0]
     if judged.get("j7"):
-        expected["adapters"] = judged["j7"]["adapters"]
         expected["allocation"] = judged["j7"]["allocation_fact"]["sha256"]
-    for arm, names in (("B3", ("choice",)), ("B4", ("choice", "centroids", "adapters")),
-                       ("B5", ("choice", "centroids", "adapters", "allocation"))):
-        if arm not in arms:
-            continue
-        recorded = entries[arms[arm]["run_id"]].get("facts") or {}
+    return expected
+
+
+def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any], judged: Dict[str, Any],
+                       reads: Dict[str, Any], pilot_plan: Dict[str, str], expected: Dict[str, str]) -> Optional[List[str]]:
+    """A test report is bound to what the test registry recorded (SPEC 6.1, REQ-013):
+    - every arm's run, and the per-call evaluation's replay, is a `done` entry, and each
+      configuration's registered runs are all known (several of one configuration: no verdict);
+    - every trained arm's run (and the replay routed as B4) recorded the facts the plan's judgments
+      name, and a plan without them is refused, never unchecked;
+    - the per-call evaluation replays the plan's B0 run;
+    - every pilot the report uses (the pilot's evals, J6's zero-shot per-call evals) finished
+      before the first test execution started.
+    Marks `several_runs` on the arms; returns the replay's several runs, if any; raises otherwise."""
+    if split != "test":
+        return None
+    if not registry["available"]:
+        raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
+    undated = [r["run_id"] for r in registry["runs"] if not r.get("started_at")]
+    if undated:
+        raise JudgmentError(f"registry entries without started_at (no intent): {undated}")
+    entries = {r["run_id"]: r for r in registry["runs"]}
+
+    def bind(label: str, run_id: str) -> Tuple[Dict[str, Any], Optional[List[str]]]:
+        entry = entries.get(run_id)
+        if entry is None or entry["status"] != "done":
+            raise JudgmentError(f"{label}'s run {run_id} is not a done entry of the test registry "
+                                f"({'not registered' if entry is None else entry['status']})")
+        key = (entry["type"], entry["arm"], entry["engine"], entry["prereg_hash"])
+        same = sorted(r["run_id"] for r in registry["runs"] if (r["type"], r["arm"], r["engine"], r["prereg_hash"]) == key)
+        return entry, (same if len(same) > 1 else None)
+
+    def facts_of(label: str, entry: Dict[str, Any], names: Tuple[str, ...]) -> None:
+        missing = [n for n in names if n not in expected]
+        if missing:
+            raise JudgmentError(f"{label}'s facts cannot be checked: the plan names no "
+                                f"{', '.join(FACT_SOURCE[n] for n in missing)}")
+        recorded = entry.get("facts") or {}
         for name in names:
-            if name in expected and recorded.get(name) != expected[name]:
-                raise JudgmentError(f"{arm}'s test run recorded the {name} fact {recorded.get(name)!r}; "
+            if recorded.get(name) != expected[name]:
+                raise JudgmentError(f"{label}'s test run recorded the {name} fact {recorded.get(name)!r}; "
                                     f"the plan's judgments name {expected[name]!r}")
-    if reads.get("per_call") and "B0" in arms and reads["per_call"]["teacher"]["run_id"] != arms["B0"]["run_id"]:
-        raise JudgmentError("the per-call evaluation replays another teacher run than the plan's B0")
-    intents = [r["started_at"] for r in registry["runs"] if r.get("started_at")]
-    if pilot_plan and intents:
-        first = min(datetime.fromisoformat(t) for t in intents)
-        for arm, eval_run_id in pilot_plan.items():
-            finished = manifest(eval_run_id).get("finished_at")
-            if not finished or datetime.fromisoformat(finished) >= first:
-                raise JudgmentError(f"the pilot's {arm} evaluation {eval_run_id} did not finish before the first test "
-                                    f"execution started ({first.isoformat()}): its margin would not be pre-registered")
+
+    for arm, found in arms.items():
+        entry, found["several_runs"] = bind(arm, found["run_id"])
+        if arm in NEEDS:
+            facts_of(arm, entry, NEEDS[arm])
+    replay_several = None
+    if reads.get("per_call"):
+        entry, replay_several = bind("the per-call evaluation", reads["per_call"]["replay"]["run_id"])
+        facts_of("the per-call evaluation's replay (routed as B4)", entry, NEEDS["B4"])
+        if "B0" in arms and reads["per_call"]["teacher"]["run_id"] != arms["B0"]["run_id"]:
+            raise JudgmentError("the per-call evaluation replays another teacher run than the plan's B0")
+    pilots = dict(pilot_plan)
+    if judged.get("j6") and reads.get("j6"):
+        zeroshot = reads["j6"].get(judged["j6"]["choice"]) or {}
+        for who in ("replay_eval", "teacher_eval"):
+            if zeroshot.get(who):
+                pilots[f"J6's zero-shot {who}"] = zeroshot[who]["run_id"]
+    first = min(datetime.fromisoformat(r["started_at"]) for r in registry["runs"]) if registry["runs"] else None
+    for label, eval_run_id in pilots.items():
+        finished = manifest(eval_run_id).get("finished_at")
+        if first is not None and (not finished or datetime.fromisoformat(finished) >= first):
+            raise JudgmentError(f"the pilot's {label} evaluation {eval_run_id} did not finish before the first test "
+                                f"execution started ({first.isoformat()}): its margin would not be pre-registered")
+    return replay_several
+
+
+REQUIRED_COST = ("upper_bound", "cache_not_reported", "lower_bound", "failed_unbilled", "prices")
 
 
 def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_summary: Callable,
@@ -195,26 +238,6 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     rows = per_arm({arm: spec["eval"] for arm, spec in specs.items()}, split, ex_table)
     pilot_plan = plan.get("pilot") or {}
     sources: Dict[str, Any] = {"arms": {}, "pilot": {arm: reference(e) for arm, e in pilot_plan.items()}}
-    arms, correct = {}, {}
-    for arm, spec in specs.items():
-        j3 = read_result(spec["cost"], "J3")
-        if j3["reads"].get("eval", {}).get("run_id") != spec["eval"]:
-            raise JudgmentError(f"the J3 result of {arm} was not computed with {spec['eval']}")
-        (summary,) = ex_summary(rows[arm])
-        correct[arm] = correct_of(rows[arm])
-        cost = j3["result"]
-        arms[arm] = {"n": summary["n"], "ex": summary["ex"],
-                     "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
-                     "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(cost),
-                     "cost_label": cost["label"], "lower_bound": cost.get("lower_bound", False),
-                     "upper_bound": cost.get("upper_bound", False), "cache_not_reported": cost.get("cache_not_reported", 0),
-                     "slm_cost_basis": (cost.get("slm_cost_basis") or {}).get("basis"),
-                     "failed_unbilled": cost["failed_unbilled"], "prices_as_of": cost["prices_as_of"],
-                     "calls": cost["calls"], "replaceable_fraction": cost["replaceable_fraction"]}
-        sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
-    dates = {a["prices_as_of"] for a in arms.values()}
-    if len(dates) > 1:
-        raise JudgmentError(f"the arms were priced with price tables of different dates {sorted(map(str, dates))}")
 
     judged, reads = {}, {}
     for key, judgment in (("j5", "J5"), ("j6", "J6"), ("j7", "J7"), ("j8", "J8"), ("per_call", "J2"),
@@ -224,11 +247,41 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         reads[key] = found["reads"] if found else None
         if found:
             sources[key] = result_reference(plan[key])
-    if judged["per_call"] and (judged["per_call"].get("mode"), judged["per_call"].get("arm"),
-                               judged["per_call"].get("split")) != ("replay", "B4", split):
+
+    arms, correct = {}, {}
+    for arm, spec in specs.items():
+        j3 = read_result(spec["cost"], "J3")
+        if j3["reads"].get("eval", {}).get("run_id") != spec["eval"]:
+            raise JudgmentError(f"the J3 result of {arm} was not computed with {spec['eval']}")
+        cost = j3["result"]
+        missing = [k for k in REQUIRED_COST if k not in cost]
+        if missing:
+            raise JudgmentError(f"the J3 result of {arm} records no {', '.join(missing)}: it cannot say what its cost is")
+        basis = (cost.get("slm_cost_basis") or {}).get("basis")
+        if basis is not None and (j3["reads"].get("j8") or {}).get("sha256") != (sources.get("j8") or {}).get("sha256"):
+            raise JudgmentError(f"the J3 result of {arm} priced its SLM calls with another load test than the plan's j8")
+        (summary,) = ex_summary(rows[arm])
+        correct[arm] = correct_of(rows[arm])
+        arms[arm] = {"n": summary["n"], "ex": summary["ex"],
+                     "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
+                     "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(cost),
+                     "cost_label": cost["label"], "lower_bound": cost["lower_bound"], "upper_bound": cost["upper_bound"],
+                     "cache_not_reported": cost["cache_not_reported"], "slm_cost_basis": basis,
+                     "failed_unbilled": cost["failed_unbilled"], "prices_as_of": cost["prices_as_of"],
+                     "prices_sha256": cost["prices"]["sha256"],
+                     "calls": cost["calls"], "replaceable_fraction": cost["replaceable_fraction"]}
+        sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
+    tables = {(a["prices_as_of"], a["prices_sha256"]) for a in arms.values()}
+    if len(tables) > 1:
+        raise JudgmentError(f"the arms were priced with different price tables {sorted(map(str, tables))}")
+
+    per_call = judged["per_call"]
+    if per_call and (per_call.get("mode"), per_call.get("arm"), per_call.get("split")) != ("replay", "B4", split):
         raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
     registry = test_registry()
-    _registry_bindings(split, arms, registry, judged, reads, pilot_plan)
+    replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged))
+    coverage = None if not per_call else per_call.get("call_sites")
+    uncovered = sorted(set(ROUTINE + GOLD_SITES) - set(coverage)) if coverage is not None else []
 
     settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
     d_pilot = pilot_d(pilot_plan, pilot_ids, ex_table, noninferiority, settings)
@@ -248,7 +301,7 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     gold_tests = {}  # SPEC 7.2 K4: n and Δ per cluster with gold, here each gold call site
     zeroshot = ((judged["j6"] or {}).get("per_call_site") or {}).get((judged["j6"] or {}).get("choice"), {})
     for site in GOLD_SITES:
-        entry = (judged["per_call"] or {}).get("per_call_site", {}).get(site)
+        entry = (per_call or {}).get("per_call_site", {}).get(site)
         if not entry or not entry["gold"]:
             continue
         d = None  # its pilot: J6's chosen candidate, zero-shot, against the teacher on the pilot questions' calls
@@ -257,12 +310,12 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         if ids:
             d = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
                                      {q: gold["by_question"]["teacher"][q] for q in ids}, *settings))["d"]
-        gold_tests[site] = plain(noninferiority(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
-                                                *settings, d_pilot=d))
+        gold_tests[site] = {**plain(noninferiority(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
+                                                   *settings, d_pilot=d)), "several_runs": replay_several}
     utilizations_cfg = [f"{round(u * 100)}%" for u in config["cost"]["utilizations"]]
     return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int),
-            "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"), "formats": formats,
-            "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
+            "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"), "per_call_uncovered": uncovered,
+            "formats": formats, "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
             "v3_min_ratio": config["claims"]["v3_min_ratio"], "utilizations": utilizations_cfg,
             "registry": registry, "sources": sources}
 
@@ -319,8 +372,15 @@ def utilizations(data) -> List[str]:
     return sorted(found, key=lambda u: float(u.rstrip("%")))
 
 
+def present(data, arms) -> List[str]:
+    return [a for a in arms if a in data["arms"]]
+
+
 def best_untrained(data, u) -> Tuple[Optional[str], Optional[float]]:
-    options = [(c, a) for a in UNTRAINED if a in data["arms"] and _passes_v1(data, a)
+    """The cheapest per correct query among the arms without training that are non-inferior to B0.
+    An arm with several registered test runs is never left out here: `cost_verdict` gives every
+    verdict over this set no verdict, naming it."""
+    options = [(c, a) for a in present(data, UNTRAINED) if _passes_v1(data, a)
                for c in [_cost(data, a, u)] if c is not None]
     return (min(options)[1], min(options)[0]) if options else (None, None)
 
@@ -331,26 +391,28 @@ def cost_labels(data, used: List[str]) -> List[str]:
     for arm in used:
         found = data["arms"].get(arm) or {}
         if found.get("cost_label") == "estimated":
-            labels.add("estimated")
+            labels.add(f"estimated ({arm})")
         if found.get("lower_bound"):
-            labels.add("lower bound")
+            labels.add(f"lower bound ({found.get('failed_unbilled')} failed calls of {arm} unpriced)")
         if found.get("upper_bound"):
             labels.add(f"upper bound (cache not reported for {found['cache_not_reported']} calls of {arm})")
         if found.get("slm_cost_basis") and found["slm_cost_basis"] != "measured":
-            labels.add(found["slm_cost_basis"])
+            labels.add(f"{found['slm_cost_basis']} ({arm})")
     return sorted(labels)
 
 
-def cost_verdict(data, verdict: str, used: List[str]) -> str:
-    """A cost verdict with the labels of the costs it rests on; one that rests on an upper-bound cost
-    (an LLM arm whose provider reported no cache) is inconclusive, never a confirmation."""
-    used = [a for a in used if a]
-    several = _several(data, *(data["tests"].get(f"B0|{a}") for a in used if a != "B0"))
-    if several:
-        return several
-    labels = cost_labels(data, used)
-    upper = [label for label in labels if label.startswith("upper bound")]
-    if upper and verdict not in ("no data",):
+def cost_verdict(data, verdict: str, arms: List[str]) -> str:
+    """A cost verdict over a set of arms (the minimum is taken over it, so every arm of the set counts,
+    not only the winner): no verdict when any of them has several registered test runs, naming it;
+    the labels of every arm's cost; inconclusive when any rests on an upper-bound cost, unless the
+    verdict is already no data or no verdict."""
+    arms = [a for a in dict.fromkeys(arms) if a]
+    runs = sorted({r for a in arms for r in (data["arms"].get(a, {}).get("several_runs") or [])})
+    if runs:
+        named = [a for a in arms if data["arms"].get(a, {}).get("several_runs")]
+        return f"no verdict (several test runs of one configuration of {', '.join(named)}: {', '.join(runs)})"
+    labels = cost_labels(data, arms)
+    if any(label.startswith("upper bound") for label in labels) and not verdict.startswith(("no data", "no verdict")):
         verdict = "inconclusive (rests on an upper-bound cost)"
     return f"{verdict} [costs: {'; '.join(labels)}]" if labels else verdict
 
@@ -404,37 +466,37 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     rows.append(_appendix_b(data))
     rows.append(_a5(data))
 
+    untrained, trained_arms = present(data, UNTRAINED), present(data, TRAINED)
     a6, v3, av2 = [], [], []
     for u in utilizations(data) or [""]:
         base, base_cost = best_untrained(data, u)
         b5_cost = _cost(data, "B5", u)
         if b5_cost is None or base_cost is None:
-            a6.append((u, "no data"))
+            a6.append((u, cost_verdict(data, "no data", ["B5"] + untrained)))
         elif b5_cost >= base_cost:
-            a6.append((u, cost_verdict(data, "refutes", ["B5", base])))
+            a6.append((u, cost_verdict(data, "refutes", ["B5"] + untrained)))
         else:
-            a6.append((u, cost_verdict(data, "confirms" if _passes_v1(data, "B5") else _why_not([outcome(t5)]), ["B5", base])))
-        trained = [(c, a) for a in TRAINED if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
-        several = _several(data, t4, t5)
+            a6.append((u, cost_verdict(data, "confirms" if _passes_v1(data, "B5") else _why_not([outcome(t5)]),
+                                       ["B5"] + untrained)))
+        trained = [(c, a) for a in trained_arms if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
         if base_cost is None:
-            v3.append((u, "no data"))
-        elif several:
-            v3.append((u, several))
+            v3.append((u, cost_verdict(data, "no data", trained_arms + untrained)))
         elif not trained:
-            v3.append((u, f"{_why_not([outcome(t) for t in (t4, t5) if t])} (no trained arm passes V1)"))
+            v3.append((u, cost_verdict(data, f"{_why_not([outcome(t) for t in (t4, t5) if t])} (no trained arm passes V1)",
+                                       trained_arms + untrained)))
         else:
             cheapest, arm = min(trained)
             ratio = base_cost / cheapest
             v3.append((u, cost_verdict(data, f"{'confirms' if ratio >= data['v3_min_ratio'] else 'refutes'} "
-                                             f"({ratio:.1f}× vs {base})", [arm, base])))
-        slm_costs = [(c, a) for a in TRAINED for c in [_cost(data, a, u)] if c is not None]
+                                             f"({ratio:.1f}× vs {base})", trained_arms + untrained)))
+        slm_costs = [(c, a) for a in trained_arms for c in [_cost(data, a, u)] if c is not None]
         b1 = _cost(data, "B1", u)
         if b1 is None or not slm_costs:
-            av2.append((u, "no data"))
+            av2.append((u, cost_verdict(data, "no data", ["B1"] + trained_arms)))
         else:
             cheapest, arm = min(slm_costs)
             av2.append((u, cost_verdict(data, "refutes the paper (AV2 wins)" if b1 <= cheapest else "does not refute",
-                                        ["B1", arm])))
+                                        ["B1"] + trained_arms)))
     per_u = lambda items: " · ".join(f"{u}: {v}" if u else v for u, v in items)  # noqa: E731
     rows.append({"claim": "A6: heterogeneous systems (p.6)", "result": "B5 vs the best arm without training, per utilization",
                  "verdict": per_u(a6), "power": _power(t5)})
@@ -453,7 +515,8 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     j5 = data["judgments"]["j5"]
     rows.append({"claim": "S3: clustering discovers the tasks (p.9)",
                  "result": (f"ARI {j5['ari_call_sites']:.3f} over {j5['k']} clusters; "
-                            f"{_pct(j5['truncation']['prompt_action']['truncated_fraction'])} of texts cut") if j5 else "—",
+                            f"{_pct(j5['truncation']['prompt']['truncated_fraction'])} of prompts cut (what the router embeds)")
+                 if j5 else "—",
                  "verdict": "descriptive" if j5 else "no data", "power": "—"})
     rows.append({"claim": "AV1: a same-generation LLM always wins (p.7)",
                  "result": f"B4 − B0: {_pp(t4['diff'])}" if t4 else "—", "verdict": "descriptive (not a direct test)" if t4 else "no data",
@@ -476,6 +539,8 @@ def _a5(data) -> Dict[str, str]:
 def _appendix_b(data) -> Dict[str, str]:
     row = {"claim": "Appendix B: the LLM keeps unstructured error resolution (p.16)", "power": _power(data["repair_test"])}
     per_call, repair = data["judgments"]["per_call"], data["repair_test"]
+    if data.get("per_call_uncovered"):
+        return {**row, "result": "—", "verdict": f"no data (the replay covers only {', '.join(per_call['call_sites'])})"}
     if not per_call or not repair:
         return {**row, "result": "—", "verdict": "no data"}
     routine = {site: e["agreement"]["rate"] for site, e in per_call["per_call_site"].items()
@@ -484,14 +549,14 @@ def _appendix_b(data) -> Dict[str, str]:
     result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])} from the {repair['margin_from']}, "
               f"{_ci(repair)}), {repaired}; routine agreement: "
               + (", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())) or "none measured"))
+    several = _several(data, repair)
+    if several:
+        return {**row, "result": result, "verdict": several}
     if not routine:
         return {**row, "result": result, "verdict": "no data (no routine call site measured)"}
     passes_routine = all(rate >= data["concordance_min"] for rate in routine.values())
     proxy = "the routine by the agreement proxy, which supports no per-cluster claim (D15)"
-    several = _several(data, repair)
-    if several:
-        verdict = several
-    elif not passes_routine:
+    if not passes_routine:
         verdict = f"refutes (the SLM loses on the routine; {proxy})"
     elif repaired == "non-inferior":
         verdict = "refutes (the SLM ties on repair)"
@@ -684,8 +749,8 @@ def render(data: Dict[str, Any]) -> str:
         if a:
             costs = ", ".join(f"{u + ': ' if u else ''}{_usd(c)}" for u, c in
                               sorted(a["cost_per_correct"].items(), key=lambda kv: float(kv[0].rstrip("%") or 0)))
-            usage = a["cost_label"] + (f", lower bound ({a['failed_unbilled']} failed calls unpriced)" if a["lower_bound"] else "")
-            usage += f"; SLM cost {a['slm_cost_basis']}" if a.get("slm_cost_basis") else ""
+            labels = cost_labels(data, [arm])
+            usage = a["cost_label"] + (f"; {'; '.join(labels)}" if labels else "")
             rows.append([arm, a["n"], _pct(a["ex"])] + [_pct(a["by_difficulty"].get(d)) for d in difficulties]
                         + [costs, usage])
     parts += [_table(["arm", "n", "EX"] + [f"EX {d}" for d in difficulties] + ["cost per correct query (standard prices)", "usage"], rows), ""]
@@ -718,7 +783,10 @@ def render(data: Dict[str, Any]) -> str:
                          _pct(e["agreement"]["rate"]) if e["agreement"] else "—"])
         parts += [f"## Per-call-site evaluation ({per_call.get('arm') or per_call.get('engine')}, teacher's context)", "",
                   _table(["call site", "n", "format valid", "EX (gold)", "agreement with the teacher (fidelity)"], rows), ""]
-    if data["gold_tests"]:
+    if data["per_call_uncovered"]:
+        parts += ["## Clusters with gold: per-call non-inferiority on the test inputs (SPEC §7.2 K4)", "",
+                  f"No data: the per-call replay covers only {', '.join(per_call['call_sites'])}.", ""]
+    elif data["gold_tests"]:
         parts += ["## Clusters with gold: per-call non-inferiority on the test inputs (SPEC §7.2 K4)", "",
                   _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "CI", "outcome", "power"],
                          [[site, t["n"], "—" if t.get("d_pilot") is None else f"{t['d_pilot']:.3f}", _margin(t["delta"]),

@@ -91,3 +91,17 @@ def test_one_sweep_per_engine_unless_one_is_named(tmp_path, monkeypatch):
               files={j8.EXPORT: export(400, 2.0)})
     with pytest.raises(JudgmentError, match="no sweep_id"):
         j8.run(["lt-none"], config)
+
+
+def test_naming_a_sweep_never_drops_an_engine_with_one(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_ms": 1000},
+                                             "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}})
+    runs = [loadtest("c0-a", 8, 900, 10.0, engine="slm:qwen3-8b+lora:c0", sweep="sweep-c0-a"),
+            loadtest("c0-b", 8, 900, 6.0, engine="slm:qwen3-8b+lora:c0", sweep="sweep-c0-b"),
+            loadtest("c1", 8, 900, 5.0, engine="slm:qwen3-8b+lora:c1", sweep="sweep-c1")]
+    result = read_result(j8.run(runs, config, sweeps=["sweep-c0-b"]), "J8")["result"]
+    assert result["combined"]["engines"] == ["slm:qwen3-8b+lora:c0", "slm:qwen3-8b+lora:c1"]  # c1 kept, not named
+    assert result["combined"]["sweeps"] == ["sweep-c0-b", "sweep-c1"]
+    with pytest.raises(JudgmentError, match="name exactly one"):
+        j8.run(runs, config, sweeps=["sweep-c0-a", "sweep-c0-b"])
+    assert len(result["gpu_prices_sha256"]) == 64

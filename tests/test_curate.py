@@ -211,3 +211,17 @@ def test_run_curate_refuses_overlapping_sources_and_a_changed_snapshot(tmp_path,
     snapshot.write_text(json.dumps(changed))
     with pytest.raises(CurationError, match="does not match its manifest"):
         run_curate([first], str(config_path))
+
+
+def test_curation_runs_the_sql_at_the_pre_registered_date(tmp_path, monkeypatch):
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    today = "SELECT id FROM gas_t WHERE date('now') = '2026-09-30'"  # rows only on the fixed date
+    calls = [call("agent-d", "1", "generate_candidate", "t:0", response=today, parsed={"SQL": today})]
+    fixed = teacher_config(config)
+    assert fixed["eval"]["fixed_date"] == "2026-09-30"
+    out = run_curate([b0_train_run(fixed, "agent-d", calls)], str(config_path))
+    assert [e["question_id"] for e in read_jsonl(out / "examples.jsonl")] == ["1"]
+    undated = json.loads(json.dumps(fixed))
+    undated["eval"]["fixed_date"] = None
+    with pytest.raises(CurationError, match="no eval.fixed_date"):
+        run_curate([b0_train_run(undated, "agent-u", calls)], str(config_path))

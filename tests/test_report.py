@@ -138,57 +138,111 @@ def test_cost_verdicts_carry_their_labels_and_an_upper_bound_is_inconclusive():
     data = data_with(tests, costs)
     data["arms"]["B5"]["slm_cost_basis"] = "extrapolated from per-adapter load tests"
     assert row(report.claims_map(data), "V3")["verdict"] == \
-        "20%: confirms (20.0× vs B0) [costs: extrapolated from per-adapter load tests]"
+        "20%: confirms (20.0× vs B0) [costs: extrapolated from per-adapter load tests (B5)]"
     data["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)
     v3 = row(report.claims_map(data), "V3")["verdict"]
     assert v3.startswith("20%: inconclusive (rests on an upper-bound cost) [costs: ") and \
         "upper bound (cache not reported for 7 calls of B0)" in v3
     assert row(report.claims_map(data), "A6")["verdict"].startswith("20%: inconclusive (rests on an upper-bound cost)")
+    data["arms"]["B5"].update(lower_bound=True, failed_unbilled=3)
+    assert "lower bound (3 failed calls of B5 unpriced)" in row(report.claims_map(data), "A6")["verdict"]
 
 
 def test_several_test_runs_of_one_configuration_get_no_verdict():
     tests = {"B0|B4": {**j4(True), "several_runs": ["agent-B4-a", "agent-B4-b"]}, "B0|B5": j4(True)}
-    rows = report.claims_map(data_with(tests, {"B0": {"": 1.0}, "B4": {"20%": 0.1}}))
+    data = data_with(tests, {"B0": {"": 1.0}, "B4": {"20%": 0.1}})
+    data["arms"]["B4"]["several_runs"] = ["agent-B4-a", "agent-B4-b"]
+    rows = report.claims_map(data)
     assert row(rows, "V1")["verdict"] == "no verdict (several test runs of one configuration: agent-B4-a, agent-B4-b)"
-    assert row(rows, "V3")["verdict"] == "20%: no verdict (several test runs of one configuration: agent-B4-a, agent-B4-b)"
+    assert row(rows, "V3")["verdict"] == \
+        "20%: no verdict (several test runs of one configuration of B4: agent-B4-a, agent-B4-b)"
+
+
+def test_every_arm_of_a_set_counts_not_only_its_cheapest():
+    """V3 takes the cheapest untrained arm: B0 here. B1 is dearer (it loses) but its cost is an upper
+    bound, and B2-cheap has several registered runs; neither may be left out of the verdict."""
+    tests = {**j4_results(), "B0|B1": j4(True), "B0|B2-cheap": j4(True)}
+    costs = {"B0": {"": 1.0}, "B1": {"": 3.0}, "B4": {"20%": 0.1}, "B5": {"20%": 0.05}}
+    data = data_with(tests, costs)
+    data["arms"]["B1"].update(upper_bound=True, cache_not_reported=4)
+    v3 = row(report.claims_map(data), "V3")["verdict"]
+    assert v3.startswith("20%: inconclusive (rests on an upper-bound cost)") and "calls of B1" in v3
+    data["arms"]["B2-cheap"] = {"cost_per_correct": {"": 5.0}, "several_runs": ["b2-a", "b2-b"]}
+    for claim in ("V3", "A6"):
+        assert row(report.claims_map(data), claim)["verdict"] == \
+            "20%: no verdict (several test runs of one configuration of B2-cheap: b2-a, b2-b)"
+
+
+def test_a_missing_pilot_reads_no_verdict_even_on_an_upper_bound_cost():
+    tests = j4_results(pilot=None)
+    data = data_with(tests, {"B0": {"": 1.0}, "B5": {"20%": 0.5}})
+    data["arms"]["B0"].update(upper_bound=True, cache_not_reported=2)
+    assert row(report.claims_map(data), "A6")["verdict"].startswith("20%: no verdict (no pilot d)")
 
 
 def registry_of(*runs):
-    return {"available": True, "runs": [{"run_id": r, "type": "agent", "arm": a, "engine": None, "status": st,
+    return {"available": True, "runs": [{"run_id": r, "type": t, "arm": a, "engine": None, "status": st,
                                           "commit": "c", "prereg_hash": "h", "started_at": "2026-10-01T09:00:00+00:00",
-                                          "facts": f} for r, a, st, f in runs]}
+                                          "facts": f} for r, t, a, st, f in runs]}
+
+
+TRAINED_FACTS = {"choice": "C", "centroids": "K", "adapters": "A"}
 
 
 def test_a_test_report_is_bound_to_the_registry(tmp_path, monkeypatch):
     from fixtures.fake import repo, write_run
     repo(tmp_path, monkeypatch)
-    arms = {"B0": {"run_id": "b0"}, "B4": {"run_id": "b4"}}
-    judged = {"j6": {"choice_fact": {"sha256": "C"}}, "j5": {"centroids": {"sha256": "K"}},
+    arms = {"B0": {"run_id": "b0"}, "B4": {"run_id": "b4"}, "B5": {"run_id": "b5"}}
+    judged = {"j6": {"choice_fact": {"sha256": "C"}, "choice": "qwen"}, "j5": {"centroids": {"sha256": "K"}},
               "j7": {"adapters": "A", "allocation_fact": {"sha256": "L"}}}
-    good = registry_of(("b0", "B0", "done", {}), ("b4", "B4", "done", {"choice": "C", "centroids": "K", "adapters": "A"}))
-    bind = lambda registry, reads={}, pilot={}, split="test": report._registry_bindings(  # noqa: E731
-        split, {a: dict(v) for a, v in arms.items()}, registry, judged, reads, pilot)
-    bind(good)
+    expected = report._expected_facts({}, judged)
+    rows = [("b0", "agent", "B0", "done", {}), ("b4", "agent", "B4", "done", TRAINED_FACTS),
+            ("b5", "agent", "B5", "done", {**TRAINED_FACTS, "allocation": "L"}), ("r4", "replay", "B4", "done", TRAINED_FACTS)]
+    per_call = {"per_call": {"teacher": {"run_id": "b0"}, "replay": {"run_id": "r4"}}}
+
+    def bind(runs=rows, reads=per_call, pilot={}, split="test", expected=expected, arms=arms):
+        marked = {a: dict(v) for a, v in arms.items()}
+        several = report._registry_bindings(split, marked, registry_of(*runs), judged, reads, pilot, expected)
+        return marked, several
+    bind()
     with pytest.raises(JudgmentError, match="not a done entry"):
-        bind(registry_of(("b0", "B0", "failed", {}), good["runs"][1].values().__iter__() and ("b4", "B4", "done", {})))
+        bind([("b0", "agent", "B0", "failed", {})] + rows[1:])
     with pytest.raises(JudgmentError, match="not registered"):
-        bind(registry_of(("b4", "B4", "done", {"choice": "C", "centroids": "K", "adapters": "A"})))
-    with pytest.raises(JudgmentError, match="recorded the centroids fact"):
-        bind(registry_of(("b0", "B0", "done", {}), ("b4", "B4", "done", {"choice": "C", "centroids": "X", "adapters": "A"})))
+        bind(rows[1:])
+    for name, wrong in (("choice", "X"), ("centroids", "X"), ("adapters", "X")):
+        with pytest.raises(JudgmentError, match=f"recorded the {name} fact"):
+            bind([rows[0], ("b4", "agent", "B4", "done", {**TRAINED_FACTS, name: wrong})] + rows[2:])
+    with pytest.raises(JudgmentError, match="recorded the allocation fact"):
+        bind(rows[:2] + [("b5", "agent", "B5", "done", {**TRAINED_FACTS, "allocation": "X"})] + rows[3:])
+    for missing in ("choice", "adapters", "allocation"):  # a plan without them is refused, never unchecked
+        with pytest.raises(JudgmentError, match="cannot be checked"):
+            bind(expected={k: v for k, v in expected.items() if k != missing})
+    with pytest.raises(JudgmentError, match="per-call evaluation's replay"):
+        bind(rows[:3] + [("r4", "replay", "B4", "done", {**TRAINED_FACTS, "centroids": "X"})])
+    with pytest.raises(JudgmentError, match="per-call evaluation's run r4 is not a done entry"):
+        bind(rows[:3] + [("r4", "replay", "B4", "failed", TRAINED_FACTS)])
     with pytest.raises(JudgmentError, match="another teacher run"):
-        bind(good, reads={"per_call": {"teacher": {"run_id": "other-b0"}}})
+        bind(reads={"per_call": {"teacher": {"run_id": "other-b0"}, "replay": {"run_id": "r4"}}})
     with pytest.raises(JudgmentError, match="test registry"):
-        bind({"available": False, "reason": "not a git checkout", "runs": []})
-    bind({"available": False, "reason": "x", "runs": []}, split="calib")  # only a test report is bound
-    marked = {a: dict(v) for a, v in arms.items()}
-    twice = registry_of(*[(r["run_id"], r["arm"], r["status"], r["facts"]) for r in good["runs"]], ("b4-again", "B4", "done", {}))
-    report._registry_bindings("test", marked, twice, judged, {}, {})
+        report._registry_bindings("test", {}, {"available": False, "reason": "not a git checkout", "runs": []}, judged, {}, {},
+                                  expected)
+    report._registry_bindings("calib", {}, {"available": False, "reason": "x", "runs": []}, judged, {}, {}, expected)
+    undated = registry_of(*rows)
+    undated["runs"][0]["started_at"] = None
+    with pytest.raises(JudgmentError, match="without started_at"):
+        report._registry_bindings("test", {a: dict(v) for a, v in arms.items()}, undated, judged, per_call, {}, expected)
+    marked, several = bind(rows + [("b4-again", "agent", "B4", "done", {}), ("r4-again", "replay", "B4", "done", {})])
     assert marked["B4"]["several_runs"] == ["b4", "b4-again"] and marked["B0"]["several_runs"] is None
+    assert several == ["r4", "r4-again"]
     write_run("eval-pilot-late", {"type": "eval", "status": None, "finished_at": "2026-10-01T10:00:00+00:00"})
     write_run("eval-pilot-early", {"type": "eval", "status": None, "finished_at": "2026-09-30T10:00:00+00:00"})
-    bind(good, pilot={"B0": "eval-pilot-early"})
+    bind(pilot={"B0": "eval-pilot-early"})
     with pytest.raises(JudgmentError, match="did not finish before the first test"):
-        bind(good, pilot={"B0": "eval-pilot-early", "B3": "eval-pilot-late"})
+        bind(pilot={"B0": "eval-pilot-early", "B3": "eval-pilot-late"})
+    late_zeroshot = {**per_call, "j6": {"qwen": {"replay_eval": {"run_id": "eval-pilot-late"},
+                                                  "teacher_eval": {"run_id": "eval-pilot-early"}}}}
+    with pytest.raises(JudgmentError, match="J6's zero-shot replay_eval"):  # the K4 and repair pilots too
+        bind(reads=late_zeroshot)
 
 
 def test_the_chart_legend_reads_the_configured_utilizations():
@@ -292,12 +346,16 @@ def pipeline(tmp_path, monkeypatch):
                                                                 for c in payload["clusters"]}})
     assigned = lambda c: clusters.assign(c["prompt_messages"], payload)  # noqa: E731
     # load test and S6 on calib
-    for concurrency, p95, rps in ((1, 300, 3.0), (8, 800, 12.0), (32, 2500, 20.0)):
-        write_run(f"loadtest-{concurrency}", {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
-                                              "prefix_cache": True, "sweep_id": "sweep-qwen3-8b"},
-                  files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
-                                                         "request_throughput": {"unit": "requests/sec", "avg": rps}}})
-    j8_path = j8.run(["loadtest-1", "loadtest-8", "loadtest-32"], config)
+    loadtests = []
+    for engine, slug in (("slm:qwen3-8b", "base"), ("slm:qwen3-8b+lora:c", "lora-c")):  # B3's base, B4/B5's adapter
+        for concurrency, p95, rps in ((1, 300, 3.0), (8, 800, 12.0), (32, 2500, 20.0)):
+            run_id = f"loadtest-{slug}-{concurrency}"
+            write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": "L4", "concurrency": concurrency,
+                               "prefix_cache": True, "sweep_id": f"sweep-{slug}"},
+                      files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
+                                                             "request_throughput": {"unit": "requests/sec", "avg": rps}}})
+            loadtests.append(run_id)
+    j8_path = j8.run(loadtests, config)
     b4_calib = replay(calib, "replay-B4-calib", "slm:qwen3-8b+lora:c", 0.99, cluster_of=assigned)
     run("replay-B4-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "arm": "B4", "split": "calib",
                             "facts": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name}}, b4_calib)
@@ -381,6 +439,11 @@ def pipeline(tmp_path, monkeypatch):
             {**identity, "run_id": f"agent-{arm}-test", "split": "test", "started_at": "2026-10-01T09:00:00+00:00"}))
         (tmp_path / "registry" / "test" / f"agent-{arm}-test.manifest.json").write_text(json.dumps(
             {**identity, "status": "done", "facts": recorded.get(arm, {})}))
+    replay_identity = {"type": "replay", "arm": "B4", "engine": None, "commit": "c" * 40, "prereg_hash": "d" * 64}
+    (tmp_path / "registry" / "test" / "replay-B4-test.intent.json").write_text(json.dumps(
+        {**replay_identity, "run_id": "replay-B4-test", "split": "test", "started_at": "2026-10-01T09:30:00+00:00"}))
+    (tmp_path / "registry" / "test" / "replay-B4-test.manifest.json").write_text(json.dumps(
+        {**replay_identity, "status": "done", "facts": recorded["B4"]}))
     subprocess.run(["git", "-C", str(tmp_path), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "registry"], check=True, capture_output=True)
     return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path,
@@ -410,11 +473,12 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     pilot_rows = {arm: {r["question_id"]: r["correct"] for r in read_jsonl(paths.RUNS / f"eval-{arm}-pilot" / "results.jsonl")}
                   for arm in ("B0", "B3")}
     assert data["d_pilot"] == sum(pilot_rows["B0"][q] != pilot_rows["B3"][q] for q in PILOT) / len(PILOT)  # the pilot ids only
-    assert [r["run_id"] for r in data["registry"]["runs"]] == sorted(f"agent-{arm}-test" for arm in QUALITY)
+    assert [r["run_id"] for r in data["registry"]["runs"]] == sorted(f"agent-{arm}-test" for arm in QUALITY) + ["replay-B4-test"]
     assert data["arms"]["B5"]["replaceable_fraction"] is not None
     assert [data["arms"][a]["slm_cost_basis"] for a in ("B3", "B4", "B5")] == [
         "measured", "extrapolated from per-adapter load tests", "extrapolated from per-adapter load tests"]
-    assert "SLM cost extrapolated from per-adapter load tests" in markdown
+    b4_row = next(line for line in markdown.splitlines() if line.startswith("| B4 |"))
+    assert b4_row.endswith("| measured; extrapolated from per-adapter load tests (B4) |")  # the arm table's labels
     j5 = read_result(pipeline["j5"], "J5")["result"]
     assert f"ARI {j5['ari_call_sites']:.3f}" in markdown
     svg = ET.fromstring((out / "ex_cost.svg").read_text())
@@ -466,9 +530,9 @@ def test_generation_and_repair_get_their_own_tests_with_the_pilot_restricted(pip
     pilot = sorted(set(PILOT) & set(gold["teacher"]))
     assert data["repair_test"]["d_pilot"] == d_on(pilot) != d_on(sorted(gold["teacher"]))  # the pilot questions only
     a4 = next(r for r in data["map"] if r["claim"].startswith("A4"))
-    assert "B5 against B0: " in a4["result"]
+    assert a4["result"].endswith(f"B5 against B0: {report.outcome(data['tests']['B0|B5'])}")
     a6 = next(r for r in data["map"] if r["claim"].startswith("A6"))
-    assert "[costs: extrapolated from per-adapter load tests]" in a6["verdict"]  # B5's SLM cost
+    assert "[costs: extrapolated from per-adapter load tests (B5)]" in a6["verdict"]  # B5's SLM cost
 
 
 def test_the_report_refuses_prices_of_different_dates_and_mismatched_results(pipeline):
@@ -477,7 +541,7 @@ def test_the_report_refuses_prices_of_different_dates_and_mismatched_results(pip
     dated = json.loads(json.dumps(pipeline["config"]))
     dated["prices"]["as_of"] = "2026-10-15"
     for key, value, message in (
-            (("arms", "B1", "cost"), relative(j3.run("agent-B1-test", "eval-B1", None, dated)), "different dates"),
+            (("arms", "B1", "cost"), relative(j3.run("agent-B1-test", "eval-B1", None, dated)), "different price tables"),
             (("format", "B4"), plan["format"]["B0"], "not of B4's execution"),
             (("per_call",), relative(write_result("J2", *j2.judge_run("agent-B4-test"))), "replay routed as B4")):
         changed = json.loads(json.dumps(plan))
@@ -489,3 +553,100 @@ def test_the_report_refuses_prices_of_different_dates_and_mismatched_results(pip
         with pytest.raises(JudgmentError, match=message):
             report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
                        pilot_ids=PILOT)
+
+
+def test_a_price_table_of_the_same_date_but_other_prices_is_refused(pipeline):
+    from bench.judge import j3
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    repriced = json.loads(json.dumps(pipeline["config"]))
+    repriced["prices"]["table"]["engine-model"]["output_per_mtok"] = 9.9  # same as_of, another table
+    plan["arms"]["B1"]["cost"] = relative(j3.run("agent-B1-test", "eval-B1", None, repriced))
+    pipeline["plan"].write_text(yaml.safe_dump(plan))
+    with pytest.raises(JudgmentError, match="different price tables"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+
+
+def test_a_replay_of_some_call_sites_decides_neither_appendix_b_nor_k4(pipeline):
+    """The per-call replay declares the call sites it replayed: covering only the gold ones, it
+    cannot say whether the SLM passes the routine, so Appendix B and K4 are no data."""
+    from bench.judge import j2
+    from fixtures.fake import write_run
+    root = pipeline["root"]
+    b0 = j2.calls_of("agent-B0-test")
+    gold_only = [c for c in b0 if c["call_site"] in ("generate_candidate", "revise")]
+    calls = [{**c, "run_id": "replay-gold"} for c in json.loads(json.dumps(read_jsonl(paths.RUNS / "replay-B4-test" / "calls.jsonl")))
+             if c["call_site"] in ("generate_candidate", "revise")]
+    manifest = json.loads((paths.RUNS / "replay-B4-test" / "manifest.json").read_text())
+    write_run("replay-gold", {**manifest, "run_id": "replay-gold", "call_sites": ["generate_candidate", "revise"]}, calls)
+    evaluated = [r for r in read_jsonl(paths.RUNS / "eval-B4-test-per-call" / "results.jsonl")]
+    write_run("eval-gold", {"type": "eval", "source_run_id": "replay-gold", "per_call": True, "status": None,
+                            "finished_at": "2026-10-02T12:00:00+00:00"}, files={"results.jsonl": evaluated})
+    identity = {"type": "replay", "arm": "B4", "engine": None, "commit": "c" * 40, "prereg_hash": "e" * 64}
+    registered = json.loads((root / "registry" / "test" / "replay-B4-test.manifest.json").read_text())
+    (root / "registry" / "test" / "replay-gold.intent.json").write_text(json.dumps(
+        {**identity, "run_id": "replay-gold", "split": "test", "started_at": "2026-10-01T09:40:00+00:00"}))
+    (root / "registry" / "test" / "replay-gold.manifest.json").write_text(json.dumps(
+        {**identity, "status": "done", "facts": registered["facts"]}))
+    subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "a gold-only replay"], check=True, capture_output=True)
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    plan["per_call"] = relative(write_result("J2", *j2.judge_replay("replay-gold", "eval-gold", "eval-B0-test-per-call")))
+    pipeline["plan"].write_text(yaml.safe_dump(plan))
+    out = report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+    data = json.loads((out / "report.json").read_text())
+    appendix_b = next(r for r in data["map"] if r["claim"].startswith("Appendix B"))
+    assert appendix_b["verdict"] == "no data (the replay covers only generate_candidate, revise)"
+    assert data["per_call_uncovered"] == sorted(report.ROUTINE)
+    assert "No data: the per-call replay covers only generate_candidate, revise." in (out / "report.md").read_text()
+    assert gold_only  # the teacher had gold calls to replay
+
+
+def test_several_registered_runs_of_an_arm_leave_its_comparisons_without_a_verdict(pipeline):
+    root = pipeline["root"]
+    identity = json.loads((root / "registry" / "test" / "agent-B4-test.manifest.json").read_text())
+    (root / "registry" / "test" / "agent-B4-again.intent.json").write_text(json.dumps(
+        {"type": "agent", "arm": "B4", "engine": None, "prereg_hash": "d" * 64, "run_id": "agent-B4-again",
+         "split": "test", "started_at": "2026-10-01T11:00:00+00:00"}))
+    (root / "registry" / "test" / "agent-B4-again.manifest.json").write_text(json.dumps({**identity, "status": "failed"}))
+    subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "B4 again"], check=True, capture_output=True)
+    data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
+                                  pilot_ids=PILOT) / "report.json").read_text())
+    several = "agent-B4-again, agent-B4-test"
+    assert data["tests"]["B0|B4"]["several_runs"] == ["agent-B4-again", "agent-B4-test"]
+    v1 = next(r for r in data["map"] if r["claim"].startswith("V1"))
+    assert v1["verdict"] == f"no verdict (several test runs of one configuration: {several})"
+    for claim in ("V3", "AV2"):
+        verdict = next(r for r in data["map"] if r["claim"].startswith(claim))["verdict"]
+        assert all(part.endswith(f"no verdict (several test runs of one configuration of B4: {several})")
+                   for part in verdict.split(" · "))
+
+
+def test_the_report_refuses_a_cost_that_cannot_say_what_it_is_or_used_another_load_test(pipeline):
+    from bench.judge import j8
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    b1 = read_result(plan["arms"]["B1"]["cost"], "J3")
+    silent = {k: v for k, v in b1["result"].items() if k not in ("upper_bound", "cache_not_reported")}
+    changed = json.loads(json.dumps(plan))
+    changed["arms"]["B1"]["cost"] = relative(write_result("J3", b1["reads"], silent))
+    pipeline["plan"].write_text(yaml.safe_dump(changed))
+    with pytest.raises(JudgmentError, match="records no upper_bound, cache_not_reported"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+    only_adapter = [f"loadtest-lora-c-{c}" for c in (1, 8, 32)]
+    other = relative(j8.run(only_adapter, pipeline["config"]))
+    b4 = read_result(plan["arms"]["B4"]["cost"], "J3")
+    from bench.judge import j3
+    changed = json.loads(json.dumps(plan))
+    changed["arms"]["B4"]["cost"] = relative(j3.run(b4["reads"]["run"]["run_id"], "eval-B4", other, pipeline["config"]))
+    pipeline["plan"].write_text(yaml.safe_dump(changed))
+    with pytest.raises(JudgmentError, match="another load test than the plan's j8"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+
+
+def test_the_s3_row_reports_the_prompts_cut(pipeline):
+    data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
+                                  pilot_ids=PILOT) / "report.json").read_text())
+    j5 = read_result(pipeline["j5"], "J5")["result"]
+    s3 = next(r for r in data["map"] if r["claim"].startswith("S3"))
+    cut = j5["truncation"]["prompt"]["truncated_fraction"]
+    assert s3["result"].endswith(f"{100 * cut:.1f}% of prompts cut (what the router embeds)")

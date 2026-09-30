@@ -80,7 +80,8 @@ def test_run_reads_the_execution_its_eval_and_j8(tmp_path, monkeypatch):
     write_run("agent-B4", {"type": "agent", "arm": "B4", "split": "test", "question_ids": ["1", "2"]}, calls)
     write_run("eval-B4", {"type": "eval", "source_run_id": "agent-B4", "status": None},
               files={"results.jsonl": [{"question_id": "1", "correct": True}, {"question_id": "2", "correct": False}]})
-    j8 = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM})
+    j8 = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM,
+                                 "combined": {"rule": "r", "engines": ["slm:qwen3-8b+lora:c0"], "loadtests": ["lt"]}})
     result = read_result(j3.run("agent-B4", "eval-B4", str(j8), config), "J3")
     assert result["result"]["per_correct"]["standard@50%"] == pytest.approx(0.004)
     assert result["result"]["per_question"]["standard@50%"] == pytest.approx(0.002)
@@ -103,15 +104,15 @@ def test_slm_cost_through_adapters_is_labelled_extrapolated(tmp_path, monkeypatc
     base = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM,
                                    "combined": {"rule": "r", "engines": ["slm:qwen3-8b"], "loadtests": ["lt"]}})
     b3 = read_result(j3.run("agent-B3", None, str(base), config), "J3")["result"]
-    b4 = read_result(j3.run("agent-B4x", None, str(base), config), "J3")["result"]
     assert b3["slm_cost_basis"]["basis"] == "measured"
-    assert b4["slm_cost_basis"]["basis"] == "extrapolated from per-adapter load tests"
-    assert b4["slm_cost_basis"]["call_engines"] == ["slm:qwen3-8b+lora:c0"]
+    with pytest.raises(JudgmentError, match="did not measure every SLM engine"):  # the adapter was never load-tested
+        j3.run("agent-B4x", None, str(base), config)
     # even when the load test measured that very adapter: a B4/B5 server serves many adapters at once
     adapter = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM,
                                       "combined": {"rule": "r", "engines": ["slm:qwen3-8b+lora:c0"], "loadtests": ["lt"]}})
     alone = read_result(j3.run("agent-B4x", None, str(adapter), config), "J3")["result"]
     assert alone["slm_cost_basis"]["basis"] == "extrapolated from per-adapter load tests"
+    assert alone["slm_cost_basis"]["call_engines"] == ["slm:qwen3-8b+lora:c0"]
 
 
 def test_a_cache_not_reported_is_priced_without_discount_as_an_upper_bound():
@@ -137,3 +138,18 @@ def test_failed_slm_calls_count_on_both_sides_of_the_fraction():
     fraction = j3.judge([slm_ok, slm_failed, llm], ["1"], None, PRICES, "teacher-model", SLM)["replaceable_fraction"]
     assert fraction["calls"] == pytest.approx(2 / 3)  # both SLM calls, of all three
     assert fraction["tokens"] == pytest.approx(0.5)   # billed calls on both sides
+
+
+def test_slm_calls_are_priced_at_the_engines_they_used(tmp_path, monkeypatch):
+    """One load test measures the base and an adapter: the base's calls cost the base's price, not
+    the dearer adapter's."""
+    _, config = repo(tmp_path, monkeypatch, {"prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}}})
+    write_run("agent-B3y", {"type": "agent", "arm": "B3", "split": "test", "question_ids": ["1"]},
+              [call("agent-B3y", "1", "select_tables", parsed={}, role="slm", engine="slm:qwen3-8b", model="m",
+                    use=usage(10, 0, 1))])
+    both = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": {"100%": 0.5},
+                                   "engines": {"slm:qwen3-8b": {"cost_per_request": {"100%": 0.1}},
+                                               "slm:qwen3-8b+lora:c0": {"cost_per_request": {"100%": 0.5}}},
+                                   "combined": {"rule": "r", "engines": ["slm:qwen3-8b", "slm:qwen3-8b+lora:c0"]}})
+    result = read_result(j3.run("agent-B3y", None, str(both), config), "J3")["result"]
+    assert result["total"]["standard@100%"] == pytest.approx(0.1) and result["slm_cost_basis"]["basis"] == "measured"
