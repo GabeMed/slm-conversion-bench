@@ -249,3 +249,27 @@ def test_a_ctrl_c_commits_the_manifest_as_interrupted(repo, monkeypatch):
     (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
     committed = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))
     assert (committed["status"], committed["stopped_by"]) == ("interrupted", "KeyboardInterrupt: ")
+
+
+def test_a_key_too_short_to_redact_keeps_a_test_run_from_starting(repo, monkeypatch):
+    import yaml
+    root, config_path = repo
+    register(root, config_path)
+    config = yaml.safe_load(config_path.read_text())
+    config["roles"]["production_llm"]["endpoint"]["api_key_env"] = "BENCH_TEST_PROVIDER_KEY"
+    config_path.write_text(yaml.safe_dump(config))
+    git(root, "commit", "-q", "-am", "the production LLM needs a key")  # (the barrier then refuses: re-register)
+    prereg = json.loads((root / "prereg" / "manifest.json").read_text())
+    prereg["config_sha256"] = runner.config_sha256(runner.load_config(config_path))
+    (root / "prereg" / "manifest.json").write_text(json.dumps(prereg, sort_keys=True) + "\n")
+    (root / "prereg" / "HASH").write_text(sha(root / "prereg" / "manifest.json") + "\n")
+    git(root, "commit", "-q", "-am", "re-register")
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setenv("BENCH_TEST_PROVIDER_KEY", "abc12")  # a key, and too short to redact without damage
+    with pytest.raises(barrier.TestSplitLocked, match="BENCH_TEST_PROVIDER_KEY is shorter than 8"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert not (root / "registry" / "test").exists()
+    monkeypatch.setenv("BENCH_TEST_PROVIDER_KEY", "a-long-enough-provider-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "1")  # set, but this run never uses it (fake embeddings): no refusal
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"

@@ -98,6 +98,17 @@ def update_call_sites(run_ids: List[str]) -> Path:
     return path
 
 
+def check_keys(key_envs: List[str]) -> None:
+    """Every key an execution on test uses is long enough to be redacted from its public record: a
+    shorter one would stay verbatim wherever a provider echoes it (redacting it would corrupt the
+    record instead: every "1" of it for a key "1")."""
+    short = sorted({name for name in key_envs if name and 0 < len(os.environ.get(name, "")) < SECRET_MIN_LENGTH})
+    if short:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: {', '.join(short)} is shorter than "
+                                      f"{SECRET_MIN_LENGTH} characters, too short to be redacted from the public "
+                                      f"record without corrupting it")
+
+
 def registry_pushed() -> None:
     """Every earlier registry commit is on origin/main (checked after the barrier's fetch): a record
     that lives only in a local clone is no record."""

@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from bench import barrier, data, paths
 from bench.agent import hooks
-from bench.agent.runner import _prepare_chess, check_engines, few_shot_for, finish, open_run
+from bench.agent.runner import _prepare_chess, check_engines, few_shot_for, finish, open_run, used_key_envs
 from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES, read_calls, validate_calls
 from bench.contracts.config import config_sha256, engine_spec, load_config
 from bench.provenance import scrub
@@ -150,7 +150,8 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
               "engine": engine, "arm": arm, "call_sites": sorted(call_sites) if call_sites else None,
               "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded}
     label = arm or re.sub(r"[^A-Za-z0-9_.-]+", "_", engine)
-    run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields)
+    run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields,
+                                          used_key_envs(config, engines, retrieval=False))
     outcome = {"harness_errors": {}, "model_failures": {}, "replayed": set()}
     stopped_by = None
     try:

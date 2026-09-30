@@ -278,11 +278,24 @@ def select_questions(config: Dict[str, Any], split: str, ids: Optional[List[str]
     return questions, sorted(questions, key=int)[:limit] if limit else sorted(questions, key=int)
 
 
+def used_key_envs(config: Dict[str, Any], engines: List[str], retrieval: bool) -> List[str]:
+    """The environment variables holding the keys an execution uses: those of its engines, and
+    OPENAI_API_KEY when it retrieves with OpenAI embeddings."""
+    from bench.contracts.config import engine_spec
+    names = [engine_spec(config, engine)["endpoint"].get("api_key_env") for engine in engines]
+    if retrieval and config["embeddings"]["provider"] == "openai":
+        names.append("OPENAI_API_KEY")
+    return [name for name in names if name]
+
+
 def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str, split: str,
-             fields: Dict[str, Any]) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
+             fields: Dict[str, Any], key_envs: List[str]) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
     """Create runs/<run_id>/ with its manifest and configuration snapshot, after every precondition.
-    On the test split: the registered call sites are required, and the intent is committed first.
+    On the test split: the registered call sites are required, every key used is long enough to be
+    redacted, and the intent is committed first.
     Returns (run_dir, manifest, the call sites a test run may emit or None)."""
+    if split == "test":
+        registry.check_keys(key_envs)
     test = registry.registered_call_sites() if split == "test" else None
     started = _now()
     run_id = f"{run_type}-{label}-{split}-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
@@ -334,8 +347,12 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded}
     if arm == "B2":
         fields.update({"mode": "single_call", "engine": engine})
+    if arm == "B2":
+        key_envs = used_key_envs(config, [engine], retrieval=False)
+    else:
+        key_envs = used_key_envs(config, possible_engines(arm, config), retrieval=True)
     run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
-                                          split, fields)
+                                          split, fields, key_envs)
     outcome = new_outcome()
     stopped_by = None
     try:

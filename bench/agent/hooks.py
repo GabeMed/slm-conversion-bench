@@ -333,13 +333,15 @@ MODEL_REJECTIONS = (400, 413)  # the request this engine rejects (a prompt longe
 
 
 def classify(exception: BaseException) -> str:
-    """What an exception of the model call is: `transport` (retried: 408, 429, >= 500, a timeout, no
-    connection, which the OpenAI client wraps its HTTP layer's errors in), `model` (the closed set of
-    the model's failures: the engine rejects this request, 400 or 413), or `harness` (everything
-    else: another status, a response that does not validate, anything unrecognised)."""
+    """What an exception of the model call is: `transport` (retried: 408, 429, >= 500, and any timeout
+    or lost connection, whichever layer raised it: the OpenAI client's own, httpx's, Python's), `model`
+    (the closed set of the model's failures: the engine rejects this request, 400 or 413), or
+    `harness` (everything else: another status, a response that does not validate, anything
+    unrecognised)."""
+    import httpx
     import openai
-    if isinstance(exception, openai.APIConnectionError):  # APITimeoutError included
-        return "transport"
+    if isinstance(exception, (openai.APIConnectionError, httpx.TransportError, TimeoutError, ConnectionError)):
+        return "transport"  # APIConnectionError includes APITimeoutError
     if isinstance(exception, openai.APIStatusError):
         code = exception.status_code
         if code in (408, 429) or code >= 500:

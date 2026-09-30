@@ -151,6 +151,15 @@ def test_only_a_rejected_request_is_the_models_failure_and_is_not_retried(calls,
     assert line["error"].startswith(cls.__name__) and validate_calls([line]) == []
 
 
+@pytest.mark.parametrize("make", [lambda: TimeoutError("read timed out"), lambda: ConnectionResetError("reset by peer"),
+                                  lambda: httpx.ReadTimeout("read timeout", request=REQUEST)],
+                         ids=["TimeoutError", "ConnectionError", "httpx"])
+def test_a_timeout_or_lost_connection_is_retried_whichever_layer_raised_it(calls, make):
+    calls["model"] = ScriptedModel([make(), '{"table_names": ["t"]}'])
+    assert hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser()) == {"table_names": ["t"]}
+    assert [line["attempt"] for line in read_calls(calls["path"])] == [1, 2] and hooks.take_harness_errors() == []
+
+
 def test_a_request_timeout_is_retried(calls):
     calls["model"] = ScriptedModel([status_error(openai.APIStatusError, 408), '{"table_names": ["t"]}'])
     assert hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser()) == {"table_names": ["t"]}
