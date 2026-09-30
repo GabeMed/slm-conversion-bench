@@ -1,6 +1,7 @@
 """`bench eval <run_id> --per-call` (design §5.1): the SQL of every generate_candidate and revise
 invocation in a run's calls.jsonl, from the last attempt that parsed, scored against the gold of its
 question, under the same checks as the end-to-end eval."""
+import collections
 import json
 import uuid
 
@@ -47,17 +48,21 @@ def calls_of_a_replay():
     failed = call("1", "generate_candidate", "generate_candidate_one:0", None)
     return [
         failed,
-        call("1", "generate_candidate", "generate_candidate_one:0", {"SQL": GOLD, "plan": ""}, 2, failed["call_id"]),
+        call("1", "generate_candidate", "generate_candidate_one:0",
+             {"SQL": "SELECT count(id) FROM gas_t WHERE segment = 'Premium' AND country = 'CZE'", "plan": ""},
+             2, failed["call_id"]),
         call("1", "revise", "revise_1:0", {"refined_sql_query": "SELECT 0"}),
         call("2", "agent_cg", "cg:0", {"tool": "generate_candidate"}),
         call("2", "generate_candidate", "generate_candidate_one:0", None),
+        call("2", "revise", "revise_1:0", {"refined_sql_query": "SELECT count(id) FROM gas_t WHERE country = 'CZE'"}),
         call("3", "select_tables", "single", {"table_names": ["gas_t"]}),
         call("3", "generate_candidate", "generate_candidate_one:0", {"SQL": "SELECT count(id) FROM gas_t"}),
+        call("3", "revise", "revise_1:0", {"refined_sql_query": "-- nothing to fix"}),
     ]
 
 
-def replay_run(repo, calls, status="done", split="train", question_ids=("1", "2", "3")):
-    _, _, config = repo
+def replay_run(repo, calls, status="done", split="train", question_ids=("1", "2", "3"), config=None):
+    config = config or repo[2]
     assert validate_calls(calls) == [] or status != "done"
     run_dir = paths.RUNS / "replay-x"
     run_dir.mkdir(parents=True)
@@ -80,18 +85,36 @@ def test_every_generation_and_repair_invocation_is_scored_against_its_gold(repo)
         ("1", "generate_candidate", "generate_candidate_one:0", True),   # the retry that parsed
         ("1", "revise", "revise_1:0", False),
         ("2", "generate_candidate", "generate_candidate_one:0", False),  # no attempt parsed
-        ("3", "generate_candidate", "generate_candidate_one:0", True)]
+        ("2", "revise", "revise_1:0", True),                             # the repair's own key
+        ("3", "generate_candidate", "generate_candidate_one:0", True),
+        ("3", "revise", "revise_1:0", False)]                            # a comment is no statement
     assert rows[0]["attempt"] == 2 and rows[2]["pred_error"] == "no attempt parsed"
+    assert rows[5]["pred_error"] == "no statement"
     assert all(r["gold_sql"] == GOLDS[int(r["question_id"])] and r["difficulty"] == "simple" for r in rows)
     manifest = json.loads((out / "manifest.json").read_text())
     assert (manifest["type"], manifest["per_call"], manifest["source_run_id"], manifest["n"], manifest["correct"]) == \
-        ("eval", True, "replay-x", 4, 2)
+        ("eval", True, "replay-x", 6, 3)
+
+
+def test_each_gold_runs_once_per_eval(repo, monkeypatch):
+    import bench.evaluate as ev
+    ran, real = [], ev.execute
+    monkeypatch.setattr(ev, "execute", lambda path, sql, timeout: ran.append(sql) or real(path, sql, timeout))
+    evaluate_per_call(replay_run(repo, calls_of_a_replay()))  # two invocations per question, one gold run each
+    assert collections.Counter(sql for sql in ran if sql in GOLDS.values()) == {gold: 1 for gold in GOLDS.values()}
 
 
 def test_per_call_refuses_what_the_end_to_end_eval_refuses(repo):
     run_id = replay_run(repo, calls_of_a_replay(), status="interrupted")
     with pytest.raises(DataError, match="not 'done'"):
         evaluate_per_call(run_id)
+
+
+def test_per_call_refuses_a_snapshot_without_a_fixed_date(repo):
+    undated = {**repo[2], "eval": {**repo[2]["eval"], "fixed_date": None}}
+    with pytest.raises(DataError, match="fixed_date"):
+        evaluate_per_call(replay_run(repo, calls_of_a_replay(), config=undated))
+    assert not any(paths.RUNS.glob("eval-*"))  # no fallback to today, and nothing written
 
 
 def test_per_call_refuses_calls_outside_the_split_and_invalid_calls(repo):

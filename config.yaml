@@ -140,6 +140,7 @@ eval:
 
 stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are in thresholds and seeds
   n_boot: 10000                # paired-bootstrap resamples for the one-sided lower bound
+  pilot_size: 50               # calibration ids that measure d before the test (bench.data.pilot_sample)
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B3: {choice: null}           # J6 (S4)

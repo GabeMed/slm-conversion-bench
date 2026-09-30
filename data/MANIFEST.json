@@ -137,23 +137,25 @@
       "test": 498,
       "train": 834
     },
-    "failures": [
+    "errors": [],
+    "fixed_date": "2026-09-30"
+  },
+  "gold_observed": {
+    "empty": [],
+    "sqlite_version": "3.53.1",
+    "timeout_s": 60,
+    "timeouts": [
       {
         "db_id": "european_football_2",
-        "error": "timeout",
         "question_id": "1131",
         "split": "train"
       },
       {
         "db_id": "codebase_community",
-        "error": "timeout",
         "question_id": "701",
         "split": "test"
       }
-    ],
-    "fixed_date": "2026-09-30",
-    "sqlite_version": "3.53.1",
-    "timeout_s": 60
+    ]
   },
   "inputs": {
     "bird_dev_databases": {

@@ -1,8 +1,9 @@
 """`bench data`: download the pinned inputs, check their sha256, and write the hashes and splits.
 
 Facts produced (committed): `data/MANIFEST.json` (the hash of every input and of every database
-file, and the golds that do not execute on those databases) and `data/splits.json` (train, calib,
-test, excluded). The inputs themselves stay out of git. The test questions carry the difficulty of
+file; `gold_check`, the golds that fail with an execution error on those databases, which
+reproduces on any machine and is guarded; `gold_observed`, what the recording machine saw, never
+compared) and `data/splits.json` (train, calib, test, excluded). The inputs themselves stay out of git. The test questions carry the difficulty of
 the Mini-Dev, which Arcwise-Plat-SQL does not have.
 """
 import hashlib
@@ -143,6 +144,15 @@ def calib_sample(pool: List[str], size: int, seed: int) -> List[str]:
     return sorted(ranked[:size], key=int)
 
 
+def pilot_sample(calib: List[str], size: int, seed: int) -> List[str]:
+    """The pilot (SPEC 6.4: the calibration questions that measure d before the test): the `size`
+    calibration ids with the smallest sha256("<seed>:pilot:<id>"), a draw of its own."""
+    if not 0 < size <= len(calib):
+        raise DataError(f"a pilot of {size} ids needs that many calibration ids, there are {len(calib)}")
+    ranked = sorted(calib, key=lambda q: hashlib.sha256(f"{seed}:pilot:{q}".encode()).hexdigest())
+    return sorted(ranked[:size], key=int)
+
+
 def build_splits(config: dict, dev: List[dict], test: List[dict]) -> dict:
     dev_ids = [q["question_id"] for q in dev]
     test_ids = [q["question_id"] for q in test]
@@ -202,20 +212,31 @@ def run(config: dict) -> dict:
     by_id = {q["question_id"]: q for q in dev}
     questions = {"train": [by_id[q] for q in splits["train"]], "calib": [by_id[q] for q in splits["calib"]],
                  "test": sorted(test, key=lambda q: int(q["question_id"]))}
-    gold_check = check_golds(questions, lambda db_id: paths.sqlite_path(config, db_id),
-                             config["eval"]["timeout_s"], fixed_date(config))
-    if paths.DATA_MANIFEST.exists():
-        recorded_check = json.loads(paths.DATA_MANIFEST.read_text()).get("gold_check")
-        if recorded_check is not None and recorded_check != gold_check:
-            changed = sorted(k for k in set(recorded_check) | set(gold_check) if recorded_check.get(k) != gold_check.get(k))
-            raise DataError(f"the gold check differs from data/MANIFEST.json in {changed} (another SQLite or a slower "
-                            f"machine?); data/MANIFEST.json is left as recorded. Remove its gold_check to record it "
-                            f"anew, on purpose: the pre-registration hashes this file")
-    manifest = {"inputs": inputs, "databases": db_hashes, "gold_check": gold_check}
+    check = check_golds(questions, lambda db_id: paths.sqlite_path(config, db_id),
+                        config["eval"]["timeout_s"], fixed_date(config))
+    registered, observed = check["registered"], check["observed"]
+    recorded = json.loads(paths.DATA_MANIFEST.read_text()) if paths.DATA_MANIFEST.exists() else {}
+    if "gold_check" in recorded:
+        if _gold_identity(recorded["gold_check"]) != _gold_identity(registered):
+            raise DataError(f"the gold check differs from data/MANIFEST.json: golds failing with an execution error "
+                            f"{_gold_identity(recorded['gold_check'])} recorded, {_gold_identity(registered)} now. "
+                            f"data/MANIFEST.json is left as recorded; remove its gold_check and gold_observed to "
+                            f"record them anew, on purpose: the pre-registration hashes this file")
+        # the same fact: keep the file byte for byte (an error's wording and this machine's observations may differ)
+        registered, observed = recorded["gold_check"], recorded.get("gold_observed", observed)
+    manifest = {"inputs": inputs, "databases": db_hashes, "gold_check": registered, "gold_observed": observed}
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     paths.SPLITS.write_text(json.dumps(splits, indent=1) + "\n")
     return {"databases": len(db_hashes), **{k: len(splits[k]) for k in SPLIT_NAMES},
-            "gold_failures": len(gold_check["failures"])}
+            "gold_errors": len(registered["errors"]),  # this machine's observations, as it ran:
+            "gold_timeouts": len(check["observed"]["timeouts"]), "gold_empty": len(check["observed"]["empty"])}
+
+
+def _gold_identity(gold_check: dict) -> tuple:
+    """What the gold check registers: the date, the counts, and which golds fail with an error."""
+    errors = gold_check.get("errors")
+    return (gold_check.get("fixed_date"), gold_check.get("checked"),
+            None if errors is None else sorted((e["split"], e["question_id"]) for e in errors))
 
 
 def load_splits() -> dict:

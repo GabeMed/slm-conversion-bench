@@ -56,20 +56,28 @@ def test_test_questions_take_the_mini_dev_difficulty_by_id():
         attach_difficulty(test + [{"question_id": "13", "db_id": "db1"}], mini_dev)
 
 
-def test_golds_that_do_not_execute_are_listed(tmp_path):
+def test_the_gold_check_registers_errors_and_only_observes_the_rest(tmp_path):
     db = tmp_path / "t.sqlite"
     connection = sqlite3.connect(db)
     connection.execute("CREATE TABLE t (id INTEGER)")
     connection.commit()
     connection.close()
+    endless = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
     questions = {"train": [{"question_id": "2", "db_id": "t", "SQL": "SELECT nope FROM t"},
-                           {"question_id": "1", "db_id": "t", "SQL": "SELECT id FROM t WHERE date('now') > '2000'"}],
-                 "calib": [],
+                           {"question_id": "1", "db_id": "t", "SQL": "SELECT id FROM t WHERE date('now') > '2000'"},
+                           {"question_id": "4", "db_id": "t", "SQL": endless}],
+                 "calib": [{"question_id": "5", "db_id": "t", "SQL": "-- nothing"}],
                  "test": [{"question_id": "9", "db_id": "t", "SQL": "SELECT * FROM missing"}]}
-    check = check_golds(questions, lambda _: db, 5, DAY)
-    assert check["checked"] == {"train": 2, "calib": 0, "test": 1}
-    assert [(f["split"], f["question_id"]) for f in check["failures"]] == [("train", "2"), ("test", "9")]
-    assert "no such column" in check["failures"][0]["error"] and check["fixed_date"] == DAY
+    check = check_golds(questions, lambda _: db, 0.3, DAY)
+    registered, observed = check["registered"], check["observed"]
+    # what reproduces anywhere: the golds that fail with an execution error
+    assert registered["checked"] == {"train": 3, "calib": 1, "test": 1} and registered["fixed_date"] == DAY
+    assert [(e["split"], e["question_id"]) for e in registered["errors"]] == [("train", "2"), ("calib", "5"), ("test", "9")]
+    assert "no such column" in registered["errors"][0]["error"] and registered["errors"][1]["error"] == "no statement"
+    # what this machine saw: the timeout, the golds with zero rows, the SQLite
+    assert [(t["split"], t["question_id"]) for t in observed["timeouts"]] == [("train", "4")]
+    assert [(e["split"], e["question_id"]) for e in observed["empty"]] == [("train", "1")]
+    assert (observed["sqlite_version"], observed["timeout_s"]) == (sqlite3.sqlite_version, 0.3)
 
 
 # ---------------------------------------------------------------- `bench data` end to end, offline
@@ -100,12 +108,14 @@ def full_repo(tmp_path, monkeypatch):
 
 def test_bench_data_records_the_gold_check_and_joins_difficulty(full_repo):
     summary = data.run(full_repo)
-    assert summary == {"databases": 1, "train": 834, "calib": 200, "test": 498, "gold_failures": 1}
+    assert summary == {"databases": 1, "train": 834, "calib": 200, "test": 498,
+                       "gold_errors": 1, "gold_timeouts": 0, "gold_empty": 0}
     manifest = json.loads(paths.DATA_MANIFEST.read_text())
     assert set(manifest["inputs"]) == {"bird_dev_databases", "bird_dev_questions", "plat_sql_test", "mini_dev"}
     check = manifest["gold_check"]
     assert check["checked"] == {"train": 834, "calib": 200, "test": 498}
-    assert [f["question_id"] for f in check["failures"]] == ["7"]
+    assert [e["question_id"] for e in check["errors"]] == ["7"]
+    assert manifest["gold_observed"]["sqlite_version"] == sqlite3.sqlite_version
     assert {q["difficulty"] for q in data._test_questions(full_repo)} == {"moderate"}
     assert data.run(full_repo) == summary  # rebuilding gives the same facts
 
@@ -120,10 +130,22 @@ def test_bench_data_refuses_a_mini_dev_that_is_not_test_plus_exclusions(full_rep
         data.run(config)
 
 
-def test_bench_data_does_not_rewrite_a_different_gold_check(full_repo):
+def test_what_another_machine_observes_neither_refuses_nor_rewrites(full_repo):
     data.run(full_repo)
     manifest = json.loads(paths.DATA_MANIFEST.read_text())
-    manifest["gold_check"]["sqlite_version"] = "3.0.0"  # recorded elsewhere, with another SQLite
+    manifest["gold_observed"]["sqlite_version"] = "3.0.0"  # recorded with another SQLite, on a slower machine
+    manifest["gold_observed"]["timeouts"] = [{"split": "test", "question_id": "1001", "db_id": "tiny"}]
+    manifest["gold_check"]["errors"][0]["error"] = "OperationalError: worded by another SQLite"
+    paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    before = paths.DATA_MANIFEST.read_bytes()
+    data.run(full_repo)
+    assert paths.DATA_MANIFEST.read_bytes() == before  # the registered file keeps its hash
+
+
+def test_a_changed_set_of_failing_golds_is_refused(full_repo):
+    data.run(full_repo)
+    manifest = json.loads(paths.DATA_MANIFEST.read_text())
+    manifest["gold_check"]["errors"] = []  # recorded when gold 7 still executed
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     before = paths.DATA_MANIFEST.read_bytes()
     with pytest.raises(DataError, match="gold check differs"):
@@ -155,6 +177,8 @@ def test_real_sensitivity_sets_are_the_twelve_date_golds_and_the_limit_golds():
 def test_the_committed_manifest_records_the_gold_check():
     manifest = json.loads(paths.DATA_MANIFEST.read_text())
     check = manifest["gold_check"]
+    assert set(check) == {"fixed_date", "checked", "errors"} and "gold_observed" in manifest
     assert check["checked"] == {"train": 834, "calib": 200, "test": 498} and check["fixed_date"] == DAY
+    assert all(e["error"] != "timeout" for e in check["errors"])
     assert set(manifest["inputs"]) == set(CONFIG["data"])
     assert all(manifest["inputs"][name]["sha256"] == CONFIG["data"][name]["sha256"] for name in CONFIG["data"])

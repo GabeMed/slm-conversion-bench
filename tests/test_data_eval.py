@@ -12,7 +12,7 @@ from bench import data, paths
 from bench.agent.runner import final_sql, run_agent
 from bench.barrier import TestSplitLocked
 from bench.contracts.config import config_sha256, load_config  # noqa: F401
-from bench.data import DataError, build_splits, calib_sample
+from bench.data import DataError, build_splits, calib_sample, pilot_sample
 from bench.evaluate import evaluate, execute, score
 from synthetic import GOLD, make_repo
 
@@ -47,6 +47,21 @@ def test_calib_sample_does_not_depend_on_python_random():
     expected = sorted(sorted(pool, key=lambda q: hashlib.sha256(f"7:{q}".encode()).hexdigest())[:5], key=int)
     assert calib_sample(pool, 5, 7) == expected
     assert calib_sample(list(reversed(pool)), 5, 7) == expected
+
+
+def test_the_pilot_is_the_calibration_ids_with_the_smallest_seeded_hash():
+    calib = [str(i) for i in range(60)]
+    expected = sorted(sorted(calib, key=lambda q: hashlib.sha256(f"7:pilot:{q}".encode()).hexdigest())[:5], key=int)
+    assert pilot_sample(calib, 5, 7) == pilot_sample(list(reversed(calib)), 5, 7) == expected
+    assert pilot_sample(calib, 5, 7) != calib_sample(calib, 5, 7)  # its own draw, not the calibration's
+    with pytest.raises(DataError, match="pilot"):
+        pilot_sample(calib[:3], 5, 7)
+
+
+def test_the_committed_splits_have_a_pilot_of_the_configured_size():
+    calib = json.loads(paths.SPLITS.read_text())["calib"]
+    pilot = pilot_sample(calib, CONFIG["stats"]["pilot_size"], CONFIG["seeds"]["calib_split"])
+    assert CONFIG["stats"]["pilot_size"] == 50 and len(pilot) == 50 and set(pilot) <= set(calib)
 
 
 def test_the_committed_splits():
@@ -120,8 +135,8 @@ def repo(tmp_path, monkeypatch):
     return make_repo(tmp_path, monkeypatch)
 
 
-def _finished_run(repo, split="train", status="done", predictions=None, question_ids=None):
-    _, _, config = repo
+def _finished_run(repo, split="train", status="done", predictions=None, question_ids=None, config=None):
+    config = config or repo[2]
     predictions = predictions if predictions is not None else {"1": GOLD, "2": "SELECT 0"}
     run_dir = paths.RUNS / f"agent-B0-{split}-x"
     run_dir.mkdir(parents=True)
@@ -164,6 +179,13 @@ def test_evaluate_uses_the_runs_configuration_not_todays(repo):
     snapshot.write_text(json.dumps(tampered))
     with pytest.raises(DataError, match="snapshot"):
         evaluate(run_id)
+
+
+def test_evaluate_refuses_a_snapshot_without_a_fixed_date(repo):
+    undated = {**repo[2], "eval": {**repo[2]["eval"], "fixed_date": None}}
+    with pytest.raises(DataError, match="fixed_date"):
+        evaluate(_finished_run(repo, config=undated))
+    assert not any(paths.RUNS.glob("eval-*"))  # no fallback to today, and nothing written
 
 
 def test_evaluate_refuses_a_changed_database(repo):

@@ -33,6 +33,8 @@ def test_the_fixed_date_is_preregistered_as_an_iso_date_string():
      f"SELECT date({STAMP}), datetime({STAMP}), julianday({STAMP}), unixepoch({STAMP}), time({STAMP})"),
     ("SELECT strftime('%Y') - strftime('%Y', dob)", f"SELECT strftime('%Y', {STAMP}) - strftime('%Y', dob)"),
     ('SELECT strftime("%Y") - 1', f'SELECT strftime("%Y", {STAMP}) - 1'),
+    ("SELECT datetime('now', 'localtime'), time( 'now' ), unixepoch('NOW'), strftime(\"%Y\", 'now')",
+     f"SELECT datetime({STAMP}, 'localtime'), time( {STAMP} ), unixepoch({STAMP}), strftime(\"%Y\", {STAMP})"),
     # an apostrophe inside a comment opens no string literal
     ("SELECT -- the member's age\n STRFTIME('%Y', 'now') /* it's */ - CURRENT_DATE",
      f"SELECT -- the member's age\n STRFTIME('%Y', {STAMP}) /* it's */ - '{DAY}'"),
@@ -46,9 +48,36 @@ def test_now_and_its_synonyms_become_the_fixed_date(sql, expected):
     "SELECT current_dates, my_date() FROM [current_date] WHERE x LIKE '%now%'",
     "SELECT date(dob), strftime('%Y', dob) FROM t",
     "SELECT dob FROM t -- as of CURRENT_DATE, i.e. date('now')\n",
+    "SELECT * FROM t WHERE end_date < 'now'",           # not a time value: a TEXT comparison in SQLite
+    "SELECT coalesce(end_date, 'now'), 'now' FROM t",   # an argument, but not of a date function
+    "SELECT strftime('now', dob) FROM t",               # the format, not the time value
 ])
 def test_only_the_current_moment_is_substituted(sql):
     assert fix_date(sql, DAY) == (sql, False)
+
+
+def test_a_bare_now_is_text_and_stays_text(db):
+    # every ISO date sorts before the text 'now'; read as a date at 1990-01-01 it would count 2, not 3
+    gold = {"1": {"db_id": "t", "SQL": "SELECT count(*) FROM p WHERE birthday < 'now'"}}
+    result = score({"1": "SELECT 3"}, gold, lambda _: db, 5, "1990-01-01")[0]
+    assert (result["correct"], result["gold_date_substituted"]) == (True, False)
+    dated = score({"1": "SELECT 2"}, {"1": {"db_id": "t", "SQL": "SELECT count(*) FROM p WHERE birthday < date('now')"}},
+                  lambda _: db, 5, "1990-01-01")[0]
+    assert (dated["correct"], dated["gold_date_substituted"]) == (True, True)
+
+
+@pytest.mark.parametrize("sql", ["-- x", "   ", "/* nothing */", "\n-- only a comment\n"])
+def test_no_statement_is_an_execution_error(db, sql):
+    assert execute(db, sql, 5) == (None, "no statement")
+
+
+def test_no_statement_is_not_an_empty_answer(db):
+    # [] from a comment is not the zero rows of a query: neither side may score it as an answer
+    empty = "SELECT id FROM p WHERE id > 99"
+    gold = {"1": {"db_id": "t", "SQL": empty}, "2": {"db_id": "t", "SQL": "-- x"}}
+    results = score({"1": "-- the model answered with a comment", "2": empty}, gold, lambda _: db, 5, DAY)
+    assert [(r["correct"], r["pred_error"], r["gold_error"]) for r in results] == \
+        [(False, "no statement", None), (False, None, "no statement")]
 
 
 @pytest.fixture

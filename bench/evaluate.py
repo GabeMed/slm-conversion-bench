@@ -2,7 +2,8 @@
 
 Each prediction is paired with its gold by `question_id`, never by position. Gold and prediction
 run back to back on the pinned SQLite file (sha256 checked against data/MANIFEST.json), read-only
-and with a timeout. Correct means the same set of rows, BIRD's rule.
+and with a timeout. Correct means the same set of rows, BIRD's rule; SQL that holds no statement (a
+comment, blanks) is an execution error, never an empty answer.
 
 The current moment is the pre-registered `eval.fixed_date` (midnight UTC), in prediction and gold
 alike, so arms evaluated on different days, on machines in different time zones, stay comparable.
@@ -26,9 +27,14 @@ from bench.provenance import git_state
 # (and an apostrophe in a comment opens no literal).
 _STRING = r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\""
 _QUOTED = r"--[^\n]*|/\*.*?(?:\*/|$)|" + _STRING + r"|`[^`]*`|\[[^\]]*\]"
+_DATE_FUNCTION = r"\b(?:date|time|datetime|julianday|unixepoch)\s*\(\s*"
+_STRFTIME = r"\bstrftime\s*\(\s*(?:" + _STRING + r")\s*"
+_NOW_LITERAL = r"(?:'now'|\"now\")"
 _NOW = re.compile(_QUOTED + r"|\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b"
-                  r"|\b(?:date|time|datetime|julianday|unixepoch)\s*\(\s*\)"  # no argument: SQLite reads 'now'
-                  r"|\bstrftime\s*\(\s*(?:" + _STRING + r")\s*\)",  # a format only: 'now' as well
+                  r"|" + _DATE_FUNCTION + _NOW_LITERAL +          # 'now' as the time value ...
+                  r"|" + _STRFTIME + r",\s*" + _NOW_LITERAL +      # ... also after strftime's format
+                  r"|" + _DATE_FUNCTION + r"\)"                    # no argument: SQLite reads 'now'
+                  r"|" + _STRFTIME + r"\)",                        # a format only: 'now' as well
                   re.IGNORECASE | re.DOTALL)
 _LIMIT = re.compile(_QUOTED + r"|\bLIMIT\b", re.IGNORECASE | re.DOTALL)
 _SKIPPED = ("'", '"', "`", "[", "--", "/*")
@@ -45,8 +51,10 @@ def fixed_date(config: Dict[str, Any]) -> str:
 
 def fix_date(sql: str, day: str) -> Tuple[str, bool]:
     """`sql` with every reading of the current moment replaced by `day` at midnight, and whether
-    anything was replaced: 'now' (any case, either quote), CURRENT_TIMESTAMP / CURRENT_DATE /
-    CURRENT_TIME, and the date functions SQLite evaluates at 'now' when given no time value."""
+    anything was replaced: 'now' (any case, either quote) where it is the time value of date(),
+    time(), datetime(), julianday(), unixepoch() or strftime() (after the format), CURRENT_TIMESTAMP
+    / CURRENT_DATE / CURRENT_TIME, and those functions given no time value, which SQLite evaluates
+    at 'now'. A 'now' anywhere else is text (`end_date < 'now'` compares strings) and stays text."""
     stamp = f"'{day} 00:00:00'"
     keywords = {"current_timestamp": stamp, "current_date": f"'{day}'", "current_time": "'00:00:00'"}
     replaced = False
@@ -55,13 +63,12 @@ def fix_date(sql: str, day: str) -> Tuple[str, bool]:
         nonlocal replaced
         token = match.group(0)
         if token.startswith(_SKIPPED):
-            if token[0] in "'\"" and token[1:-1].lower() == "now":
-                replaced = True
-                return stamp
             return token
         replaced = True
         if token.lower() in keywords:
             return keywords[token.lower()]
+        if token[-1] in "'\"":  # ends with the 'now' literal
+            return token[:-len("'now'")] + stamp
         return f"{token[:-1].rstrip()}, {stamp})" if token.lower().startswith("strftime") else f"{token.split('(')[0]}({stamp})"
     return _NOW.sub(replace, sql), replaced
 
@@ -93,7 +100,11 @@ def execute(db_path: Path, sql: str, timeout_s: float) -> Tuple[Optional[List[tu
     connection.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
         with _utc():
-            return connection.execute(sql).fetchall(), None
+            cursor = connection.execute(sql)
+            rows = cursor.fetchall()
+        if cursor.description is None:  # a comment or blanks: [] here is not the zero rows of a query
+            return None, "no statement"
+        return rows, None
     except Exception as e:
         timed_out = time.monotonic() > deadline
         return None, "timeout" if timed_out else f"{type(e).__name__}: {e}"
@@ -101,12 +112,19 @@ def execute(db_path: Path, sql: str, timeout_s: float) -> Tuple[Optional[List[tu
         connection.close()
 
 
+def run_gold(question: Dict[str, Any], path: Path, timeout_s: float, day: str) -> Tuple[Optional[List[tuple]], Optional[str], bool]:
+    """The gold's rows (or error) at the fixed date, and whether the date was substituted."""
+    gold_sql, substituted = fix_date(question["SQL"], day)
+    rows, error = execute(path, gold_sql, timeout_s)
+    return rows, error, substituted
+
+
 def score_one(question: Dict[str, Any], predicted: Optional[str], path: Path, timeout_s: float,
-              day: str) -> Dict[str, Any]:
-    """One prediction against the gold of its own question, both at the fixed date."""
+              day: str, gold: Optional[Tuple[Optional[List[tuple]], Optional[str], bool]] = None) -> Dict[str, Any]:
+    """One prediction against the gold of its own question, both at the fixed date; `gold` is the
+    question's `run_gold`, when already executed in this eval."""
     executed_at = datetime.now(timezone.utc).isoformat()
-    gold_sql, gold_substituted = fix_date(question["SQL"], day)
-    gold_rows, gold_error = execute(path, gold_sql, timeout_s)
+    gold_rows, gold_error, gold_substituted = gold or run_gold(question, path, timeout_s, day)
     pred_substituted = False
     if predicted is None:
         pred_rows, pred_error = None, "no prediction"
@@ -134,17 +152,26 @@ def score(predictions: Dict[str, Optional[str]], gold: Dict[str, dict], db_path:
 
 def check_golds(questions: Dict[str, List[dict]], db_path: Callable[[str], Path], timeout_s: float,
                 day: str) -> Dict[str, Any]:
-    """Execute every gold of every split as the evaluator will (fixed date, read-only, timeout);
-    the ones that fail are a fact of the data, recorded by `bench data` in data/MANIFEST.json."""
-    failures = []
+    """Execute every gold of every split as the evaluator will (fixed date, read-only, timeout).
+    `registered` is what reproduces on any machine, the fact `bench data` records and guards: the
+    golds that fail with an execution error. `observed` is what this machine saw and is never
+    compared: the golds that timed out, the golds with zero rows among those that finished, and the
+    SQLite version."""
+    errors, timeouts, empty = [], [], []
     for split, items in questions.items():
         for question in items:
-            _, error = execute(db_path(question["db_id"]), fix_date(question["SQL"], day)[0], timeout_s)
-            if error is not None:
-                failures.append({"split": split, "question_id": question["question_id"],
-                                 "db_id": question["db_id"], "error": error})
-    return {"fixed_date": day, "timeout_s": timeout_s, "sqlite_version": sqlite3.sqlite_version,
-            "checked": {split: len(items) for split, items in questions.items()}, "failures": failures}
+            rows, error = execute(db_path(question["db_id"]), fix_date(question["SQL"], day)[0], timeout_s)
+            where = {"split": split, "question_id": question["question_id"], "db_id": question["db_id"]}
+            if error == "timeout":
+                timeouts.append(where)
+            elif error is not None:
+                errors.append({**where, "error": error})
+            elif not rows:
+                empty.append(where)
+    return {"registered": {"fixed_date": day, "checked": {split: len(items) for split, items in questions.items()},
+                           "errors": errors},
+            "observed": {"sqlite_version": sqlite3.sqlite_version, "timeout_s": timeout_s,
+                         "timeouts": timeouts, "empty": empty}}
 
 
 def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, dict]]:
@@ -263,11 +290,13 @@ def evaluate_per_call(source_run_id: str) -> Path:
     databases = _check_paired([e["question_id"] for e in entries], gold, config, run_manifest["split"])
 
     def score_calls(day: str) -> List[Dict[str, Any]]:
-        results = []
+        results, golds = [], {}  # each question's gold runs once per eval, whatever its invocations
         for entry in entries:
             question = {**gold[entry["question_id"]], "question_id": entry["question_id"]}
-            result = score_one(question, entry["sql"], paths.sqlite_path(config, question["db_id"]),
-                               config["eval"]["timeout_s"], day)
+            path, timeout_s = paths.sqlite_path(config, question["db_id"]), config["eval"]["timeout_s"]
+            if entry["question_id"] not in golds:
+                golds[entry["question_id"]] = run_gold(question, path, timeout_s, day)
+            result = score_one(question, entry["sql"], path, timeout_s, day, gold=golds[entry["question_id"]])
             if entry["call_id"] is None:
                 result["pred_error"] = "no attempt parsed"
             results.append({"question_id": entry["question_id"], "call_site": entry["call_site"],
