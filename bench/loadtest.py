@@ -21,7 +21,14 @@ model (a cold vLLM loads its weights first), records the model card the server l
 path it was loaded from), and warms it up before measuring. The manifest keeps what was configured
 (`gpu`, `prefix_cache`) apart from what was observed (`observed`): the GPUs the Modal server reports it
 got, and the share of prompt tokens the server says it read from its cache (AIPerf's
-`overall_usage_prompt_cache_read_pct`, from the servers' own `usage`).
+`overall_usage_prompt_cache_read_pct`, from the servers' own `usage`). The levels of one invocation share a
+`sweep_id` and run in increasing order on one warm server, so later levels meet a fuller prefix cache.
+
+Credentials: the endpoint's API key (`api_key_env`) and its `headers_env` (each header sent with the value
+of the environment variable it names; Modal proxy auth). AIPerf receives them through a YAML config that
+holds only `${VAR}` references (`aiperf.yaml`, kept in the run), never on its command line; and every
+credential value is scrubbed from AIPerf's artifacts after the run (AIPerf 0.13.0 writes a header such as
+Modal-Key verbatim into its export).
 """
 import hashlib
 import json
@@ -40,12 +47,31 @@ from bench import paths
 
 EXPORT = "profile_export_aiperf.json"
 PAYLOADS = "payloads.jsonl"
+AIPERF_CONFIG = "aiperf.yaml"
+REDACTED = b"<redacted>"
 # params the agent's client does not send as body fields (hooks.chat_model pops them)
 CLIENT_ONLY_PARAMS = ("max_tokens", "timeout_s")
 
 
 class LoadtestError(RuntimeError):
     pass
+
+
+def env_headers(headers_env: Optional[Dict[str, str]], environ: Optional[Dict[str, str]] = None,
+                error: type = LoadtestError) -> Dict[str, str]:
+    """`endpoint.headers_env` ({header: variable}) as headers, each with its variable's value; a configured
+    variable that is missing is an error (the contract of `headers_env`)."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    missing = [variable for variable in (headers_env or {}).values() if not environ.get(variable)]
+    if missing:
+        raise error(f"environment variable(s) {missing} named by endpoint.headers_env are not set")
+    return {header: environ[variable] for header, variable in (headers_env or {}).items()}
+
+
+def auth_headers(api_key: Optional[str], headers: Dict[str, str]) -> Dict[str, str]:
+    return {**headers, **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
 
 
 def build_payloads(calls: List[Dict[str, Any]], model: str, params: Dict[str, Any], stream: bool) -> List[Dict[str, Any]]:
@@ -81,9 +107,9 @@ def level_slice(payloads: List[dict], warmup: int, level: int, count: int) -> Di
             "repeats": start + count > n or count > n}
 
 
-def warm_up(base_url: str, api_key: Optional[str], payloads: List[dict], timeout_s: float) -> int:
+def warm_up(base_url: str, headers: Dict[str, str], payloads: List[dict], timeout_s: float) -> int:
     """Send the warm-up calls one by one (outside every measured slice); returns how many."""
-    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
+    headers = {"Content-Type": "application/json", **headers}
     for body in payloads:
         request = urllib.request.Request(f"{base_url.rstrip('/')}/chat/completions", data=json.dumps(body).encode(),
                                          headers=headers)
@@ -92,28 +118,57 @@ def warm_up(base_url: str, api_key: Optional[str], payloads: List[dict], timeout
     return len(payloads)
 
 
-def aiperf_command(aiperf: str, url: str, model: str, concurrency: int, request_count: int,
-                   tokenizer: Dict[str, str], timeout_s: float, stream: bool, api_key: Optional[str]) -> List[str]:
-    """The AIPerf v0.13.0 invocation, run from inside the run directory (relative paths): each line once, in
-    order; the warm-up is done before, on other calls."""
-    cmd = [aiperf, "profile", "--model", model, "--url", url, "--endpoint-type", "chat",
-           "--input-file", PAYLOADS, "--custom-dataset-type", "raw_payload", "--dataset-sampling-strategy", "sequential",
-           "--concurrency", str(concurrency), "--request-count", str(request_count),
-           "--request-timeout-seconds", str(timeout_s),  # no --warmup-*: AIPerf then runs no warm-up phase
-           "--tokenizer", tokenizer["repo"], "--tokenizer-revision", tokenizer["revision"],
-           "--use-server-token-count", "--output-artifact-dir", ".", "--ui-type", "none"]
+def aiperf_config(url: str, model: str, concurrency: int, request_count: int, timeout_s: float, stream: bool,
+                  api_key_var: Optional[str], headers_env: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """AIPerf v0.13.0's YAML config for one level: each line of payloads.jsonl once, in order (no AIPerf
+    warm-up: the warm-up is done before, on other calls). Credentials only as ${VAR} references, which
+    AIPerf resolves from its environment (verified: its CLI flags take no such reference)."""
+    endpoint: Dict[str, Any] = {"url": url, "type": "chat", "timeout": timeout_s, "useServerTokenCount": True}
     if stream:
-        cmd.append("--streaming")
-    if api_key:
-        cmd += ["--api-key", api_key]
-    return cmd
+        endpoint["streaming"] = True
+    if api_key_var:
+        endpoint["apiKey"] = "${" + api_key_var + "}"
+    if headers_env:
+        endpoint["headers"] = {header: "${" + variable + "}" for header, variable in headers_env.items()}
+    return {"schemaVersion": "2.0", "benchmark": {
+        "model": model, "endpoint": endpoint,
+        "dataset": {"type": "file", "name": "payloads", "path": PAYLOADS, "format": "raw_payload", "sampling": "sequential"},
+        "phases": {"type": "concurrency", "name": "profiling", "concurrency": concurrency, "requests": request_count}}}
 
 
-def wait_ready(base_url: str, api_key: Optional[str], model: str, timeout_s: float,
+def aiperf_command(aiperf: Optional[str], tokenizer: Dict[str, str]) -> List[str]:
+    """The AIPerf invocation, run from inside the run directory, where aiperf.yaml sits."""
+    if not aiperf or not Path(aiperf).is_file():
+        raise LoadtestError(f"AIPerf is not installed here ({aiperf}): use env/train")
+    return [aiperf, "profile", "--config", AIPERF_CONFIG, "--tokenizer", tokenizer["repo"],
+            "--tokenizer-revision", tokenizer["revision"], "--output-artifact-dir", ".", "--ui-type", "none"]
+
+
+def write_aiperf_config(run_dir: Path, config: Dict[str, Any]) -> None:
+    import yaml
+
+    (run_dir / AIPERF_CONFIG).write_text(yaml.safe_dump(config, sort_keys=False))
+
+
+def scrub_secrets(run_dir: Path, secrets: List[str]) -> List[str]:
+    """Replace every credential value in the run's files; the files changed, relative to the run."""
+    values = [v.encode() for v in secrets if v]
+    changed = []
+    for path in sorted(p for p in run_dir.rglob("*") if p.is_file()):
+        content = path.read_bytes()
+        scrubbed = content
+        for value in values:
+            scrubbed = scrubbed.replace(value, REDACTED)
+        if scrubbed != content:
+            path.write_bytes(scrubbed)
+            changed.append(path.relative_to(run_dir).as_posix())
+    return changed
+
+
+def wait_ready(base_url: str, headers: Dict[str, str], model: str, timeout_s: float,
                poll_s: float = 5.0) -> Tuple[float, Dict[str, Any]]:
     """Wait until the server lists `model` (vLLM lists every adapter too); seconds waited and its card."""
     started = time.monotonic()
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     last = "no answer"
     while True:
         try:
@@ -129,6 +184,14 @@ def wait_ready(base_url: str, api_key: Optional[str], model: str, timeout_s: flo
         if time.monotonic() - started > timeout_s:
             raise LoadtestError(f"{model} not served at {base_url} after {timeout_s:.0f} s ({last})")
         time.sleep(poll_s)
+
+
+def local_aiperf() -> Optional[str]:
+    """The AIPerf of this environment (env/train), or on the PATH."""
+    import shutil
+
+    beside = Path(sys.executable).parent / "aiperf"
+    return str(beside) if beside.is_file() else shutil.which("aiperf")
 
 
 def run_aiperf(run_dir: Path, cmd: List[str]) -> int:
@@ -166,7 +229,7 @@ def _source_calls(config: Dict[str, Any], source: str) -> Dict[str, Any]:
         raise LoadtestError(f"runs/{source}/calls.jsonl is not valid C1: {errors[:3]}")
     if not calls:
         raise LoadtestError(f"runs/{source}/calls.jsonl has no calls")
-    return {"calls": calls, "split": manifest.get("split"), "status": manifest.get("status")}
+    return {"calls": calls, "split": manifest.get("split"), "status": manifest.get("status"), "arm": manifest.get("arm")}
 
 
 def _tokenizer(config: Dict[str, Any], engine: str, override: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -186,7 +249,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     import os
 
     from bench.contracts.config import config_sha256, engine_spec, load_config
-    from bench.provenance import git_state
+    from bench.provenance import git_state, scrub
 
     config = load_config(config_path)
     settings = config["loadtest"]
@@ -195,11 +258,13 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     if not endpoint.get("base_url"):
         raise LoadtestError(f"engine {engine} has no endpoint.base_url: serve it first")
     url = server_root(endpoint["base_url"])
-    api_key = None
-    if endpoint.get("api_key_env") and on == "local":
-        api_key = os.environ.get(endpoint["api_key_env"])
-        if not api_key:
-            raise LoadtestError(f"environment variable {endpoint['api_key_env']} is not set")
+    api_key, headers = None, {}
+    if on == "local":  # on Modal, the credentials are the load client's secrets, never sent from here
+        if endpoint.get("api_key_env"):
+            api_key = os.environ.get(endpoint["api_key_env"])
+            if not api_key:
+                raise LoadtestError(f"environment variable {endpoint['api_key_env']} is not set")
+        headers = env_headers(endpoint.get("headers_env"))
     source_run = _source_calls(config, source)
     payloads = build_payloads(source_run["calls"], spec["model"], spec.get("params") or {}, settings["stream"])
     warmup = payloads[:min(settings["warmup_request_count"], len(payloads))]
@@ -217,6 +282,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
         raise LoadtestError(f"--on must be local or modal, not {on!r}")
 
     run_dirs = []
+    sweep_id = f"sweep-{_slug(engine)}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
     context = remote.app.run() if remote else nullcontext()
     with context:
         for index, level in enumerate(levels):
@@ -228,12 +294,14 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
             run_dir.mkdir(parents=True)
             (run_dir / PAYLOADS).write_bytes(raw)
             manifest = {
-                "run_id": run_id, "type": "loadtest", "engine": engine, "model": spec["model"],
+                "run_id": run_id, "type": "loadtest", "sweep_id": sweep_id, "level_index": index,
+                "levels": list(levels), "engine": engine, "model": spec["model"],
                 "endpoint_kind": endpoint["kind"], "where": on,
                 "gpu": config["serving"]["gpu"] if vllm else None,
                 "prefix_cache": config["serving"]["prefix_caching"] if vllm else None,
                 "server": f"vllm {config['serving']['vllm_version']}" if vllm else endpoint["kind"],
-                "source_run_id": source, "source_split": source_run["split"], "source_status": source_run["status"],
+                "source_run_id": source, "source_arm": source_run["arm"], "source_split": source_run["split"],
+                "source_status": source_run["status"],
                 "source_calls": len(payloads), "n_questions": len({c["question_id"] for c in source_run["calls"]}),
                 "payload_offset": chosen["offset"], "payloads_repeat": chosen["repeats"],
                 "payloads_sha256": hashlib.sha256(raw).hexdigest(), "concurrency": level,
@@ -246,7 +314,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
             args = {"url": url, "model": spec["model"], "concurrency": level, "request_count": settings["request_count"],
                     "warmup": warmup, "tokenizer": tok, "timeout_s": settings["request_timeout_s"],
                     "stream": settings["stream"], "base_url": endpoint["base_url"],
-                    "ready_timeout_s": settings["ready_timeout_s"],
+                    "ready_timeout_s": settings["ready_timeout_s"], "headers_env": endpoint.get("headers_env") or {},
                     "candidate": engine[len("slm:"):].partition("+lora:")[0] if engine.startswith("slm:") else None}
             status = "failed"
             try:
@@ -256,21 +324,24 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                         (run_dir / rel).parent.mkdir(parents=True, exist_ok=True)
                         (run_dir / rel).write_bytes(content)
                     returncode, waited, card = result["returncode"], result["ready_after_s"], result["served_model"]
-                    server_state = result.get("server_state")
+                    server_state, redacted = result.get("server_state"), result["secrets_redacted_in"]
                 else:
-                    waited, card = wait_ready(endpoint["base_url"], api_key, spec["model"], settings["ready_timeout_s"])
+                    sent = auth_headers(api_key, headers)
+                    waited, card = wait_ready(endpoint["base_url"], sent, spec["model"], settings["ready_timeout_s"])
                     server_state = None
-                    warm_up(endpoint["base_url"], api_key, warmup, settings["request_timeout_s"])
-                    cmd = aiperf_command(str(Path(sys.executable).parent / "aiperf"), url, spec["model"], level,
-                                         settings["request_count"], tok, settings["request_timeout_s"],
-                                         settings["stream"], api_key)
+                    warm_up(endpoint["base_url"], sent, warmup, settings["request_timeout_s"])
+                    cmd = aiperf_command(local_aiperf(), tok)
+                    write_aiperf_config(run_dir, aiperf_config(
+                        url, spec["model"], level, settings["request_count"], settings["request_timeout_s"],
+                        settings["stream"], endpoint.get("api_key_env") if api_key else None, endpoint.get("headers_env")))
                     returncode = run_aiperf(run_dir, cmd)
+                    redacted = scrub_secrets(run_dir, [api_key or "", *headers.values()])
                 status = "done" if returncode == 0 and (run_dir / EXPORT).is_file() else "failed"
                 manifest.update({"aiperf_returncode": returncode, "ready_after_s": round(waited, 1),
                                  "served_model": {k: card.get(k) for k in ("id", "root", "parent")},
-                                 "observed": observed(run_dir, server_state)})
+                                 "observed": observed(run_dir, server_state), "secrets_redacted_in": redacted})
             except Exception as e:
-                manifest["stopped_by"] = f"{type(e).__name__}: {e}"
+                manifest["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
                 raise
             finally:
                 manifest.update({"status": status, "finished_at": datetime.now(timezone.utc).isoformat()})

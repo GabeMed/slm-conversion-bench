@@ -50,14 +50,17 @@ def test_the_reference_base_is_the_base_model_and_the_adapter_changes_it(tmp_pat
 def test_local_p4_passes_when_the_server_reproduces_peft(tmp_path, monkeypatch):
     _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
     adapter = _random_adapter(paths.ROOT / "train" / "adapters" / "c0" / "adapter")
-    manifest = {"cluster": "c0", "slm": TINY_NAME, "served_name": "c0", "base": TINY, "chat_template_kwargs": KWARGS,
-                "adapter_sha256": facts.sha256_dir(adapter)}
+    sha = facts.sha256_dir(adapter)
+    dataset = (paths.ROOT / "train/datasets/c0.jsonl").read_bytes()
+    manifest = {"cluster": "c0", "slm": TINY_NAME, "served_name": f"c0-{sha[:12]}", "base": TINY,
+                "chat_template_kwargs": KWARGS, "adapter_sha256": sha,
+                "dataset": {"sha256": __import__("hashlib").sha256(dataset).hexdigest()}}
     (adapter.parent / "manifest.json").write_text(json.dumps(manifest))
     settings = config["preflight"]["lora_parity"]
     settings.update({"n_prompts": 2, "max_new_tokens": 5})
     prompts = [json.loads(line)["prompt"] for line in (paths.ROOT / "train/datasets/c0.jsonl").read_text().splitlines()][:2]
     ref = peft_generate(TINY, str(adapter), prompts, KWARGS, 5, settings["top_logprobs"], "cpu")
-    server = FakeVLLM({TINY_NAME: ref["base"], "c0": ref["adapter"]}, prompts,  # a vLLM that matches HF exactly
+    server = FakeVLLM({TINY_NAME: ref["base"], manifest["served_name"]: ref["adapter"]}, prompts,  # a vLLM matching HF
                       cards(manifest["adapter_sha256"]))
     try:
         config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
@@ -66,3 +69,33 @@ def test_local_p4_passes_when_the_server_reproduces_peft(tmp_path, monkeypatch):
         server.close()
     assert verdict["status"] == PASS, verdict["diagnosis"]
     assert verdict["base_matches_hf"] == verdict["adapter_matches_peft"] == 2 and verdict["reference_on"] == "local"
+
+
+def test_the_reference_ignores_generation_defaults_the_model_ships(tmp_path, monkeypatch):
+    """A model whose generation_config ships a logits processor (here suppress_tokens; a repetition penalty
+    goes the same way): the reference is still plain greedy, as vLLM serves it (--generation-config vllm)."""
+    import transformers
+    from transformers import GenerationConfig
+
+    adapter = _random_adapter(tmp_path / "adapter")
+    prompts = [[{"role": "user", "content": "Name a colour."}]]
+    tokenizer = AutoTokenizer.from_pretrained(TINY["repo"], revision=TINY["revision"])
+    inputs = tokenizer.apply_chat_template(prompts[0], add_generation_prompt=True, tokenize=True, return_dict=True,
+                                           return_tensors="pt", **KWARGS)
+    plain = AutoModelForCausalLM.from_pretrained(TINY["repo"], revision=TINY["revision"]).eval()
+    greedy = dict(max_new_tokens=6, do_sample=False, eos_token_id=[151645, 151643], pad_token_id=151643)
+    expected = plain.generate(**inputs, generation_config=GenerationConfig(**greedy))[0, inputs["input_ids"].shape[1]:].tolist()
+    shipped = {"suppress_tokens": [expected[0]]}
+    changed = plain.generate(**inputs, generation_config=GenerationConfig(**greedy, **shipped))
+    assert changed[0, inputs["input_ids"].shape[1]:].tolist() != expected  # the shipped default would change it
+
+    load = transformers.AutoModelForCausalLM.from_pretrained
+
+    def shipping_a_default(*args, **kwargs):
+        model = load(*args, **kwargs)
+        model.generation_config.suppress_tokens = shipped["suppress_tokens"]
+        return model
+
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", shipping_a_default)
+    ref = peft_generate(TINY, str(adapter), prompts, KWARGS, max_new_tokens=6, top_k=3, device="cpu")
+    assert ref["base"][0]["tokens"] == expected

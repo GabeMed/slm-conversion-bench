@@ -9,7 +9,7 @@ import pytest
 from bench import paths
 from bench.contracts import facts, router
 from bench.train import (TrainError, gpu_cost, parse_dataset, register_adapters, row_problems, training_plan)
-from test_train_fixtures import TINY, TINY_NAME, fake_adapter, fake_modal_app, make_s5_repo, rel, rows, save
+from test_train_fixtures import TINY, TINY_NAME, fake_adapter, fake_modal_app, make_s5_repo, rel, rows, save, served
 
 GOOD = rows("c0", 1)[0]
 
@@ -48,7 +48,8 @@ def test_one_bad_line_refuses_the_whole_dataset_and_says_which():
 def test_the_plan_trains_the_chosen_base_on_the_pinned_revision_with_serving_kwargs(tmp_path, monkeypatch):
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
     plan, raw = training_plan(config, "c0")
-    assert plan["slm"] == TINY_NAME and plan["base"] == TINY and plan["served_name"] == "c0"
+    assert plan["slm"] == TINY_NAME and plan["base"] == TINY
+    assert "served_name" not in plan  # it comes from the adapter's bytes, after training (and not in plan_id)
     assert plan["chat_template_kwargs"] == {"enable_thinking": False}
     assert plan["dataset"] == {"path": "train/datasets/c0.jsonl", "sha256": hashlib.sha256(raw).hexdigest(), "rows": 4}
     b4 = config["arms"]["B4"]
@@ -116,13 +117,30 @@ def test_the_fact_is_written_once_every_cluster_has_an_adapter_and_the_router_ac
     assert missing == [] and fact_path.parent.parent.name == "S5"
     fact, _ = facts.read_fact(str(fact_path), "adapters")
     assert fact["slm"] == TINY_NAME and set(fact["adapters"]) == {"c0", "c1"}
-    assert fact["adapters"]["c1"] == {"served_name": "c1",
-                                      "sha256": facts.sha256_dir(paths.ROOT / "train/adapters/c1/adapter")}
+    sha = facts.sha256_dir(paths.ROOT / "train/adapters/c1/adapter")
+    assert fact["adapters"]["c1"] == {"served_name": f"c1-{sha[:12]}", "sha256": sha}  # content-addressed
+    assert (fact["base_revision"], fact["chat_template_kwargs"]) == (TINY["revision"], {"enable_thinking": False})
     # the router's own consistency checks (choice, centroids, one adapter per cluster) accept it
     config["arms"]["B4"]["adapters"] = rel(fact_path)
     config = save(config, config_path)
     assert set(router.arm_facts("B4", config)) == {"choice", "centroids", "adapters"}
-    assert router.possible_engines("B4", config) == [f"slm:{TINY_NAME}+lora:c0", f"slm:{TINY_NAME}+lora:c1"]
+    assert router.possible_engines("B4", config) == [f"slm:{TINY_NAME}+lora:{served('c0')}",
+                                                     f"slm:{TINY_NAME}+lora:{served('c1')}"]
+
+
+def test_a_served_name_that_is_not_the_one_its_bytes_give_is_refused(tmp_path, monkeypatch):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    fake_adapter("c0", config, served_name="c0")  # the old, non content-addressed name
+    fake_adapter("c1", config)
+    with pytest.raises(TrainError, match="is not 'c0-"):
+        register_adapters(config)
+
+
+def test_the_gpu_price_is_checked_when_the_plan_is_made(tmp_path, monkeypatch):
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    config["train"]["gpu"] = "B200"
+    with pytest.raises(TrainError, match="no price for GPU B200"):
+        training_plan(save(config, config_path), "c0")
 
 
 def test_an_adapter_trained_on_other_facts_does_not_count(tmp_path, monkeypatch):
@@ -181,29 +199,90 @@ def _adapter_files(tmp_path):
     return files, facts.sha256_dir(probe)
 
 
+def _modal_result(sha, files, stats, identity, seconds=100.0, reused=False, **run):
+    return {"sha256": sha, "files": files, "stats": stats, "function_seconds": seconds, "reused": reused,
+            "run": {**identity, "observed_gpus": ["NVIDIA L40S"], **run}}
+
+
 def test_training_on_modal_keeps_what_modal_trained_and_costs_its_gpu_seconds(tmp_path, monkeypatch):
     from bench import train
-    from bench.train import train_cluster
+    from bench.train import code_sha256, train_cluster
 
     _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
     prechecked = []
     monkeypatch.setattr(train, "precheck", lambda plan, rows: prechecked.append(len(rows)))
     files, sha = _adapter_files(tmp_path)
     stats = {"device": "cuda", "train_seconds": 90.0, "examples_seen": 8}
-    calls = fake_modal_app(monkeypatch, "train", train_adapter=lambda plan, raw: {
-        "sha256": sha, "files": files, "stats": stats, "function_seconds": 100.0})
+    calls = fake_modal_app(monkeypatch, "train",
+                           train_adapter=lambda plan, raw, identity: _modal_result(sha, files, stats, identity))
     result = train_cluster(str(config_path), "c0", "modal")
-    (plan, raw), = calls["train_adapter"]
+    (plan, raw, identity), = calls["train_adapter"]
     assert plan["dataset"]["sha256"] == hashlib.sha256(raw).hexdigest() and plan["base"] == TINY
+    price = config["modal"]["gpu_prices"]["usd_per_s"][config["train"]["gpu"]]
+    assert (identity["gpu"], identity["price_usd_per_s"], identity["code_sha256"]) == (
+        config["train"]["gpu"], price, code_sha256())
     assert prechecked == [4]  # the template checks ran here, before any GPU
     assert calls["app.run"] == [{"detach": True}]  # the training survives this machine sleeping
     adapter = paths.ROOT / "train" / "adapters" / "c0" / "adapter"
     assert {p.name: p.read_bytes() for p in adapter.iterdir()} == files
     manifest = json.loads(result["manifest"].read_text())
-    price = config["modal"]["gpu_prices"]["usd_per_s"][config["train"]["gpu"]]
     assert (manifest["where"], manifest["gpu"], manifest["gpu_seconds"]) == ("modal", config["train"]["gpu"], 100.0)
     assert manifest["cost_usd"] == round(100.0 * price, 4) and manifest["adapter_sha256"] == sha
-    assert manifest["stats"] == {**stats, "collected_from_earlier_run": False} and result["missing"] == ["c1"]
+    assert manifest["served_name"] == f"c0-{sha[:12]}" and manifest["code_sha256"] == code_sha256()
+    assert manifest["stats"] == {**stats, "collected_from_earlier_run": False, "observed_gpus": ["NVIDIA L40S"]}
+    assert result["missing"] == ["c1"]
+
+
+def test_a_reused_result_records_its_own_gpu_seconds_price_and_commit(tmp_path, monkeypatch):
+    from bench import train
+    from bench.train import train_cluster
+
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(train, "precheck", lambda plan, rows: None)
+    files, sha = _adapter_files(tmp_path)
+    then = {"price_usd_per_s": 0.0009, "price_as_of": "2026-09-01", "commit": "c" * 40, "dirty": False}
+    fake_modal_app(monkeypatch, "train", train_adapter=lambda plan, raw, identity: _modal_result(
+        sha, files, {"train_seconds": 50}, identity, seconds=200.0, reused=True, **then))
+    manifest = json.loads(train_cluster(str(config_path), "c0", "modal")["manifest"].read_text())
+    assert (manifest["price_usd_per_s"], manifest["price_as_of"], manifest["commit"]) == (0.0009, "2026-09-01", "c" * 40)
+    assert (manifest["gpu_seconds"], manifest["cost_usd"]) == (200.0, round(200.0 * 0.0009, 4))
+    assert manifest["stats"]["collected_from_earlier_run"] is True
+
+
+def test_a_stored_result_of_another_gpu_or_code_is_refused(tmp_path, monkeypatch):
+    from bench import train
+    from bench.train import train_cluster
+
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(train, "precheck", lambda plan, rows: None)
+    files, sha = _adapter_files(tmp_path)
+    fake_modal_app(monkeypatch, "train", train_adapter=lambda plan, raw, identity: _modal_result(
+        sha, files, {}, identity, code_sha256="0" * 64))
+    with pytest.raises(TrainError, match="another GPU or code"):
+        train_cluster(str(config_path), "c0", "modal")
+
+
+def test_the_modal_key_holds_the_gpu_and_the_code_but_not_the_price_or_commit(tmp_path, monkeypatch):
+    from bench.train import code_sha256, modal_key
+
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    plan, _ = training_plan(config, "c0")
+    identity = {"gpu": "L40S", "code_sha256": "a" * 64, "price_usd_per_s": 1.0, "commit": "x"}
+    key = modal_key(plan, identity)
+    assert key == modal_key(plan, {**identity, "price_usd_per_s": 2.0, "commit": "y"})
+    assert key != modal_key(plan, {**identity, "gpu": "H100"}) != modal_key(plan, {**identity, "code_sha256": "b" * 64})
+    assert len(code_sha256()) == 64
+
+
+def test_the_code_identity_changes_with_any_shipped_file(tmp_path):
+    from bench.train import code_sha256
+
+    for rel_path in ("bench/a.py", "modal_apps/b.py", "env/train/requirements.lock"):
+        (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel_path).write_text("x")
+    before = code_sha256(tmp_path)
+    (tmp_path / "modal_apps/b.py").write_text("y")
+    assert code_sha256(tmp_path) != before
 
 
 def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monkeypatch):
@@ -213,8 +292,8 @@ def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monke
     _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(train, "precheck", lambda plan, rows: None)
     files, _ = _adapter_files(tmp_path)
-    fake_modal_app(monkeypatch, "train", train_adapter=lambda plan, raw: {
-        "sha256": "0" * 64, "files": files, "stats": {}, "function_seconds": 1.0})
+    fake_modal_app(monkeypatch, "train",
+                   train_adapter=lambda plan, raw, identity: _modal_result("0" * 64, files, {}, identity, seconds=1.0))
     with pytest.raises(TrainError, match="not the one trained there"):
         train_cluster(str(config_path), "c0", "modal")
     assert [p.name for p in (paths.ROOT / "train" / "adapters").iterdir()] == []  # nothing installed

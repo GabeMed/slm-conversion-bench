@@ -3,7 +3,9 @@ all of it is testable without the SDK or an account.
 
 The settings are computed on the local side (from `BENCH_CONFIG`, default config.yaml, and for the serving
 app `BENCH_CANDIDATE`) and carried into the image as one environment variable, `BENCH_MODAL`: a container
-never reads config.yaml, and the settings it runs with are part of the image's identity.
+never reads config.yaml, and the settings it runs with are part of the image's identity. Serving knobs that
+change no output (`DEPLOY_KNOBS`) come from modal_apps/deploy.yaml and environment overrides instead, so they
+can change after `bench prereg` without touching the registered config.yaml.
 """
 import json
 import os
@@ -26,8 +28,10 @@ STATE_DIR = "bench-serving"  # on the vLLM-cache volume: what each running serve
 PORT = 8000
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)  # vllm/config/lora.py:MaxLoRARanks @ v0.30.0
 SERVING_KEYS = ("vllm_version", "base_image", "gpu", "cpu", "max_model_len", "gpu_memory_utilization",
-                "prefix_caching", "generation_config", "max_concurrent_requests", "min_containers",
-                "scaledown_window_s", "startup_timeout_s", "download_timeout_s", "warmup_timeout_s", "unauthenticated")
+                "prefix_caching", "generation_config", "max_concurrent_requests", "startup_timeout_s",
+                "download_timeout_s", "warmup_timeout_s", "unauthenticated")
+DEPLOY_FILE = ROOT / "modal_apps" / "deploy.yaml"
+DEPLOY_KNOBS = {"min_containers": "BENCH_MIN_CONTAINERS", "scaledown_window_s": "BENCH_SCALEDOWN_WINDOW_S"}
 
 
 class SettingsError(RuntimeError):
@@ -40,6 +44,34 @@ def common_settings(config: Dict[str, Any]) -> Dict[str, Any]:
             "train": {"gpu": config["train"]["gpu"], "timeout_s": config["train"]["timeout_s"],
                       "reference_timeout_s": config["preflight"]["lora_parity"]["reference_timeout_s"]},
             "loadtest": dict(config["loadtest"]["client"])}
+
+
+def deploy_knobs(environ: Optional[Dict[str, str]] = None) -> Dict[str, int]:
+    """min_containers and scaledown_window_s: modal_apps/deploy.yaml, each overridden by its variable."""
+    import yaml
+
+    environ = os.environ if environ is None else environ
+    knobs = yaml.safe_load(DEPLOY_FILE.read_text())
+    if set(knobs) != set(DEPLOY_KNOBS):
+        raise SettingsError(f"{DEPLOY_FILE.name} must set exactly {sorted(DEPLOY_KNOBS)}")
+    for knob, variable in DEPLOY_KNOBS.items():
+        value = environ.get(variable, knobs[knob])
+        try:
+            knobs[knob] = int(value)
+        except (TypeError, ValueError):
+            raise SettingsError(f"{variable} must be an integer, not {value!r}") from None
+    return knobs
+
+
+def check_serving_template(entry: Dict[str, Any]) -> None:
+    """The candidate's template reads every kwarg it is served with (thinking off), with or without
+    training: bench.train.check_template_reads on its pinned tokenizer."""
+    from transformers import AutoTokenizer
+
+    from bench.train import check_template_reads
+
+    tokenizer = AutoTokenizer.from_pretrained(entry["hf"]["repo"], revision=entry["hf"]["revision"])
+    check_template_reads(tokenizer, dict(entry.get("chat_template_kwargs") or {}))
 
 
 def lora_rank(r: int) -> int:
@@ -70,7 +102,7 @@ def adapters_to_serve(config: Dict[str, Any], name: str) -> List[Dict[str, Any]]
             manifest = json.loads(manifest_path.read_text())
             if manifest["slm"] == name:
                 entries.append((manifest["cluster"], manifest["served_name"], manifest["adapter_sha256"]))
-    from bench.train import candidate
+    from bench.train import candidate, served_name as content_name
 
     entry = candidate(config, name)
     trained_for = {"base": dict(entry["hf"]), "chat_template_kwargs": dict(entry.get("chat_template_kwargs") or {})}
@@ -79,6 +111,9 @@ def adapters_to_serve(config: Dict[str, Any], name: str) -> List[Dict[str, Any]]
         adapter = root / cluster / "adapter"
         if not adapter.is_dir() or sha256_dir(adapter) != sha:
             raise SettingsError(f"train/adapters/{cluster}/adapter is not the adapter {sha} to be served")
+        if served_name != content_name(cluster, sha):
+            raise SettingsError(f"{cluster}: served name {served_name!r} is not {content_name(cluster, sha)!r}, "
+                                "the one its bytes give")
         manifest = json.loads((root / cluster / "manifest.json").read_text())
         if {k: manifest.get(k) for k in trained_for} != trained_for:
             raise SettingsError(f"the adapter of {cluster} was trained on other weights or template kwargs than "
@@ -88,14 +123,27 @@ def adapters_to_serve(config: Dict[str, Any], name: str) -> List[Dict[str, Any]]
     return adapters
 
 
-def serve_plan(config: Dict[str, Any], name: str) -> Dict[str, Any]:
-    from bench.train import candidate
+def serve_plan(config: Dict[str, Any], name: str, environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    from bench.train import TrainError, candidate
 
     entry = candidate(config, name)
+    try:
+        check_serving_template(entry)
+    except TrainError as e:
+        raise SettingsError(f"{name}: {e}") from None
     return {"name": name, "repo": entry["hf"]["repo"], "revision": entry["hf"]["revision"],
             "chat_template_kwargs": dict(entry.get("chat_template_kwargs") or {}),
             "adapters": adapters_to_serve(config, name),
-            **{k: config["serving"][k] for k in SERVING_KEYS}}
+            **{k: config["serving"][k] for k in SERVING_KEYS}, **deploy_knobs(environ)}
+
+
+def check_auth(plan: Dict[str, Any], environ: Dict[str, str]) -> str:
+    """In the serving container, before vLLM starts: fail closed. Modal's proxy auth (unauthenticated false)
+    and vLLM's own key are two layers; at least one must hold. Returns which."""
+    key = bool(environ.get("VLLM_API_KEY"))
+    if plan["unauthenticated"] and not key:
+        raise SettingsError("refusing to serve with neither Modal proxy auth nor a VLLM_API_KEY")
+    return "+".join([*([] if plan["unauthenticated"] else ["proxy"]), *(["vllm-key"] if key else [])])
 
 
 def load(kind: str) -> Dict[str, Any]:
@@ -212,7 +260,11 @@ def mark_started(root: str, plan_id: str, now: float) -> None:
 def store_training(root: str, plan_id: str, result: Dict[str, Any]) -> None:
     results = Path(root) / RESULTS
     (results / f"{plan_id}.json").write_text(json.dumps(result, sort_keys=True))
-    (results / f"{plan_id}.started").unlink(missing_ok=True)
+    release_started(root, plan_id)
+
+
+def release_started(root: str, plan_id: str) -> None:
+    (Path(root) / RESULTS / f"{plan_id}.started").unlink(missing_ok=True)
 
 
 def serving_state(plan: Dict[str, Any], nvidia_smi: str) -> Dict[str, Any]:

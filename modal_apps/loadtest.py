@@ -17,29 +17,36 @@ from modal_apps.train import hf_cache, image
 
 SETTINGS = common.load("loadtest")
 api_key = modal.Secret.from_name(SETTINGS["secrets"]["vllm_api_key"])
+proxy_auth = modal.Secret.from_name(SETTINGS["secrets"]["proxy_auth"])  # the variables headers_env names
 vllm_cache = modal.Volume.from_name(SETTINGS["volumes"]["vllm_cache"], create_if_missing=True)
 
 app = modal.App(SETTINGS["apps"]["loadtest"])
 
 
 @app.function(image=image, cpu=SETTINGS["loadtest"]["cpu"], timeout=SETTINGS["loadtest"]["timeout_s"],
-              volumes={common.HF_CACHE: hf_cache, common.VLLM_CACHE: vllm_cache}, secrets=[api_key])
+              volumes={common.HF_CACHE: hf_cache, common.VLLM_CACHE: vllm_cache}, secrets=[api_key, proxy_auth])
 def run_aiperf(payloads: bytes, args: dict) -> dict:
-    from bench.loadtest import PAYLOADS, aiperf_command, run_aiperf as run, wait_ready, warm_up
+    from bench.loadtest import (PAYLOADS, aiperf_command, aiperf_config, auth_headers, env_headers,
+                                run_aiperf as run, scrub_secrets, wait_ready, warm_up, write_aiperf_config)
 
     key = os.environ.get("VLLM_API_KEY")
+    headers = env_headers(args["headers_env"])  # from the proxy_auth secret, by the names the endpoint gives
     state = common.state_path(common.VLLM_CACHE, args["candidate"]) if args.get("candidate") else None
     with tempfile.TemporaryDirectory() as work:
         run_dir = Path(work)
         (run_dir / PAYLOADS).write_bytes(payloads)
-        waited, card = wait_ready(args["base_url"], key, args["model"], args["ready_timeout_s"])
-        warm_up(args["base_url"], key, args["warmup"], args["timeout_s"])
-        cmd = aiperf_command(shutil.which("aiperf"), args["url"], args["model"], args["concurrency"],
-                             args["request_count"], args["tokenizer"], args["timeout_s"], args["stream"], key)
+        sent = auth_headers(key, headers)
+        waited, card = wait_ready(args["base_url"], sent, args["model"], args["ready_timeout_s"])
+        warm_up(args["base_url"], sent, args["warmup"], args["timeout_s"])
+        cmd = aiperf_command(shutil.which("aiperf"), args["tokenizer"])
+        write_aiperf_config(run_dir, aiperf_config(args["url"], args["model"], args["concurrency"], args["request_count"],
+                                                   args["timeout_s"], args["stream"], "VLLM_API_KEY" if key else None,
+                                                   args["headers_env"]))
         returncode = run(run_dir, cmd)
+        redacted = scrub_secrets(run_dir, [key or "", *headers.values()])
         files = {p.relative_to(run_dir).as_posix(): p.read_bytes() for p in sorted(run_dir.rglob("*"))
                  if p.is_file() and p.name != PAYLOADS}
         vllm_cache.reload()  # the server wrote its state when it started, before it answered /models
         server_state = json.loads(state.read_text()) if state and state.is_file() else None
     return {"returncode": returncode, "ready_after_s": waited, "served_model": card, "server_state": server_state,
-            "files": files}
+            "secrets_redacted_in": redacted, "files": files}

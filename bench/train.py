@@ -6,7 +6,9 @@ trains with TRL/PEFT (`train_lora`: the same code on a local CPU and in the Moda
 `modal_apps/train.py`), and writes
 
     train/adapters/<cluster>/adapter/        the PEFT adapter, exactly what vLLM serves; its identity is
-                                             `facts.sha256_dir` of this directory
+                                             `facts.sha256_dir` of this directory, and it is served under the
+                                             content-addressed name `<cluster>-<sha256[:12]>`, so a server that
+                                             was not redeployed answers 404 instead of serving the old adapter
     train/adapters/<cluster>/manifest.json   base and revision, hyper-parameters, dataset sha256, the facts it
                                              was trained on, where it ran, GPU-seconds and cost
 
@@ -33,6 +35,7 @@ from bench import paths
 from bench.contracts.facts import read_fact, sha256_dir, write_fact
 
 JUDGMENT = "S5"
+SOURCE_ROOT = Path(__file__).resolve().parent.parent  # the code that ships to the Modal images
 MESSAGE_ROLES = ("system", "user", "assistant")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # a served name reaches vLLM's `--lora-modules name=path` and the router's `slm:<c>+lora:<name>`
@@ -142,6 +145,7 @@ def training_plan(config: Dict[str, Any], cluster: str) -> Tuple[Dict[str, Any],
     if not SERVED_NAME.match(cluster) or cluster == slm:
         raise TrainError(f"cluster {cluster!r} cannot be a served adapter name (letters, digits, '.', '_', '-'; "
                          "not the base's name)")
+    gpu_cost(config, config["train"]["gpu"], 0)  # refuses a GPU without a price before any GPU time is spent
     path = datasets_dir() / f"{cluster}.jsonl"
     if not path.is_file():
         raise TrainError(f"no dataset for cluster {cluster}: train/datasets/{cluster}.jsonl")
@@ -149,7 +153,7 @@ def training_plan(config: Dict[str, Any], cluster: str) -> Tuple[Dict[str, Any],
     rows = parse_dataset(raw, path.name)
     train = config["train"]
     plan = {
-        "cluster": cluster, "slm": slm, "served_name": cluster,
+        "cluster": cluster, "slm": slm,
         "base": {"repo": entry["hf"]["repo"], "revision": entry["hf"]["revision"]},
         "chat_template_kwargs": dict(entry.get("chat_template_kwargs") or {}),
         "facts": {"choice": choice_sha, "centroids": centroids_sha},
@@ -300,16 +304,22 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
-def write_manifest(config: Dict[str, Any], plan: Dict[str, Any], stats: Dict[str, Any], adapter: Path,
-                   where: str, gpu: Optional[str], billed_seconds: float, started: datetime) -> Path:
-    from bench.contracts.config import config_sha256
-    from bench.provenance import git_state
+def served_name(cluster: str, sha256: str) -> str:
+    """The name vLLM serves an adapter under: its cluster and the start of its sha256 (content-addressed)."""
+    return f"{cluster}-{sha256[:12]}"
 
+
+def write_manifest(config: Dict[str, Any], plan: Dict[str, Any], stats: Dict[str, Any], adapter: Path, where: str,
+                   billing: Dict[str, Any], code: Dict[str, Any], started: datetime) -> Path:
+    """`billing` (GPU, seconds, price, cost) and `code` (commit) are the training's own: for a result
+    collected from an earlier run, that run's, never today's."""
+    from bench.contracts.config import config_sha256
+
+    sha = sha256_dir(adapter)
     manifest = {
-        **{k: plan[k] for k in ("cluster", "slm", "served_name", "base", "chat_template_kwargs", "facts",
-                                "dataset", "hyperparameters")},
-        "adapter_sha256": sha256_dir(adapter), "where": where, **gpu_cost(config, gpu, billed_seconds),
-        "stats": stats, "config_sha256": config_sha256(config), **git_state(),
+        **{k: plan[k] for k in ("cluster", "slm", "base", "chat_template_kwargs", "facts", "dataset", "hyperparameters")},
+        "served_name": served_name(plan["cluster"], sha), "adapter_sha256": sha, "where": where, **billing,
+        "stats": stats, "config_sha256": config_sha256(config), **code,
         "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
     }
     path = adapter.parent / "manifest.json"
@@ -352,16 +362,48 @@ def register_adapters(config: Dict[str, Any]) -> Tuple[Optional[Path], List[str]
         if sha != manifest["adapter_sha256"]:
             raise TrainError(f"train/adapters/{cluster}/adapter changed after training (sha256 {sha}, "
                              f"manifest {manifest['adapter_sha256']})")
+        if manifest["served_name"] != served_name(cluster, sha):
+            raise TrainError(f"train/adapters/{cluster}: served name {manifest['served_name']!r} is not "
+                             f"{served_name(cluster, sha)!r}, the one its bytes give")
         adapters[cluster] = {"served_name": manifest["served_name"], "sha256": sha}
     if missing:
         return None, missing
-    payload = {"slm": choice["slm"], "choice": choice_sha, "centroids": centroids_sha, "adapters": adapters}
+    # base_revision and chat_template_kwargs: what the set was trained on (validate_fact ignores extra keys;
+    # the router checks them against the candidate)
+    payload = {"slm": choice["slm"], "choice": choice_sha, "centroids": centroids_sha, "adapters": adapters,
+               "base_revision": entry["hf"]["revision"], "chat_template_kwargs": trained_for["chat_template_kwargs"]}
     return write_fact(JUDGMENT, "adapters", payload), []
 
 
 def plan_id(plan: Dict[str, Any]) -> str:
     """The identity of a training: everything it depends on (the dataset by its sha256)."""
     return sha256_bytes(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode())
+
+
+def code_sha256(root: Path = SOURCE_ROOT) -> str:
+    """The identity of the code and image a Modal training runs: every source file shipped to the image
+    (bench/, modal_apps/) and the lock it installs, by content (a dirty tree is not its commit)."""
+    files = sorted([*root.glob("bench/**/*.py"), *root.glob("modal_apps/**/*.py"), root / "env" / "train" / "requirements.lock"])
+    digest = hashlib.sha256()
+    for file in files:
+        digest.update(f"{file.relative_to(root).as_posix()}\0{sha256_bytes(file.read_bytes())}\n".encode())
+    return digest.hexdigest()
+
+
+def run_identity(config: Dict[str, Any]) -> Dict[str, Any]:
+    """What a Modal training runs on besides its plan: the GPU with its dated price, the code and image, the
+    commit. Part of the stored result's key, and recorded with it, so a reused result reports its own."""
+    from bench.provenance import git_state
+
+    billing = gpu_cost(config, config["train"]["gpu"], 0)
+    return {"gpu": billing["gpu"], "price_usd_per_s": billing["price_usd_per_s"], "price_as_of": billing["price_as_of"],
+            "code_sha256": code_sha256(), **git_state()}
+
+
+def modal_key(plan: Dict[str, Any], identity: Dict[str, Any]) -> str:
+    """The key of a stored Modal training: the plan, the GPU and the code (a price or a commit alone does not
+    change what is trained)."""
+    return plan_id({**plan, "run": {k: identity[k] for k in ("gpu", "code_sha256")}})
 
 
 def precheck(plan: Dict[str, Any], rows: List[dict]) -> Dict[str, int]:
@@ -395,7 +437,6 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
         trained = Path(work) / "adapter"
         if on == "local":
             stats = train_lora(plan, parse_dataset(raw, plan["dataset"]["path"]), trained, _device())
-            gpu, seconds = None, 0.0  # a local run is not billed; stats records its device and time
         elif on == "modal":
             precheck(plan, parse_dataset(raw, plan["dataset"]["path"]))
             sys.path.insert(0, str(paths.ROOT))
@@ -403,20 +444,34 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
 
             # detached: the training goes on if this machine sleeps; running the same command again
             # collects the stored result of the same plan instead of training twice
+            identity = run_identity(config)
             with modal_train.app.run(detach=True):
-                result = modal_train.train_adapter.remote(plan, raw)
+                result = modal_train.train_adapter.remote(plan, raw, identity)
             for rel, content in result["files"].items():
                 (trained / rel).parent.mkdir(parents=True, exist_ok=True)
                 (trained / rel).write_bytes(content)
             if sha256_dir(trained) != result["sha256"]:
                 raise TrainError("the adapter downloaded from Modal is not the one trained there (sha256 differs)")
-            # a result collected from an earlier (detached) run keeps that run's cost
-            stats = {**result["stats"], "collected_from_earlier_run": bool(result.get("reused"))}
-            gpu, seconds = config["train"]["gpu"], result["function_seconds"]
+            # the run that trained it (for a result collected from an earlier run, that run's): its GPU, price,
+            # seconds and commit, never today's
+            run = result["run"]
+            if (run["gpu"], run["code_sha256"]) != (identity["gpu"], identity["code_sha256"]):
+                raise TrainError("the stored result was trained on another GPU or code than this plan asks")
+            stats = {**result["stats"], "collected_from_earlier_run": bool(result.get("reused")),
+                     "observed_gpus": run.get("observed_gpus")}
+            seconds = result["function_seconds"]
+            billing = {"gpu": run["gpu"], "gpu_seconds": round(seconds, 3),
+                       "cost_usd": round(seconds * run["price_usd_per_s"], 4),
+                       "price_usd_per_s": run["price_usd_per_s"], "price_as_of": run["price_as_of"]}
+            code = {"commit": run["commit"], "dirty": run["dirty"], "code_sha256": run["code_sha256"]}
         else:
             raise TrainError(f"--on must be local or modal, not {on!r}")
         adapter = _install_adapter(cluster, trained)
-    manifest = write_manifest(config, plan, stats, adapter, on, gpu, seconds, started)
+    if on == "local":
+        from bench.provenance import git_state
+
+        billing, code = gpu_cost(config, None, 0), git_state()  # a local run is not billed
+    manifest = write_manifest(config, plan, stats, adapter, on, billing, code, started)
     fact, missing = register_adapters(config)
     return {"manifest": manifest, "fact": fact, "missing": missing}
 

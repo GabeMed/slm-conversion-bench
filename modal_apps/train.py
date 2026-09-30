@@ -6,10 +6,12 @@ the image of env/train/requirements.lock; and `peft_reference`, P-4's HF-PEFT si
 A trained adapter is kept on the adapters volume at `/adapters/<sha256>` (its `facts.sha256_dir`), the
 path the serving app loads it from, and is returned to the local side, which checks the sha256 again.
 The local side runs the app detached, so a training goes on if the operator's machine sleeps; its result is
-stored on the volume by plan id, and running the same command again collects it instead of training twice.
+stored on the volume, keyed by the plan, the GPU and the code (bench.train.modal_key), with the run's own
+GPU, price and commit; running the same command again collects it instead of training twice.
 """
 import json
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -37,33 +39,42 @@ volumes = {common.HF_CACHE: hf_cache, common.ADAPTERS: adapters}
 
 @app.function(image=image, gpu=SETTINGS["train"]["gpu"], timeout=SETTINGS["train"]["timeout_s"], volumes=volumes,
               secrets=hf_secrets, single_use_containers=True)
-def train_adapter(plan: dict, dataset: bytes) -> dict:
+def train_adapter(plan: dict, dataset: bytes, identity: dict) -> dict:
+    """`identity` (bench.train.run_identity): the GPU with its price, the code and image, the commit. The
+    stored result is keyed by the plan, the GPU and the code, and records the identity it ran with."""
     started = time.monotonic()
     from bench.contracts.facts import sha256_dir
-    from bench.train import parse_dataset, plan_id, sha256_bytes, train_lora
+    from bench.train import modal_key, parse_dataset, sha256_bytes, train_lora
 
     if sha256_bytes(dataset) != plan["dataset"]["sha256"]:
         raise RuntimeError("the dataset received is not the one planned (sha256 differs)")
+    if identity["gpu"] != SETTINGS["train"]["gpu"]:
+        raise RuntimeError(f"this function runs on {SETTINGS['train']['gpu']}, the plan asks {identity['gpu']}")
     rows = parse_dataset(dataset, plan["dataset"]["path"])
-    pid = plan_id(plan)
+    key = modal_key(plan, identity)
     adapters.reload()
-    stored = common.stored_training(common.ADAPTERS, pid, time.time(), SETTINGS["train"]["timeout_s"])
+    stored = common.stored_training(common.ADAPTERS, key, time.time(), SETTINGS["train"]["timeout_s"])
     if stored is not None:
         return stored
-    common.mark_started(common.ADAPTERS, pid, time.time())
+    common.mark_started(common.ADAPTERS, key, time.time())
     adapters.commit()
-    with tempfile.TemporaryDirectory() as work:
-        out = Path(work) / "adapter"
-        stats = train_lora(plan, rows, out, "cuda")
-        sha = sha256_dir(out)
-        destination = Path(common.ADAPTERS) / sha
-        if not destination.exists():
-            shutil.copytree(out, destination)
-        result = {"sha256": sha, "stats": stats, "function_seconds": round(time.monotonic() - started, 3)}
-        common.store_training(common.ADAPTERS, pid, result)
+    try:
+        with tempfile.TemporaryDirectory() as work:
+            out = Path(work) / "adapter"
+            stats = train_lora(plan, rows, out, "cuda")
+            sha = sha256_dir(out)
+            destination = Path(common.ADAPTERS) / sha
+            if not destination.exists():
+                shutil.copytree(out, destination)
+            smi = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
+            run = {**identity, "observed_gpus": [line.strip() for line in smi.stdout.splitlines() if line.strip()]}
+            result = {"sha256": sha, "stats": stats, "function_seconds": round(time.monotonic() - started, 3), "run": run}
+            common.store_training(common.ADAPTERS, key, result)
+            files = {p.relative_to(out).as_posix(): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
+    finally:  # a failed training releases its marker: the next attempt is not refused as "still running"
+        common.release_started(common.ADAPTERS, key)
         adapters.commit()
         hf_cache.commit()
-        files = {p.relative_to(out).as_posix(): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
     return {**result, "files": files, "reused": False}
 
 

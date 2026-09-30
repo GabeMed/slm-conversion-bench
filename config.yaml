@@ -19,18 +19,21 @@ roles:
   slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
     # served under `name` (--served-model-name); adapters under their own served names
     # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
-    # `chat_template_kwargs`: how the template renders, the same when serving and training (thinking off)
+    # `chat_template_kwargs`: how the template renders, the same when serving and training (thinking off);
+    # `endpoint.headers_env`: each header sent with the value of its environment variable (Modal proxy auth)
     - name: qwen3-8b
       base: Qwen3-8B
       hf: {repo: Qwen/Qwen3-8B, revision: b968826d9c46dd6066d109eabc6255188de91218}
       chat_template_kwargs: {enable_thinking: false}
-      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      endpoint: {kind: vllm, base_url: null, api_key_env: null,
+                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
     - name: granite-4.2-8b
       base: Granite-4.2-8B
       hf: {repo: ibm-granite/granite-4.2-8b, revision: f8de16cdcdbc6c779ca517604e050d82cc119e44}
       chat_template_kwargs: {enable_thinking: false}
-      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      endpoint: {kind: vllm, base_url: null, api_key_env: null,
+                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
   slm_reserve: [Nemotron-3-Nano-4B]
   slm_reserve_hf:              # F3: its weights, pinned; a hybrid (Mamba) model with no gate_proj, so
@@ -157,7 +160,9 @@ modal:
     usd_per_s: {L40S: 0.000542, H100: 0.001097}
   volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
   secrets:
-    vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY; the agent sends it as the candidate's api_key_env
+    vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
+    proxy_auth: slm-bench-proxy-auth       # holds the variables the candidates' headers_env names (a Modal proxy auth token),
+                                           # for the load client that runs in Modal
     hf_token: null                         # the pinned candidates are ungated
   apps: {serve: slm-bench-serve, train: slm-bench-train, loadtest: slm-bench-loadtest}
 
@@ -171,12 +176,13 @@ serving:                       # vLLM, one candidate per server, its adapters be
   prefix_caching: true         # SPEC 6.6: the load test runs with the prefix cache on
   generation_config: vllm      # only the request's parameters apply, never the model's sampling defaults
   max_concurrent_requests: 256 # per container; above it the Modal proxy answers 503
-  min_containers: 0            # 1 while agent runs use it: a cold start answers 503, and hooks do not retry
-  scaledown_window_s: 300
+  # min_containers and scaledown_window_s change no output: they live in modal_apps/deploy.yaml (and env
+  # overrides), so they can change after `bench prereg` without touching this file
   startup_timeout_s: 1800
   download_timeout_s: 3600
   warmup_timeout_s: 600
-  unauthenticated: true        # Modal's proxy auth needs headers the agent's client does not send; vLLM's own API key guards it
+  unauthenticated: false       # Modal proxy auth (the candidates' headers_env); the server refuses to start with neither
+                               # proxy auth nor a VLLM_API_KEY
 
 train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
   gpu: L40S

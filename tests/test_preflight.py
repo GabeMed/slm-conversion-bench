@@ -8,10 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from bench import cli, paths
-from bench.preflight import (FAIL, PASS, PENDING, PreflightError, check_agent_runs, check_call_sites, check_data,
+from bench.preflight import (FAIL, PASS, PENDING, UNDECIDED, PreflightError, check_agent_runs, check_call_sites, check_data,
                              check_lora_parity, check_pilot_spend, check_teacher_terms, check_throughput,
                              check_training_time, compare, lora_parity, parity_verdict, served_generate)
-from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, save
+from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, save, served
 
 STOP = [2]
 
@@ -71,14 +71,25 @@ def test_verdict_when_the_served_adapter_diverges_from_peft():
     assert "reserve" in verdict["action"] and verdict["base_matches_hf"] == 3
 
 
-def test_verdict_when_vllm_ignores_the_adapter_where_peft_changes_only_by_near_ties():
+def test_near_tie_changes_only_leave_p4_undecided_never_switch_the_base():
     """The served adapter equals the base everywhere; HF-PEFT's changes are near-ties, so every prompt
-    'matches' by the top-k rule. Not a pass: the adapter changed nothing."""
+    'matches' by the top-k rule. That evidence cannot tell an applied adapter from an ignored one."""
     base = [{"tokens": [10, 20], "top": [[10, 40], [20]]}]
     adapter = [{"tokens": [40, 50], "top": [[40, 10], [50]]}]
     verdict = parity_verdict(base, base, base, adapter, STOP)
-    assert verdict["adapter_matches_peft"] == 1 and verdict["status"] == FAIL
-    assert "ignores the adapter" in verdict["diagnosis"]
+    assert verdict["adapter_matches_peft"] == 1 and verdict["status"] == UNDECIDED
+    assert "near-ties" in verdict["diagnosis"] and "not to be switched" in verdict["action"]
+    assert "reserve" not in verdict["action"]
+
+
+def test_the_reviewers_near_tie_fixture_does_not_pass():
+    """The server changes the output and 'matches' PEFT by the top-k rule, but no change is decisive."""
+    ref_base = {"tokens": [10, 20], "top": [[10, 40], [20, 21]]}
+    ref_adapter = {"tokens": [40, 50], "top": [[40, 10], [50]]}
+    served_adapter = {"tokens": [10, 21], "top": [[10, 40], [21, 20]]}
+    verdict = parity_verdict([ref_base], [served_adapter], [ref_base], [ref_adapter], STOP)
+    assert verdict["adapter_changes_output"] == 1 and verdict["adapter_matches_peft"] == 1  # the old rule passed
+    assert verdict["status"] == UNDECIDED and verdict["reproduced_decisive_changes"] == 0
 
 
 def test_verdict_when_vllm_applies_the_adapter_on_only_some_decisive_prompts():
@@ -111,10 +122,16 @@ def test_verdict_when_the_serving_itself_disagrees_does_not_blame_the_lora():
     assert "not decided" in verdict["action"]
 
 
-def test_verdict_when_the_adapter_changes_nothing_even_in_peft_is_uninformative():
+def test_an_adapter_that_changes_nothing_even_in_peft_leaves_p4_undecided():
     base = [gen([10, 20])]
     verdict = parity_verdict(base, base, base, base, STOP)
-    assert verdict["status"] == FAIL and "uninformative" in verdict["diagnosis"] and "not decided" in verdict["action"]
+    assert verdict["status"] == UNDECIDED and "changes nothing" in verdict["diagnosis"]
+    assert "not decided" in verdict["action"]
+
+
+def test_pass_needs_a_decisive_change_the_server_reproduces():
+    verdict = parity_verdict(*_four(2, lambda b, a: a), STOP)
+    assert verdict["status"] == PASS and verdict["reproduced_decisive_changes"] == 2
 
 
 def test_the_verdict_needs_four_generations_per_prompt():
@@ -138,6 +155,7 @@ class FakeVLLM:
                 pass
 
             def do_GET(self):
+                fake.requests.append({"path": self.path, "headers": dict(self.headers), "body": None})
                 body = json.dumps({"object": "list", "data": fake.cards}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
@@ -146,7 +164,7 @@ class FakeVLLM:
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                fake.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+                fake.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 i = fake.prompts.index(body["messages"])
                 generation = fake.script[body["model"]][i]
                 name = fake.token_name
@@ -177,10 +195,12 @@ def parity_repo(tmp_path, monkeypatch):
     return config_path, config, prompts
 
 
-def cards(adapter_sha256, root=None, base_root=TINY["repo"]):
-    """/v1/models as vLLM lists the base and an adapter (vllm/entrypoints/openai/models/serving.py)."""
+def cards(adapter_sha256, root=None, base_root=TINY["repo"], name=None):
+    """/v1/models as vLLM lists the base and an adapter (vllm/entrypoints/openai/models/serving.py), the
+    adapter under its content-addressed name."""
     return [{"id": TINY_NAME, "object": "model", "root": base_root},
-            {"id": "c0", "object": "model", "root": root or f"/adapters/{adapter_sha256}", "parent": TINY_NAME}]
+            {"id": name or f"c0-{adapter_sha256[:12]}", "object": "model", "root": root or f"/adapters/{adapter_sha256}",
+             "parent": TINY_NAME}]
 
 
 def _sha(name="c0"):
@@ -212,31 +232,39 @@ SERVED = {
 def test_p4_against_a_fake_vllm(parity_repo, monkeypatch, fake, status, diagnosis):
     config_path, config, prompts = parity_repo
     server = FakeVLLM({TINY_NAME: [gen([10 + i, 20, 30]) for i in range(len(prompts))],
-                       "c0": [SERVED[fake](i) for i in range(len(prompts))]}, prompts, cards(_sha()))
+                       served("c0"): [SERVED[fake](i) for i in range(len(prompts))]}, prompts, cards(_sha()))
     try:
-        config["roles"]["slm_candidates"][-1]["endpoint"].update({"base_url": server.base_url, "api_key_env": "TEST_SLM_KEY"})
+        config["roles"]["slm_candidates"][-1]["endpoint"].update({
+            "base_url": server.base_url, "api_key_env": "TEST_SLM_KEY",
+            "headers_env": {"Modal-Key": "TEST_MODAL_KEY", "Modal-Secret": "TEST_MODAL_SECRET"}})
         monkeypatch.setenv("TEST_SLM_KEY", "k-123")
+        monkeypatch.setenv("TEST_MODAL_KEY", "mk-1")
+        monkeypatch.setenv("TEST_MODAL_SECRET", "ms-1")
         reference, calls = _reference(prompts)
         verdict = lora_parity(save(config, config_path), "c0", "local", reference=reference)
     finally:
         server.close()
     assert verdict["status"] == status and diagnosis in verdict["diagnosis"]
-    assert verdict["served"] == {"base": TINY_NAME, "adapter": "c0"} and verdict["n_prompts"] == len(prompts)
+    assert verdict["served"] == {"base": TINY_NAME, "adapter": served("c0")} and verdict["n_prompts"] == len(prompts)
     # the reference renders the same prompts with the serving kwargs, from the pinned base
     settings = config["preflight"]["lora_parity"]
     assert calls == [(TINY, prompts, {"enable_thinking": False}, settings["max_new_tokens"], settings["top_logprobs"])]
-    # every served request is greedy, with top-k as token ids, and carries the configured key
-    assert {r["auth"] for r in server.requests} == {"Bearer k-123"}
-    assert {r["path"] for r in server.requests} == {"/v1/chat/completions"}  # after GET /v1/models
-    for r in server.requests:
+    # every request (the model list, then the generations) carries the key and the proxy-auth headers
+    assert {(r["headers"]["Authorization"], r["headers"]["Modal-Key"], r["headers"]["Modal-Secret"])
+            for r in server.requests} == {("Bearer k-123", "mk-1", "ms-1")}
+    assert server.requests[0]["path"] == "/v1/models"
+    generations = server.requests[1:]
+    assert {r["path"] for r in generations} == {"/v1/chat/completions"}
+    for r in generations:
         assert r["body"]["temperature"] == 0.0 and r["body"]["logprobs"] is True
         assert r["body"]["return_tokens_as_token_ids"] is True
         assert r["body"]["top_logprobs"] == settings["top_logprobs"] and r["body"]["max_tokens"] == settings["max_new_tokens"]
-    assert len(server.requests) == 2 * len(prompts)
+    assert len(generations) == 2 * len(prompts)
 
 
 @pytest.mark.parametrize("listed, message", [
-    (lambda sha: cards("f" * 64), "not the adapter trained"),  # retrained, not redeployed
+    (lambda sha: cards("f" * 64, name=f"c0-{sha[:12]}"), "not the adapter trained"),  # a root that is not the adapter
+    (lambda sha: cards("f" * 64), "deploy them"),  # retrained, not redeployed: the new name is not served (404)
     (lambda sha: cards(sha, base_root="Qwen/Other"), "not 'trl-internal-testing"),
     (lambda sha: cards(sha)[:1], "deploy them"),
 ])
@@ -249,7 +277,7 @@ def test_p4_refuses_to_judge_an_adapter_the_server_does_not_serve(parity_repo, l
     finally:
         server.close()
     assert failed["status"] == FAIL and message in failed["evidence"]["error"] and "not decided" in failed["action"]
-    assert not server.requests  # nothing generated
+    assert [r["path"] for r in server.requests] == ["/v1/models"]  # asked what it serves, generated nothing
 
 
 def test_a_bug_in_p4_is_raised_not_reported_as_an_unreachable_server(parity_repo, monkeypatch):
@@ -266,12 +294,33 @@ def test_served_generate_refuses_a_server_that_does_not_return_token_ids(parity_
 
     server = FakeVLLM({"m": [gen([1])] * len(prompts)}, prompts)
     try:
-        assert served_generate(server.base_url, "EMPTY", "m", prompts[0], 4, 2, 10) == gen([1])
+        assert served_generate(server.base_url, {}, "m", prompts[0], 4, 2, 10) == gen([1])
         server.token_name = lambda t: f"piece{t}"  # a server that returns text pieces
         with pytest.raises(PreflightError, match="not a token id"):
-            served_generate(server.base_url, "EMPTY", "m", prompts[0], 4, 2, 10)
+            served_generate(server.base_url, {}, "m", prompts[0], 4, 2, 10)
     finally:
         server.close()
+
+
+def test_p4_refuses_a_missing_proxy_auth_variable(parity_repo, monkeypatch):
+    config_path, config, prompts = parity_repo
+    server = FakeVLLM({}, prompts, cards(_sha()))
+    try:
+        config["roles"]["slm_candidates"][-1]["endpoint"].update({"base_url": server.base_url,
+                                                                  "headers_env": {"Modal-Key": "UNSET_MODAL_KEY"}})
+        monkeypatch.delenv("UNSET_MODAL_KEY", raising=False)
+        failed = check_lora_parity(save(config, config_path), "c0", "local")
+    finally:
+        server.close()
+    assert failed["status"] == FAIL and "UNSET_MODAL_KEY" in failed["evidence"]["error"] and not server.requests
+
+
+def test_p4_refuses_a_dataset_that_is_not_the_adapters(parity_repo):
+    config_path, config, prompts = parity_repo
+    path = paths.ROOT / "train/datasets/c0.jsonl"
+    path.write_text(path.read_text() + path.read_text().splitlines()[0] + "\n")  # one row more than trained on
+    failed = check_lora_parity(config, "c0", "local")
+    assert failed["status"] == FAIL and "not the dataset the adapter was trained on" in failed["evidence"]["error"]
 
 
 def test_p4_is_pending_until_asked_and_fails_with_its_reason_when_nothing_is_served(parity_repo):
@@ -284,11 +333,19 @@ def test_p4_is_pending_until_asked_and_fails_with_its_reason_when_nothing_is_ser
 
 # ---------------------------------------------------------------- SPEC 7.1
 
-def _agent_run(run_id, split, status="done", sites=("agent_ir", "extract_keywords")):
+def _agent_run(run_id, split, config, status="done", sites=("agent_ir", "extract_keywords"), arm="B0",
+               hours=0.5, other_config=False):
+    from datetime import datetime, timedelta, timezone
+
+    from bench.contracts.config import config_sha256
+
+    started = datetime(2026, 10, 1, 8, tzinfo=timezone.utc)
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
-    (run_dir / "manifest.json").write_text(json.dumps({"run_id": run_id, "split": split, "status": status,
-                                                       "call_sites_seen": list(sites)}))
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "run_id": run_id, "arm": arm, "split": split, "status": status, "call_sites_seen": list(sites),
+        "config_sha256": "0" * 64 if other_config else config_sha256(config),
+        "started_at": started.isoformat(), "finished_at": (started + timedelta(hours=hours)).isoformat()}))
 
 
 def test_teacher_terms(tmp_path, monkeypatch):
@@ -300,18 +357,46 @@ def test_teacher_terms(tmp_path, monkeypatch):
     assert "reserve" in failed["action"]
 
 
-def test_agent_runs_and_the_call_site_record(tmp_path, monkeypatch):
-    make_s5_repo(tmp_path, monkeypatch)
-    assert check_agent_runs()["status"] == FAIL
-    _agent_run("agent-B0-train-1", "train")
-    _agent_run("agent-B0-train-2", "train", status="failed", sites=("revise",))
-    assert check_agent_runs()["status"] == PASS
-    pending = check_call_sites()
-    assert pending["status"] == PENDING and pending["evidence"]["without_done_runs"] == ["calib"]
-    _agent_run("agent-B0-calib-1", "calib", sites=("agent_ss",))
-    done = check_call_sites()
+def test_agent_runs_and_the_call_site_record_count_only_b0_runs_on_this_configuration(tmp_path, monkeypatch):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    assert check_agent_runs(config)["status"] == FAIL
+    _agent_run("agent-B0-train-smoke", "train", config, other_config=True)  # a smoke run on another config
+    _agent_run("agent-B3-train-1", "train", config, arm="B3")
+    _agent_run("agent-B0-train-slow", "train", config, hours=4)  # over the 3 h of SPEC 7.1
+    _agent_run("agent-B0-train-2", "train", config, status="failed", sites=("revise",))
+    assert check_agent_runs(config)["status"] == FAIL
+    assert check_call_sites(config)["evidence"]["b0_runs"] == {"train": 1, "calib": 0}  # only the slow one, done
+    _agent_run("agent-B0-train-1", "train", config)
+    passed = check_agent_runs(config)
+    assert passed["status"] == PASS and passed["evidence"]["b0_runs_within_3h"] == ["agent-B0-train-1"]
+    pending = check_call_sites(config)
+    assert pending["status"] == PENDING and pending["evidence"]["without_done_b0_runs"] == ["calib"]
+    _agent_run("agent-B0-calib-1", "calib", config, sites=("agent_ss",))
+    done = check_call_sites(config)
     assert done["status"] == PASS
     assert done["evidence"]["call_sites"] == {"train": ["agent_ir", "extract_keywords"], "calib": ["agent_ss"]}
+
+
+def test_unreadable_manifests_are_reported_not_skipped(tmp_path, monkeypatch):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    for name in ("agent-B0-train-bad", "loadtest-bad"):
+        (paths.RUNS / name).mkdir(parents=True)
+        (paths.RUNS / name / "manifest.json").write_text("{not json")
+    (paths.ROOT / "train" / "adapters" / "c9").mkdir(parents=True)
+    (paths.ROOT / "train" / "adapters" / "c9" / "manifest.json").write_text("{")
+    assert check_agent_runs(config)["evidence"]["unreadable_manifests"] == ["agent-B0-train-bad: JSONDecodeError"]
+    assert check_call_sites(config)["evidence"]["unreadable_manifests"] == ["agent-B0-train-bad: JSONDecodeError"]
+    assert check_throughput()["evidence"]["unreadable_manifests"] == ["loadtest-bad: JSONDecodeError"]
+    assert check_training_time(config)["evidence"]["unreadable_manifests"] == ["c9: JSONDecodeError"]
+
+
+def test_a_bug_in_the_data_check_is_raised_not_reported_as_bad_data(tmp_path, monkeypatch):
+    from bench import data
+
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(data, "load_splits", lambda: {}["train"])
+    with pytest.raises(KeyError):
+        check_data(config)
 
 
 def test_data_check_passes_on_pinned_data_and_fails_on_overlapping_splits(tmp_path, monkeypatch):
@@ -376,7 +461,7 @@ def test_p4_on_modal_asks_the_gpu_reference_for_the_adapter_by_its_sha256(parity
 
     config_path, config, prompts = parity_repo
     server = FakeVLLM({TINY_NAME: [gen([10 + i, 20, 30]) for i in range(len(prompts))],
-                       "c0": [gen([40 + i, 50, 60]) for i in range(len(prompts))]}, prompts, cards(_sha()))
+                       served("c0"): [gen([40 + i, 50, 60]) for i in range(len(prompts))]}, prompts, cards(_sha()))
     reference, _ = _reference(prompts)
     calls = fake_modal_app(monkeypatch, "train",
                            peft_reference=lambda sha, *args: {**reference(*args), "function_seconds": 12.5})

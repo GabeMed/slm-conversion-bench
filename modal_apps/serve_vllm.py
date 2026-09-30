@@ -6,13 +6,17 @@ OpenAI-compatible; the candidate is served under `--served-model-name <name>` an
 `usage` with cached tokens, thinking off by the candidate's template kwargs, only the request's sampling
 parameters (`serving.generation_config: vllm`). Weights come from the HF-cache volume at the pinned
 revision, offline: `download` puts them there once. One GPU container at most, so a load test measures one
-GPU; it answers only requests carrying the key of the Modal secret `modal.secrets.vllm_api_key`.
+GPU. Auth, fail closed: Modal proxy auth (`serving.unauthenticated: false`; clients send the headers their
+endpoint's `headers_env` names) and vLLM's own key from the Modal secret `modal.secrets.vllm_api_key` as a
+second layer; the container refuses to start with neither. Knobs that change no output (min_containers,
+scaledown_window_s) come from modal_apps/deploy.yaml and BENCH_MIN_CONTAINERS / BENCH_SCALEDOWN_WINDOW_S.
 
     modal run -m modal_apps.serve_vllm::download           (BENCH_CANDIDATE=<name> for both)
     modal deploy -m modal_apps.serve_vllm
 
-then set the candidate's `endpoint.base_url` to the printed URL + `/v1`, and its `endpoint.api_key_env` to
-a local variable holding the same key. At start the container records the GPUs it got and the command it
+then set the candidate's `endpoint.base_url` to the printed URL + `/v1` and its `endpoint.api_key_env` to a
+local variable holding the same key, and export the variables its `endpoint.headers_env` names (a Modal
+proxy auth token: Modal-Key, Modal-Secret). At start the container records the GPUs it got and the command it
 runs on the vLLM-cache volume (`bench-serving/<name>.json`), which the load test reads back. Before any latency measurement the container warms itself up (a
 request to the base and to each adapter) and AIPerf warms up again.
 """
@@ -62,6 +66,7 @@ def download() -> str:
 class Server:
     @modal.enter()
     def start(self):
+        common.check_auth(PLAN, dict(os.environ))  # fail closed: proxy auth, vLLM's key, or both
         common.check_adapters(PLAN)
         self.process = subprocess.Popen(common.vllm_command(PLAN))
         base = f"http://127.0.0.1:{common.PORT}"

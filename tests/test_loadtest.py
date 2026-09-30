@@ -11,7 +11,8 @@ import pytest
 
 from bench import cli, loadtest, paths
 from bench.contracts.config import engine_spec
-from bench.loadtest import LoadtestError, aiperf_command, build_payloads, level_slice, server_root, wait_ready
+from bench.loadtest import (LoadtestError, aiperf_command, aiperf_config, build_payloads, env_headers, level_slice,
+                           scrub_secrets, server_root, wait_ready)
 from synthetic import make_repo
 from test_train_fixtures import TINY, TINY_NAME, make_s5_repo, save
 
@@ -85,21 +86,46 @@ def test_the_replayed_body_is_what_the_patched_agent_sends(monkeypatch):
     assert set(sent) - set(replayed) <= {"n", "stream"} and not sent.get("stream")
 
 
-def test_aiperf_is_given_the_server_root_and_the_pinned_invocation():
+def test_aiperf_is_given_the_server_root_and_credentials_only_as_references():
+    import sys
+
     assert server_root("http://h:8000/v1/") == "http://h:8000"
     with pytest.raises(LoadtestError, match="does not end in /v1"):
         server_root("http://h:8000/api")
-    cmd = aiperf_command("aiperf", "http://h:8000", "c3", 8, 500, TINY, 600, False, None)
-    flags = {flag: (value if not value.startswith("--") else True)
-             for flag, value in zip(cmd[2:], cmd[3:] + ["--"]) if flag.startswith("--")}
-    assert cmd[:2] == ["aiperf", "profile"] and flags["--custom-dataset-type"] == "raw_payload"
-    assert flags["--input-file"] == "payloads.jsonl" and flags["--output-artifact-dir"] == "."
-    assert (flags["--concurrency"], flags["--request-count"]) == ("8", "500") and "--warmup-request-count" not in cmd
-    assert flags["--dataset-sampling-strategy"] == "sequential"  # each line once, in order
-    assert (flags["--tokenizer"], flags["--tokenizer-revision"]) == (TINY["repo"], TINY["revision"])
-    assert "--use-server-token-count" in cmd and "--streaming" not in cmd and "--api-key" not in cmd
-    keyed = aiperf_command("aiperf", "http://h:8000", "c3", 8, 500, TINY, 600, True, "k")
-    assert "--streaming" in keyed and keyed[keyed.index("--api-key") + 1] == "k"
+    cmd = aiperf_command(sys.executable, TINY)
+    assert cmd[1:] == ["profile", "--config", "aiperf.yaml", "--tokenizer", TINY["repo"], "--tokenizer-revision",
+                       TINY["revision"], "--output-artifact-dir", ".", "--ui-type", "none"]
+    config = aiperf_config("http://h:8000", "c3", 8, 500, 600, False, "SLM_API_KEY",
+                           {"Modal-Key": "SLM_MODAL_KEY", "Modal-Secret": "SLM_MODAL_SECRET"})
+    endpoint = config["benchmark"]["endpoint"]
+    assert endpoint["apiKey"] == "${SLM_API_KEY}"  # AIPerf resolves it from its environment
+    assert endpoint["headers"] == {"Modal-Key": "${SLM_MODAL_KEY}", "Modal-Secret": "${SLM_MODAL_SECRET}"}
+    assert (endpoint["url"], endpoint["type"], endpoint["useServerTokenCount"]) == ("http://h:8000", "chat", True)
+    assert "streaming" not in endpoint
+    assert config["benchmark"]["dataset"] == {"type": "file", "name": "payloads", "path": "payloads.jsonl",
+                                              "format": "raw_payload", "sampling": "sequential"}
+    assert config["benchmark"]["phases"] == {"type": "concurrency", "name": "profiling", "concurrency": 8, "requests": 500}
+    bare = aiperf_config("http://h:8000", "c3", 1, 5, 60, True, None, None)["benchmark"]["endpoint"]
+    assert bare["streaming"] is True and "apiKey" not in bare and "headers" not in bare
+    with pytest.raises(LoadtestError, match="AIPerf is not installed"):
+        aiperf_command(None, TINY)
+
+
+def test_headers_come_from_the_variables_headers_env_names():
+    assert env_headers({"Modal-Key": "MK", "Modal-Secret": "MS"}, {"MK": "k", "MS": "s"}) == {"Modal-Key": "k", "Modal-Secret": "s"}
+    assert env_headers(None, {}) == {}
+    with pytest.raises(LoadtestError, match=r"\['MS'\]"):
+        env_headers({"Modal-Key": "MK", "Modal-Secret": "MS"}, {"MK": "k"})
+
+
+def test_credential_values_are_scrubbed_from_every_artifact(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "profile_export_aiperf.json").write_text('{"headers": {"Modal-Key": "mk-123", "x": "ms-456"}}')
+    (tmp_path / "logs" / "aiperf.log").write_text("sent mk-123")
+    (tmp_path / "clean.txt").write_text("nothing")
+    assert scrub_secrets(tmp_path, ["mk-123", "ms-456", ""]) == ["logs/aiperf.log", "profile_export_aiperf.json"]
+    assert json.loads((tmp_path / "profile_export_aiperf.json").read_text()) == {
+        "headers": {"Modal-Key": "<redacted>", "x": "<redacted>"}}
 
 
 class FakeServer:
@@ -107,7 +133,7 @@ class FakeServer:
     warm-up calls."""
 
     def __init__(self, models, ready_after=0):
-        self.models, self.ready_after, self.seen, self.posted = models, ready_after, [], []
+        self.models, self.ready_after, self.seen, self.posted, self.headers = models, ready_after, [], [], []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -123,11 +149,13 @@ class FakeServer:
 
             def do_GET(self):
                 fake.seen.append((self.path, self.headers.get("Authorization")))
+                fake.headers.append(dict(self.headers))
                 listed = fake.models if len(fake.seen) > fake.ready_after else []
                 self._answer({"data": [{"id": m, "root": f"/adapters/{m}", "parent": "base"} for m in listed]})
 
             def do_POST(self):
                 fake.posted.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                fake.headers.append(dict(self.headers))
                 self._answer({"choices": []})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -141,11 +169,11 @@ class FakeServer:
 def test_wait_ready_waits_for_the_model_to_be_listed():
     server = FakeServer(["c3"], ready_after=2)
     try:
-        waited, card = wait_ready(server.base_url, "k", "c3", timeout_s=5, poll_s=0.01)
+        waited, card = wait_ready(server.base_url, {"Authorization": "Bearer k"}, "c3", timeout_s=5, poll_s=0.01)
         assert waited >= 0 and card == {"id": "c3", "root": "/adapters/c3", "parent": "base"}
         assert len(server.seen) == 3 and server.seen[0] == ("/v1/models", "Bearer k")
         with pytest.raises(LoadtestError, match="c9 not served"):
-            wait_ready(server.base_url, None, "c9", timeout_s=0.05, poll_s=0.01)
+            wait_ready(server.base_url, {}, "c9", timeout_s=0.05, poll_s=0.01)
     finally:
         server.close()
 
@@ -153,7 +181,7 @@ def test_wait_ready_waits_for_the_model_to_be_listed():
 def _source_run(run_id="agent-B0-train-src", split="train", calls=CALLS):
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
-    (run_dir / "manifest.json").write_text(json.dumps({"run_id": run_id, "split": split, "status": "done"}))
+    (run_dir / "manifest.json").write_text(json.dumps({"run_id": run_id, "arm": "B0", "split": split, "status": "done"}))
     (run_dir / "calls.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
     return run_id
 
@@ -175,7 +203,11 @@ def served(tmp_path, monkeypatch):
     """A synthetic repo whose tiny SLM candidate is 'served' by a fake that lists it and its adapter."""
     _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
     server = FakeServer([TINY_NAME, "c0"])
-    config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
+    config["roles"]["slm_candidates"][-1]["endpoint"].update({
+        "base_url": server.base_url, "headers_env": {"Modal-Key": "T_MODAL_KEY", "Modal-Secret": "T_MODAL_SECRET"}})
+    monkeypatch.setenv("T_MODAL_KEY", "mk-live")
+    monkeypatch.setenv("T_MODAL_SECRET", "ms-live")
+    monkeypatch.setattr(loadtest, "local_aiperf", lambda: __import__("sys").executable)  # a file that exists
     config["loadtest"].update({"concurrency": [1, 4], "request_count": 5, "warmup_request_count": 2})
     yield config_path, save(config, config_path), server
     server.close()
@@ -183,8 +215,11 @@ def served(tmp_path, monkeypatch):
 
 def _fake_aiperf(returncode=0, calls=None):
     def run(run_dir, cmd):
-        (calls if calls is not None else []).append((run_dir, cmd))
+        import yaml
+
+        (calls if calls is not None else []).append((run_dir, cmd, yaml.safe_load((run_dir / "aiperf.yaml").read_text())))
         assert (run_dir / "payloads.jsonl").is_file()
+        (run_dir / "aiperf.log").write_text("headers Modal-Key: mk-live")  # as AIPerf leaks Modal-Key
         if returncode == 0:
             (run_dir / "profile_export_aiperf.json").write_text(json.dumps(
                 {"request_count": {"avg": 6}, "overall_usage_prompt_cache_read_pct": {"unit": "%", "avg": 37.5}}))
@@ -216,8 +251,16 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     assert server.posted == expected[:2] * 2
     second = json.loads((run_dirs[1] / "manifest.json").read_text())
     assert (manifest["payload_offset"], second["payload_offset"], second["payloads_repeat"]) == (2, 7, False)
-    _, cmd = calls[1]
-    assert cmd[cmd.index("--concurrency") + 1] == "4" and cmd[cmd.index("--model") + 1] == "c0"
+    _, cmd, aiperf_yaml = calls[1]
+    phases, endpoint = aiperf_yaml["benchmark"]["phases"], aiperf_yaml["benchmark"]["endpoint"]
+    assert (phases["concurrency"], aiperf_yaml["benchmark"]["model"]) == (4, "c0")
+    assert endpoint["headers"] == {"Modal-Key": "${T_MODAL_KEY}", "Modal-Secret": "${T_MODAL_SECRET}"}
+    assert not {"mk-live", "ms-live"} & set(cmd)  # never on AIPerf's command line
+    # the model list and the warm-up carry the proxy-auth headers; the leaked value is scrubbed afterwards
+    assert {(h["Modal-Key"], h["Modal-Secret"]) for h in server.headers} == {("mk-live", "ms-live")}
+    assert manifest["secrets_redacted_in"] == ["aiperf.log"] and "mk-live" not in (run_dirs[0] / "aiperf.log").read_text()
+    assert manifest["source_arm"] == "B0" and manifest["levels"] == [1, 4] and manifest["level_index"] == 0
+    assert second["sweep_id"] == manifest["sweep_id"] and second["level_index"] == 1
 
 
 def test_a_failed_level_is_recorded_and_stops_the_sweep(served, monkeypatch):
@@ -269,7 +312,7 @@ def test_on_modal_the_client_runs_beside_the_server_and_its_artifacts_come_back(
     config = save(config, config_path)
     artifacts = {"profile_export_aiperf.json": b'{"request_count": {"avg": 6}}', "logs/aiperf.log": b"ok"}
     calls = fake_modal_app(monkeypatch, "loadtest", run_aiperf=lambda raw, args: {
-        "returncode": 0, "ready_after_s": 42.0, "files": artifacts,
+        "returncode": 0, "ready_after_s": 42.0, "files": artifacts, "secrets_redacted_in": ["profile_export_aiperf.json"],
         "served_model": {"id": "c0", "root": "/adapters/abc", "parent": TINY_NAME, "object": "model"},
         "server_state": {"gpus": ["NVIDIA H200"], "vllm_command": ["vllm", "serve"], "revision": "r", "adapters": {}}})
     source = _source_run(calls=SOURCE)
@@ -280,9 +323,40 @@ def test_on_modal_the_client_runs_beside_the_server_and_its_artifacts_come_back(
     assert (args["base_url"], args["url"], args["model"], args["concurrency"]) == (
         endpoint["base_url"], endpoint["base_url"][:-3], "c0", 8)
     assert len(args["warmup"]) == 2 and calls["app.run"] == [{}] and args["candidate"] == TINY_NAME
+    assert args["headers_env"] == endpoint["headers_env"]  # the variable names, never their values
+    assert "mk-live" not in json.dumps(args) and "ms-live" not in json.dumps(args)
     assert (run_dirs[0] / "logs" / "aiperf.log").read_bytes() == b"ok"
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text())
     assert (manifest["where"], manifest["status"], manifest["ready_after_s"]) == ("modal", "done", 42.0)
     assert manifest["served_model"] == {"id": "c0", "root": "/adapters/abc", "parent": TINY_NAME}
     assert manifest["gpu"] == config["serving"]["gpu"]  # configured...
     assert manifest["observed"]["gpus"] == ["NVIDIA H200"]  # ...and what the server says it got
+
+
+def test_a_failure_is_recorded_without_local_paths(served, monkeypatch):
+    config_path, _, _ = served
+
+    def crash(run_dir, cmd):
+        raise OSError(f"cannot open {paths.ROOT}/somewhere")
+
+    monkeypatch.setattr(loadtest, "run_aiperf", crash)
+    with pytest.raises(OSError):
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+    manifest = json.loads(next(paths.RUNS.glob("loadtest-*/manifest.json")).read_text())
+    assert manifest["status"] == "failed" and "<repo>/somewhere" in manifest["stopped_by"]
+    assert str(paths.ROOT) not in manifest["stopped_by"]
+
+
+def test_without_aiperf_the_load_test_says_so(served, monkeypatch):
+    config_path, _, _ = served
+    monkeypatch.setattr(loadtest, "local_aiperf", lambda: None)
+    with pytest.raises(LoadtestError, match="AIPerf is not installed"):
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+
+
+def test_a_missing_proxy_auth_variable_stops_the_load_test_before_any_request(served, monkeypatch):
+    config_path, _, server = served
+    monkeypatch.delenv("T_MODAL_SECRET")
+    with pytest.raises(LoadtestError, match="T_MODAL_SECRET"):
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+    assert not server.seen and not server.posted

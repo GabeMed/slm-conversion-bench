@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # modal_apps/ s
 from bench import paths  # noqa: E402
 from bench.contracts import facts  # noqa: E402
 from modal_apps import common  # noqa: E402
-from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, rel, save  # noqa: E402
+from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, rel, save, served  # noqa: E402
 
 
 def _lock_pins(path):
@@ -47,7 +47,11 @@ def serving(tmp_path, monkeypatch):
     fake_adapter("c0", config)
     monkeypatch.setenv("BENCH_CONFIG", str(config_path))
     monkeypatch.setenv("BENCH_CANDIDATE", TINY_NAME)
-    monkeypatch.delenv(common.ENV, raising=False)
+    for variable in (common.ENV, *common.DEPLOY_KNOBS.values()):
+        monkeypatch.delenv(variable, raising=False)
+    checked = []  # the template check itself needs transformers: tested apart, in env/train
+    monkeypatch.setattr(common, "check_serving_template", lambda entry: checked.append(entry["name"]))
+    config["_template_checked"] = checked
     return config_path, config
 
 
@@ -55,13 +59,15 @@ def test_the_serving_plan_and_the_vllm_command(serving):
     _, config = serving
     plan = common.serve_plan(config, TINY_NAME)
     sha = facts.sha256_dir(paths.ROOT / "train" / "adapters" / "c0" / "adapter")
-    assert plan["adapters"] == [{"cluster": "c0", "served_name": "c0", "sha256": sha, "r": 8}]
+    assert plan["adapters"] == [{"cluster": "c0", "served_name": f"c0-{sha[:12]}", "sha256": sha, "r": 8}]
+    assert config["_template_checked"] == [TINY_NAME]  # the thinking-off check runs without training too
+    assert (plan["min_containers"], plan["scaledown_window_s"]) == (0, 300)  # modal_apps/deploy.yaml
     cmd = common.vllm_command(plan)
     arg = {flag: cmd[i + 1] for i, flag in enumerate(cmd[:-1]) if flag.startswith("--")}
     assert cmd[:3] == ["vllm", "serve", TINY["repo"]]
     assert arg["--revision"] == arg["--tokenizer-revision"] == TINY["revision"]
     assert arg["--served-model-name"] == TINY_NAME  # the router's slm:<name>
-    assert arg["--lora-modules"] == f"c0=/adapters/{sha}"  # the router's slm:<name>+lora:<served_name>
+    assert arg["--lora-modules"] == f"c0-{sha[:12]}=/adapters/{sha}"  # the router's slm:<name>+lora:<served_name>
     assert (arg["--max-loras"], arg["--max-cpu-loras"], arg["--max-lora-rank"]) == ("1", "1", "8")
     assert "--enable-lora" in cmd and "--enable-prefix-caching" in cmd and "--enable-prompt-tokens-details" in cmd
     assert json.loads(arg["--default-chat-template-kwargs"]) == {"enable_thinking": False}
@@ -153,9 +159,9 @@ def test_wait_healthy_then_warm_up_the_base_and_every_adapter(serving):
     try:
         common.wait_healthy(server.base, None, timeout_s=5, poll_s=0.01)
         assert server.gets == 3
-        assert common.warm_up(server.base, plan, "k", plan["warmup_timeout_s"]) == [TINY_NAME, "c0"]
+        assert common.warm_up(server.base, plan, "k", plan["warmup_timeout_s"]) == [TINY_NAME, served("c0")]
         assert [(auth, body["model"], body["temperature"]) for auth, body in server.posts] == [
-            ("Bearer k", TINY_NAME, 0.0), ("Bearer k", "c0", 0.0)]
+            ("Bearer k", TINY_NAME, 0.0), ("Bearer k", served("c0"), 0.0)]
     finally:
         server.server.shutdown()
 
@@ -222,6 +228,7 @@ def test_the_apps_build_their_objects_without_an_account(apps):
     hf, adapters, vllm = ("modal.Volume.from_name('slm-bench-hf-cache')", "modal.Volume.from_name('slm-bench-adapters')",
                           "modal.Volume.from_name('slm-bench-vllm-cache')")
     key = ["modal.Secret.from_name('slm-bench-vllm-api-key')"]
+    proxy = "modal.Secret.from_name('slm-bench-proxy-auth')"
 
     server = _spec(serve.Server)
     assert server.gpus == config["serving"]["gpu"] and server.cpu == config["serving"]["cpu"]
@@ -234,8 +241,16 @@ def test_the_apps_build_their_objects_without_an_account(apps):
         assert _names(spec) == ({common.HF_CACHE: hf, common.ADAPTERS: adapters}, [])
     client = _spec(load.run_aiperf)
     assert client.gpus is None and client.cpu == config["loadtest"]["client"]["cpu"]
-    assert _names(client) == ({common.HF_CACHE: hf, common.VLLM_CACHE: vllm}, key)  # reads the server's state
+    # reads the server's state; holds the proxy-auth variables the endpoint's headers_env names
+    assert _names(client) == ({common.HF_CACHE: hf, common.VLLM_CACHE: vllm}, sorted([proxy, *key]))
     assert load.image is train.image  # the load client runs in the training image (AIPerf is pinned there)
+    # the server's autoscaling and auth, as Modal will deploy them
+    from modal._utils.async_utils import synchronizer
+
+    service = synchronizer._translate_in(serve.Server)._service_function
+    loader = dict(zip(service._load.__code__.co_freevars, [c.cell_contents for c in service._load.__closure__]))
+    assert (loader["min_containers"], loader["max_containers"], loader["scaledown_window"]) == (0, 1, 300)
+    assert service._function_info._inner_server_info.unauthenticated is False  # Modal proxy auth
 
 
 def test_the_images_install_the_locks_and_carry_the_plan(apps):
@@ -245,7 +260,8 @@ def test_the_images_install_the_locks_and_carry_the_plan(apps):
     assert any(f"--requirements /.uv/0/{common.SERVE_LOCK.name}" in c for c in serve_commands)
     carried = next(c for c in serve_commands if c.startswith(f"ENV {common.ENV}="))
     plan = json.loads(carried.split("=", 1)[1].strip("'"))["plan"]
-    assert plan == serve.PLAN and common.vllm_command(plan)[common.vllm_command(plan).index("--lora-modules") + 1].startswith("c0=")
+    assert plan == serve.PLAN
+    assert common.vllm_command(plan)[common.vllm_command(plan).index("--lora-modules") + 1].startswith(f"{served('c0')}=")
     train_commands = _dockerfile(train.image)
     assert any(f"--requirements /.uv/0/{common.TRAIN_LOCK.name}" in c for c in train_commands)
     assert json.loads(next(c for c in train_commands if c.startswith(f"ENV {common.ENV}=")).split("=", 1)[1].strip("'")) == train.SETTINGS
@@ -295,5 +311,69 @@ def test_the_server_records_the_gpus_it_got_and_what_it_runs(serving):
     plan = common.serve_plan(config, TINY_NAME)
     state = common.serving_state(plan, "NVIDIA H200\n\n")  # asked for H100, got H200 (infra.md: Modal may do this)
     assert state["gpus"] == ["NVIDIA H200"] and state["vllm_command"] == common.vllm_command(plan)
-    assert state["adapters"] == {"c0": plan["adapters"][0]["sha256"]} and state["revision"] == TINY["revision"]
+    assert state["adapters"] == {served("c0"): plan["adapters"][0]["sha256"]} and state["revision"] == TINY["revision"]
     assert common.state_path("/root/.cache/vllm", TINY_NAME) == Path(f"/root/.cache/vllm/bench-serving/{TINY_NAME}.json")
+
+
+def test_deploy_knobs_change_without_touching_the_registered_config(serving, monkeypatch):
+    from bench.contracts.config import config_sha256, load_config
+
+    config_path, config = serving
+    before = config_sha256(load_config(config_path))
+    monkeypatch.setenv("BENCH_MIN_CONTAINERS", "1")
+    monkeypatch.setenv("BENCH_SCALEDOWN_WINDOW_S", "900")
+    plan = common.serve_plan(config, TINY_NAME)
+    assert (plan["min_containers"], plan["scaledown_window_s"]) == (1, 900)
+    assert config_sha256(load_config(config_path)) == before
+    assert not {"min_containers", "scaledown_window_s"} & set(config["serving"])  # not in config.yaml at all
+    monkeypatch.setenv("BENCH_MIN_CONTAINERS", "one")
+    with pytest.raises(common.SettingsError, match="BENCH_MIN_CONTAINERS must be an integer"):
+        common.deploy_knobs()
+
+
+def test_the_server_fails_closed_without_any_auth():
+    assert common.check_auth({"unauthenticated": False}, {}) == "proxy"
+    assert common.check_auth({"unauthenticated": False}, {"VLLM_API_KEY": "k"}) == "proxy+vllm-key"
+    assert common.check_auth({"unauthenticated": True}, {"VLLM_API_KEY": "k"}) == "vllm-key"
+    with pytest.raises(common.SettingsError, match="neither Modal proxy auth nor a VLLM_API_KEY"):
+        common.check_auth({"unauthenticated": True}, {"VLLM_API_KEY": ""})
+
+
+def test_the_shipped_config_serves_behind_proxy_auth_with_headers_for_every_candidate():
+    from bench.contracts.config import load_config
+
+    config = load_config(paths.ROOT / "config.yaml")
+    assert config["serving"]["unauthenticated"] is False
+    for entry in config["roles"]["slm_candidates"]:
+        assert set(entry["endpoint"]["headers_env"]) == {"Modal-Key", "Modal-Secret"}
+
+
+def test_a_failed_training_releases_its_marker(tmp_path):
+    volume = tmp_path / "adapters"
+    common.mark_started(str(volume), "p2", now=100.0)
+    common.release_started(str(volume), "p2")
+    assert common.stored_training(str(volume), "p2", now=101.0, stale_after_s=1000) is None  # not "still running"
+    common.release_started(str(volume), "p2")  # idempotent
+
+
+def test_the_serving_template_check_reads_the_candidates_pinned_tokenizer():
+    pytest.importorskip("transformers")
+    from bench.train import TrainError
+
+    entry = {"name": TINY_NAME, "hf": dict(TINY), "chat_template_kwargs": {"enable_thinking": False}}
+    common.check_serving_template(entry)
+    with pytest.raises(TrainError, match="does not read"):
+        common.check_serving_template({**entry, "chat_template_kwargs": {"reasoning_mode": "off"}})
+
+
+def test_a_candidate_whose_template_ignores_its_kwargs_is_not_served(serving, monkeypatch):
+    from bench.train import TrainError
+
+    _, config = serving
+
+    def refuse(entry):
+        raise TrainError("the chat template does not read ['enable_thinking']")
+
+    monkeypatch.setattr(common, "check_serving_template", refuse)
+    with pytest.raises(common.SettingsError, match=f"{TINY_NAME}: the chat template does not read"):
+        common.serve_plan(config, TINY_NAME)

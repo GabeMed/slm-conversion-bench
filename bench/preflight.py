@@ -1,15 +1,18 @@
 """`bench preflight`: the preconditions of SPEC 7.1 on the morning of Day 1, each a check with the action
 the SPEC gives when it fails, plus P-4, the LoRA parity gate (design §2, P-4).
 
-A check is `pass`, `fail`, or `pending` (this command cannot decide it yet: the evidence is missing, and
-the check says which). The command writes `runs/preflight-<timestamp>/report.json` and exits 0 only when
+A check is `pass`, `fail`, `pending` (this command cannot decide it yet: the evidence is missing, and
+the check says which) or, for P-4 only, `undecided` (the prompts cannot tell: no decisive HF-PEFT change).
+The agent checks count only B0 runs on the configuration preflight runs with (its config_sha256), so a smoke
+run on another configuration never satisfies them. Unreadable manifests are reported, never skipped. The command writes `runs/preflight-<timestamp>/report.json` and exits 0 only when
 every check passes.
 
 **P-4 (`--parity <cluster>`).** The server must first list the adapter at the path of the adapter trained
 (`/adapters/<sha256>`, vLLM's `root` in /v1/models) and the base at its pinned repository. Then, with
-greedy decoding on the first N prompts of the cluster's training set, the adapter served by vLLM must
-(a) change the base's output wherever HF-PEFT's change is decisive (not a near-tie), and on at least one
-prompt, and (b) match HF-PEFT's output on every prompt. "Match" is the rule vLLM's own tests use for greedy parity
+greedy decoding on the first N prompts of the cluster's training set (the dataset the adapter's manifest
+names, by sha256), the adapter served by vLLM must (a) change the base's output wherever HF-PEFT's change is
+decisive (not a near-tie), and reproduce at least one such decisive change, and (b) match HF-PEFT's output on
+every prompt. With no decisive prompt, P-4 is `undecided`, never a pass nor a reason to switch the base. "Match" is the rule vLLM's own tests use for greedy parity
 (`check_logprobs_close`): the token ids agree one by one, and at the first disagreement each side's token
 is among the other side's top-k (a numerical near-tie, after which the sequences are compared no further).
 The served base is compared with HF too, so a failure says whether the adapter or the serving itself
@@ -23,12 +26,13 @@ import urllib.request
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from bench import paths
 
 TERMS = ("weights_license", "provider_terms", "checked_on")
-PASS, FAIL, PENDING = "pass", "fail", "pending"
+PASS, FAIL, PENDING, UNDECIDED = "pass", "fail", "pending", "undecided"
+END_TO_END_HOURS = 3  # SPEC 7.1: one question end to end within 3 h
 
 
 class PreflightError(RuntimeError):
@@ -47,40 +51,63 @@ def _check(check_id: str, precondition: str, status: str, evidence: Any, action:
 
 # ---------------------------------------------------------------- SPEC 7.1, one check per row
 
-def _agent_manifests() -> List[Dict[str, Any]]:
-    manifests = []
-    for path in sorted(paths.RUNS.glob("agent-*/manifest.json")) if paths.RUNS.is_dir() else []:
+def _manifests(pattern: str, root: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Every manifest matching `pattern`, and the ones that could not be read (reported, never skipped)."""
+    root = paths.RUNS if root is None else root
+    manifests, unreadable = [], []
+    for path in sorted(root.glob(pattern)) if root.is_dir() else []:
         try:
             manifests.append(json.loads(path.read_text()))
-        except (OSError, json.JSONDecodeError):
-            continue
-    return manifests
+        except (OSError, json.JSONDecodeError) as e:
+            unreadable.append(f"{path.parent.name}: {type(e).__name__}")
+    return manifests, unreadable
 
 
-def check_agent_runs() -> Dict[str, Any]:
-    done = [m["run_id"] for m in _agent_manifests() if m.get("status") == "done" and m.get("split") in ("train", "calib")]
+def _b0_runs(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Done B0 runs on train or calib, on the configuration preflight runs with."""
+    from bench.contracts.config import config_sha256
+
+    sha = config_sha256(config)
+    manifests, unreadable = _manifests("agent-*/manifest.json")
+    return [m for m in manifests if m.get("status") == "done" and m.get("arm") == "B0"
+            and m.get("split") in ("train", "calib") and m.get("config_sha256") == sha], unreadable
+
+
+def _hours(manifest: Dict[str, Any]) -> Optional[float]:
+    try:
+        started, finished = (datetime.fromisoformat(manifest[k]) for k in ("started_at", "finished_at"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (finished - started).total_seconds() / 3600
+
+
+def check_agent_runs(config: Dict[str, Any]) -> Dict[str, Any]:
+    """A done B0 run on this configuration that took at most 3 h (one question end to end, SPEC 7.1)."""
+    runs, unreadable = _b0_runs(config)
+    within = [m["run_id"] for m in runs if (_hours(m) is not None and _hours(m) <= END_TO_END_HOURS)]
     return _check(
-        "agent_end_to_end", "the agent answers one question end to end within 3 h (SPEC 7.1)",
-        PASS if done else FAIL, {"done_runs": done[-3:], "note": "the 3 h bound is the operator's clock"},
+        "agent_end_to_end", f"the agent answers one question end to end within {END_TO_END_HOURS} h (SPEC 7.1)",
+        PASS if within else FAIL,
+        {"b0_runs_within_3h": within[-3:], "b0_runs_on_this_config": len(runs), "unreadable_manifests": unreadable},
         "use an equivalent controller (same call sites, prompts, order, data flow and repair loop), declared in "
         "the report; if not even that runs by the end of the morning, the fallback of SPEC 7.4")
 
 
-def check_call_sites() -> Dict[str, Any]:
+def check_call_sites(config: Dict[str, Any]) -> Dict[str, Any]:
     seen: Dict[str, set] = {"train": set(), "calib": set()}
-    runs: Dict[str, List[str]] = {"train": [], "calib": []}
-    for m in _agent_manifests():
-        if m.get("status") == "done" and m.get("split") in seen:
-            seen[m["split"]] |= set(m.get("call_sites_seen") or [])
-            runs[m["split"]].append(m["run_id"])
-    missing = [split for split in seen if not runs[split]]
+    count: Dict[str, int] = {"train": 0, "calib": 0}
+    runs, unreadable = _b0_runs(config)
+    for m in runs:
+        seen[m["split"]] |= set(m.get("call_sites_seen") or [])
+        count[m["split"]] += 1
+    missing = [split for split in seen if not count[split]]
     return _check(
         "call_sites_registered",
         "the set of call sites seen in the training logs and the calibration rounds is registered, with the "
         "id written on every call (SPEC 7.1, REQ-001)",
         PENDING if missing else PASS,
-        {"call_sites": {k: sorted(v) for k, v in seen.items()}, "runs": {k: len(v) for k, v in runs.items()},
-         "without_done_runs": missing},
+        {"call_sites": {k: sorted(v) for k, v in seen.items()}, "b0_runs": count, "without_done_b0_runs": missing,
+         "unreadable_manifests": unreadable},
         "fix the harness before going on")
 
 
@@ -105,7 +132,7 @@ def check_data(config: Dict[str, Any]) -> Dict[str, Any]:
         ok = (all(not evidence[s]["without_gold"] for s in ("train", "calib")) and test and not overlap
               and not (test & excluded))
         status = PASS if ok else FAIL
-    except (DataError, TestSplitLocked, OSError, ValueError, KeyError) as e:  # the data layer's errors are the evidence
+    except (DataError, TestSplitLocked, OSError, json.JSONDecodeError) as e:  # the data layer's errors are the evidence
         status, evidence["error"] = FAIL, f"{type(e).__name__}: {e}"
     return _check("data_ids_and_gold", "the Mini-Dev ids match the dev set and the corrected gold is reachable "
                   "(SPEC 7.1)", status, evidence, "fix the mapping; without gold there is no test")
@@ -126,13 +153,6 @@ def check_pilot_spend(config: Dict[str, Any]) -> Dict[str, Any]:
                   "cut extensions and shrink the pilot before touching the core")
 
 
-def _train_manifests() -> List[Dict[str, Any]]:
-    root = paths.ROOT / "train" / "adapters"
-    return [json.loads(p.read_text()) for p in sorted(root.glob("*/manifest.json"))] if root.is_dir() else []
-
-
-def _loadtest_manifests() -> List[Dict[str, Any]]:
-    return [json.loads(p.read_text()) for p in sorted(paths.RUNS.glob("loadtest-*/manifest.json"))] if paths.RUNS.is_dir() else []
 
 
 def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -140,8 +160,9 @@ def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
     show (rows x epochs), against the overnight budget."""
     budget_h = config["preflight"]["schedule"]["train_hours_max"]
     precondition = "the measured training time confirms the schedule: every adapter trains overnight (SPEC 7.1, 7.3)"
-    gpu_runs = [m for m in _train_manifests() if m.get("where") == "modal" and m["stats"].get("examples_seen")]
-    evidence: Dict[str, Any] = {"train_hours_max": budget_h}
+    manifests, unreadable = _manifests("*/manifest.json", paths.ROOT / "train" / "adapters")
+    gpu_runs = [m for m in manifests if m.get("where") == "modal" and m["stats"].get("examples_seen")]
+    evidence: Dict[str, Any] = {"train_hours_max": budget_h, "unreadable_manifests": unreadable}
     if not gpu_runs:
         evidence["needs"] = "one adapter trained on Modal (bench train --on modal) to measure seconds per example"
         return _check("training_time", precondition, PENDING, evidence, "apply the cuts of SPEC 7.3")
@@ -160,11 +181,13 @@ def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
 def check_throughput() -> Dict[str, Any]:
     """The load runs that finished are the evidence; whether their throughput within the p95 confirms the
     schedule is J8's judgment, which this command does not make."""
-    done = [{"run_id": m["run_id"], "engine": m.get("engine"), "concurrency": m["concurrency"]}
-            for m in _loadtest_manifests() if m.get("status") == "done"]
+    manifests, unreadable = _manifests("loadtest-*/manifest.json")
+    done = [{"run_id": m["run_id"], "engine": m.get("engine"), "concurrency": m["concurrency"],
+             "sweep_id": m.get("sweep_id")} for m in manifests if m.get("status") == "done"]
     needs = "J8 over these runs" if done else "a finished load test (bench loadtest), then J8 over it"
     return _check("throughput", "the measured throughput confirms the schedule (SPEC 7.1)", PENDING,
-                  {"done_loadtest_runs": done, "needs": needs}, "apply the cuts of SPEC 7.3")
+                  {"done_loadtest_runs": done, "needs": needs, "unreadable_manifests": unreadable},
+                  "apply the cuts of SPEC 7.3")
 
 
 # ---------------------------------------------------------------- P-4: LoRA parity
@@ -213,37 +236,46 @@ def parity_verdict(served_base: List[Generation], served_adapter: List[Generatio
     for i in range(n):
         changes = _upto_stop(served_adapter[i]["tokens"], stop_ids) != _upto_stop(served_base[i]["tokens"], stop_ids)
         peft_change = compare(ref_adapter[i], ref_base[i], stop_ids)
+        decisive = not peft_change["close"]  # HF-PEFT's change is not a near-tie: there the adapter must show
+        adapter_vs_peft = compare(served_adapter[i], ref_adapter[i], stop_ids)
         per_prompt.append({
-            "adapter_changes_output": changes,
-            "peft_changes_output": not peft_change["exact"],
-            # HF-PEFT's change is decisive when it is not a near-tie: there the served adapter must change too
-            "ignored_where_peft_is_decisive": not peft_change["close"] and not changes,
-            "adapter_vs_peft": compare(served_adapter[i], ref_adapter[i], stop_ids),
+            "adapter_changes_output": changes, "peft_changes_output": not peft_change["exact"],
+            "peft_change_decisive": decisive,
+            "ignored_where_peft_is_decisive": decisive and not changes,
+            "reproduces_a_decisive_change": decisive and changes and adapter_vs_peft["close"],
+            "adapter_vs_peft": adapter_vs_peft,
             "base_vs_hf": compare(served_base[i], ref_base[i], stop_ids),
         })
     changed = sum(p["adapter_changes_output"] for p in per_prompt)
+    decisive = sum(p["peft_change_decisive"] for p in per_prompt)
     ignored = sum(p["ignored_where_peft_is_decisive"] for p in per_prompt)
+    reproduced = sum(p["reproduces_a_decisive_change"] for p in per_prompt)
     peft_changed = sum(p["peft_changes_output"] for p in per_prompt)
     adapter_close = sum(p["adapter_vs_peft"]["close"] for p in per_prompt)
     base_close = sum(p["base_vs_hf"]["close"] for p in per_prompt)
     switch = ("switch the base to the reserve (roles.slm_reserve) and train again; if no base passes, B4 and B5 "
               "with an SLM are invalid and B0-B3 stay valid, declared (design P-4)")
-    if adapter_close == n and changed and not ignored:
-        status, diagnosis, action = PASS, "the served adapter changes the base's output and reproduces HF-PEFT", ""
-    elif not changed and not peft_changed:
-        status, diagnosis = FAIL, "uninformative: the adapter changes nothing even in HF-PEFT (untrained, or prompts outside its cluster)"
-        action = "train the adapter, or check its prompts, and run P-4 again; P-4 is not decided"
-    elif adapter_close < n and base_close < n:
+    undecided = ("use a trained adapter and prompts of its cluster, where HF-PEFT's change is decisive, and run P-4 "
+                 "again; P-4 is not decided, and the base is not to be switched on this evidence")
+    if adapter_close < n and base_close < n:
         status, diagnosis = FAIL, "vLLM and HF disagree even without the adapter: the serving differs (template, revision, dtype)"
         action = "fix the serving (the chat template kwargs, the pinned revision) and run P-4 again; P-4 is not decided"
-    elif not changed or ignored:
-        status, diagnosis = FAIL, (f"vLLM ignores the adapter on {ignored or n} prompt(s): its output is the base's, "
-                                   "while HF-PEFT's differs")
-        action = switch
-    else:
+    elif not decisive:
+        status, action = UNDECIDED, undecided
+        diagnosis = ("undecided: HF-PEFT's adapter changes nothing" if not peft_changed else
+                     "undecided: HF-PEFT's changes are all near-ties, which cannot tell an applied adapter from an ignored one")
+    elif ignored:
+        status, action = FAIL, switch
+        diagnosis = f"vLLM ignores the adapter on {ignored} prompt(s) where HF-PEFT's change is decisive"
+    elif adapter_close < n:
         status, diagnosis, action = FAIL, "the served adapter diverges from HF-PEFT while the served base matches HF", switch
+    elif reproduced:
+        status, diagnosis, action = PASS, f"the served adapter reproduces HF-PEFT, with {reproduced} decisive change(s)", ""
+    else:  # not reachable: decisive, none ignored, all close implies a reproduced decisive change
+        raise PreflightError("P-4 verdict: inconsistent counts")
     return {"status": status, "diagnosis": diagnosis, "action": action, "n_prompts": n,
-            "adapter_changes_output": changed, "peft_changes_output": peft_changed, "ignored_where_peft_is_decisive": ignored,
+            "adapter_changes_output": changed, "peft_changes_output": peft_changed, "peft_changes_decisive": decisive,
+            "ignored_where_peft_is_decisive": ignored, "reproduced_decisive_changes": reproduced,
             "adapter_matches_peft": adapter_close, "base_matches_hf": base_close, "per_prompt": per_prompt}
 
 
@@ -258,9 +290,9 @@ def _token_id(token: str) -> int:
     return int(match.group(1))
 
 
-def served_models(base_url: str, api_key: str, timeout_s: float) -> Dict[str, Dict[str, Any]]:
+def served_models(base_url: str, headers: Dict[str, str], timeout_s: float) -> Dict[str, Dict[str, Any]]:
     """/v1/models of an OpenAI-compatible server, by id (vLLM gives each adapter's path as `root`)."""
-    request = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers={"Authorization": f"Bearer {api_key}"})
+    request = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers=headers)
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         return {card["id"]: card for card in json.loads(response.read()).get("data") or []}
 
@@ -278,13 +310,13 @@ def check_served(cards: Dict[str, Dict[str, Any]], base_name: str, repo: str, se
                              f"not the adapter trained (/adapters/{sha256}) over {base_name}: redeploy")
 
 
-def served_generate(base_url: str, api_key: str, model: str, messages: List[dict], max_tokens: int,
+def served_generate(base_url: str, headers: Dict[str, str], model: str, messages: List[dict], max_tokens: int,
                     top_logprobs: int, timeout_s: float) -> Generation:
     """One greedy generation from an OpenAI-compatible vLLM server, as token ids with their top-k."""
     body = {"model": model, "messages": messages, "temperature": 0.0, "max_tokens": max_tokens,
             "logprobs": True, "top_logprobs": top_logprobs, "return_tokens_as_token_ids": True}
     request = urllib.request.Request(f"{base_url.rstrip('/')}/chat/completions", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
+                                     headers={"Content-Type": "application/json", **headers})
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             answer = json.loads(response.read())
@@ -301,23 +333,29 @@ def peft_generate(base: Dict[str, str], adapter_dir: str, prompts: List[List[dic
     of P-4), rendered with the same template kwargs the server applies."""
     import torch
     from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
     tokenizer = AutoTokenizer.from_pretrained(base["repo"], revision=base["revision"])
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     model = AutoModelForCausalLM.from_pretrained(base["repo"], revision=base["revision"], dtype=dtype).to(device)
-    model = PeftModel.from_pretrained(model, adapter_dir).eval()
     eos = model.generation_config.eos_token_id
     stop_ids = sorted({*(eos if isinstance(eos, list) else [eos] if eos is not None else []),
                        *([tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else [])})
+    # a bare generation config: greedy with the stop tokens and nothing the model ships (repetition_penalty,
+    # suppress_tokens...), as vLLM serves with --generation-config vllm. It replaces the model's own, because
+    # generate() fills every field a passed config leaves unset from the model's generation_config.
+    generation = GenerationConfig(max_new_tokens=max_new_tokens, do_sample=False, eos_token_id=stop_ids,
+                                  pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else stop_ids[0],
+                                  output_logits=True, return_dict_in_generate=True)
+    model.generation_config = generation
+    model = PeftModel.from_pretrained(model, adapter_dir).eval()
     out: Dict[str, Any] = {"stop_ids": stop_ids, "base": [], "adapter": []}
     for messages in prompts:
         inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True,
                                                return_tensors="pt", **template_kwargs).to(device)
         for which, context in (("adapter", nullcontext()), ("base", model.disable_adapter())):
             with context, torch.no_grad():
-                result = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, temperature=None,
-                                        top_p=None, top_k=None, output_logits=True, return_dict_in_generate=True)
+                result = model.generate(**inputs, generation_config=generation)
             tokens = result.sequences[0, inputs["input_ids"].shape[1]:].tolist()
             top = [torch.topk(torch.log_softmax(step[0].float(), dim=-1), top_k).indices.tolist() for step in result.logits]
             out[which].append({"tokens": tokens, "top": top})
@@ -329,7 +367,8 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
     """P-4 on the adapter of `cluster`: the served base and adapter against the HF-PEFT reference."""
     import os
 
-    from bench.train import adapters_dir, candidate, datasets_dir, parse_dataset
+    from bench.loadtest import auth_headers, env_headers
+    from bench.train import adapters_dir, candidate, datasets_dir, parse_dataset, sha256_bytes
 
     manifest_path = adapters_dir() / cluster / "manifest.json"
     if not manifest_path.is_file():
@@ -337,7 +376,11 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
     manifest = json.loads(manifest_path.read_text())
     entry = candidate(config, manifest["slm"])
     settings = config["preflight"]["lora_parity"]
-    rows = parse_dataset((datasets_dir() / f"{cluster}.jsonl").read_bytes(), f"{cluster}.jsonl")
+    raw = (datasets_dir() / f"{cluster}.jsonl").read_bytes()
+    if sha256_bytes(raw) != manifest["dataset"]["sha256"]:
+        raise PreflightError(f"train/datasets/{cluster}.jsonl is not the dataset the adapter was trained on "
+                             f"(sha256 {sha256_bytes(raw)}, manifest {manifest['dataset']['sha256']})")
+    rows = parse_dataset(raw, f"{cluster}.jsonl")
     prompts = [row["prompt"] for row in rows[:settings["n_prompts"]]]
     endpoint = entry["endpoint"]
     if not endpoint.get("base_url"):
@@ -345,12 +388,13 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
     api_key = os.environ.get(endpoint["api_key_env"], "") if endpoint.get("api_key_env") else "EMPTY"
     if not api_key:
         raise PreflightError(f"environment variable {endpoint['api_key_env']} is not set")
+    headers = auth_headers(api_key, env_headers(endpoint.get("headers_env"), error=PreflightError))
 
-    check_served(served_models(endpoint["base_url"], api_key, settings["timeout_s"]), entry["name"], manifest["base"]["repo"],
+    check_served(served_models(endpoint["base_url"], headers, settings["timeout_s"]), entry["name"], manifest["base"]["repo"],
                  manifest["served_name"], manifest["adapter_sha256"])
 
     def served(model):
-        return [served_generate(endpoint["base_url"], api_key, model, p, settings["max_new_tokens"],
+        return [served_generate(endpoint["base_url"], headers, model, p, settings["max_new_tokens"],
                                 settings["top_logprobs"], settings["timeout_s"]) for p in prompts]
 
     served_base, served_adapter = served(entry["name"]), served(manifest["served_name"])
@@ -409,7 +453,7 @@ def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -
 # ---------------------------------------------------------------- the command
 
 def run_checks(config: Dict[str, Any], parity_cluster: Optional[str] = None, on: str = "modal") -> List[Dict[str, Any]]:
-    return [check_agent_runs(), check_call_sites(), check_data(config), check_teacher_terms(config),
+    return [check_agent_runs(config), check_call_sites(config), check_data(config), check_teacher_terms(config),
             check_pilot_spend(config), check_training_time(config), check_throughput(),
             check_lora_parity(config, parity_cluster, on)]
 

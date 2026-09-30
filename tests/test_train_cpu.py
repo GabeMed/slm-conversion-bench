@@ -34,7 +34,8 @@ def test_bench_train_on_cpu_writes_the_adapter_its_manifest_and_then_the_fact(tm
 
     manifest = json.loads((adapter.parent / "manifest.json").read_text())
     assert manifest["adapter_sha256"] == facts.sha256_dir(adapter)
-    assert manifest["base"] == TINY and manifest["slm"] == TINY_NAME and manifest["served_name"] == "c0"
+    assert manifest["base"] == TINY and manifest["slm"] == TINY_NAME
+    assert manifest["served_name"] == f"c0-{manifest['adapter_sha256'][:12]}"  # content-addressed
     assert manifest["dataset"]["rows"] == 4 and len(manifest["dataset"]["sha256"]) == 64
     assert manifest["hyperparameters"]["sft"]["max_steps"] == 2
     assert manifest["where"] == "local" and manifest["gpu"] is None

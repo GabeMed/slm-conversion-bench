@@ -75,13 +75,19 @@ def fake_adapter(cluster, config, slm=TINY_NAME, facts_override=None, served_nam
     adapter.mkdir(parents=True)
     (adapter / "adapter_config.json").write_text(json.dumps({"r": 8, "cluster": cluster}))
     (adapter / "adapter_model.safetensors").write_bytes(cluster.encode() * 10)
-    from bench.train import training_plan
+    from bench.train import served_name as content_name, training_plan
 
     plan, _ = training_plan(config, cluster)
-    manifest = {**plan, "slm": slm, "served_name": served_name or cluster,
-                "facts": facts_override or plan["facts"], "adapter_sha256": facts.sha256_dir(adapter)}
+    sha = facts.sha256_dir(adapter)
+    manifest = {**plan, "slm": slm, "served_name": served_name or content_name(cluster, sha),
+                "facts": facts_override or plan["facts"], "adapter_sha256": sha}
     (adapter.parent / "manifest.json").write_text(json.dumps(manifest))
     return adapter
+
+
+def served(cluster: str) -> str:
+    """The content-addressed name the adapter of `cluster` is served under (from its manifest)."""
+    return json.loads((paths.ROOT / "train" / "adapters" / cluster / "manifest.json").read_text())["served_name"]
 
 
 def fake_modal_app(monkeypatch, module: str, **functions):
