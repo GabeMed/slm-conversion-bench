@@ -96,6 +96,17 @@ def test_registering_again_changes_nothing_and_replacing_needs_asking(repo):
     assert second["hash"] != first["hash"] and (repo / "prereg" / "HASH").read_text().strip() == second["hash"]
 
 
+def test_register_refuses_a_configuration_outside_the_repository_or_without_stats(repo, tmp_path):
+    outside = tmp_path / "elsewhere.yaml"
+    outside.write_text(yaml.safe_dump(CONFIG))
+    with pytest.raises(PreregError, match="inside the repository"):
+        register(str(outside), root=repo)
+    (repo / "config.yaml").write_text(yaml.safe_dump({k: v for k, v in CONFIG.items() if k != "stats"}))
+    git(repo, "commit", "-q", "-am", "no stats")
+    with pytest.raises(PreregError, match="stats.n_boot"):
+        register("config.yaml", root=repo)
+
+
 # ---------------------------------------------------------------- the test split, through a published registration
 
 @pytest.fixture
