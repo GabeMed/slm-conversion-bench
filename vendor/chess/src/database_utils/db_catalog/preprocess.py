@@ -11,7 +11,7 @@ import vertexai
 
 from database_utils.db_catalog.csv_utils import load_tables_description
 
-load_dotenv(override=True)
+load_dotenv(override=False)  # PATCH 14 (slm-conversion-bench): a .env never overrides the harness's environment
 
 GCP_PROJECT = os.getenv("GCP_PROJECT")
 GCP_REGION = os.getenv("GCP_REGION")

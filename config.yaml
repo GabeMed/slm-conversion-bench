@@ -32,6 +32,7 @@ roles:
 # by C4. Temperatures live in `call_sites`, never here.
 agent:
   setting_name: CHESS_IR_SS_CG
+  max_workers: 8               # LLM calls of one step in flight at once (patch 9); published: unbounded
   # the order the agents run in (CHESS takes it from the order of team_agents, which a serializer
   # may sort; it is explicit here, and part of the configuration's identity)
   team_order: [information_retriever, schema_selector, candidate_generator]
@@ -89,11 +90,14 @@ call_sites:                    # CHESS published temperatures, per call site
 
 retries:
   parse_max_attempts: 2        # CHESS published 12 identical retries; every attempt is logged (C1)
+  http_max_attempts: 6         # patch 5b: 429, 5xx, timeouts and connection errors, retried with backoff;
+  http_backoff_s: {base: 2, max: 60}  # one attempt counter with the parse retries, every attempt logged (C1)
 
 seeds:
   calib_split: 20260930
   schema_shuffle: 20260930
   bootstrap: 20260930
+  few_shot: 20260930           # B1's examples (arms.B1.few_shot)
 
 splits:
   calib_size: 200
@@ -112,6 +116,9 @@ embeddings:                    # retrieval inside CHESS (not an LLM call)
   entity_model: text-embedding-3-small
   context_model: text-embedding-3-large
   fake_size: 64
+  local:                       # provider `local` (patch 10b): sentence-transformers on CPU, pinned
+    model: sentence-transformers/all-MiniLM-L6-v2
+    revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
 
 preprocess:                    # CHESS run/run_preprocess.sh, as published
   signature_size: 100
@@ -136,6 +143,8 @@ eval:
   fixed_date: null             # F2: pre-registered date substituted for 'now' in pred and gold
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
+  B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
+    few_shot: {k: 3, source_run: null}  # k teacher examples per call site from a done B0 run on train (run id); before runs
   B3: {choice: null}           # J6 (S4)
   B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
   B5: {choice: null, centroids: null, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)

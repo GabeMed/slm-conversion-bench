@@ -1,14 +1,19 @@
 """What the patched CHESS calls into (vendor/chess/PATCHES.md). Runs only in the agent environment.
 
 Every LLM invocation of the agent goes through `invoke_tool_call` (tools) or `invoke_agent_call`
-(the agent's choice of the next tool). Both ask the router (C4) for the engine, invoke it with
-no hidden retry, and write one C1 line per attempt, failures included.
+(the agent's choice of the next tool). Both ask the router (C4) for the engine (or use the run's
+fixed engine: B2, `replay --engine`), invoke it with no hidden client retry, and write one C1 line
+per attempt, failures included. Transport errors (429, 5xx, timeouts, connection errors) are
+retried with backoff and unparseable output is retried on the same engine, with one attempt
+counter for both (patch 5b). When the engine is `cheap_alt`, B1's few-shot prefix is prepended to
+what is sent; the router sees the prompt without it, and C1 records the messages as sent.
 
 Two kinds of failure, kept apart:
 - the **model's** (an invocation error, an empty or unparseable output) is a C1 line, and the
   exception goes on to CHESS, which handles it as it always did;
-- the **harness's** (no run or question set, routing, configuration, a missing API key) is
-  recorded here as well, because CHESS swallows every exception, and the runner reads it with
+- the **harness's** (no run or question set, routing, configuration, a missing API key, an engine
+  that stays unreachable after every transport retry, a rejected key or an unknown model, a call
+  site outside the registered set on `test`) is recorded here as well, because CHESS swallows every exception, and the runner reads it with
   `take_harness_errors()` to fail the run instead of recording it as done.
 
 State is process-global: one run and one question at a time per process. The tools of a question
@@ -16,6 +21,7 @@ call the model from several threads; the writer and the counters are shared unde
 """
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -24,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from bench.contracts.config import engine_spec
+from bench.contracts.config import ConfigError, engine_spec
 from bench.contracts.router import Route, route
 from bench.provenance import scrub
 
@@ -32,6 +38,9 @@ _config: Optional[Dict[str, Any]] = None
 _run: Optional["_RunState"] = None
 _models: Dict[tuple, Any] = {}
 _models_lock = threading.Lock()
+_embedders: Dict[tuple, Any] = {}
+_embed_lock = threading.Lock()  # one encoder per model, shared by threads
+_sleep = time.sleep  # the backoff between transport retries; tests replace it
 
 
 class HarnessError(RuntimeError):
@@ -51,11 +60,15 @@ class HarnessError(RuntimeError):
 @dataclass
 class _RunState:
     run_id: str
-    arm: str
+    arm: Optional[str]
     calls_path: Path
+    engine: Optional[str] = None  # a fixed engine (B2, `replay --engine`): the router is not asked
+    few_shot: Optional[Dict[str, List[Any]]] = None  # {call site: messages}; None: cheap_alt is refused
+    allowed_call_sites: Optional[frozenset] = None  # `test` runs: the registered set (REQ-001)
     question_id: Optional[str] = None
     occurrences: Dict[tuple, int] = field(default_factory=dict)
     harness_errors: List[str] = field(default_factory=list)
+    unregistered_call_sites: set = field(default_factory=set)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -66,19 +79,74 @@ class RoutedEngine:
         self.engine_name = engine_name
 
 
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+
+
+def check_settings(config: Dict[str, Any]) -> None:
+    """The keys this front added to C2 (`config.yaml`), which the frozen validator does not know."""
+    errors = []
+
+    def number(value, minimum, integer=False):
+        kinds = (int,) if integer else (int, float)
+        return isinstance(value, kinds) and not isinstance(value, bool) and value >= minimum
+    retries = config["retries"]
+    if not number(retries.get("http_max_attempts"), 1, integer=True):
+        errors.append("retries.http_max_attempts must be an integer >= 1")
+    backoff = retries.get("http_backoff_s") or {}
+    if not (number(backoff.get("base"), 0) and number(backoff.get("max"), 0)):
+        errors.append("retries.http_backoff_s needs base and max, numbers >= 0")
+    if not number(config["agent"].get("max_workers"), 1, integer=True):
+        errors.append("agent.max_workers must be an integer >= 1")
+    if "few_shot" not in config["seeds"]:
+        errors.append("seeds.few_shot is required")
+    few_shot = ((config.get("arms") or {}).get("B1") or {}).get("few_shot") or {}
+    if not number(few_shot.get("k"), 0, integer=True):
+        errors.append("arms.B1.few_shot.k must be an integer >= 0")
+    if few_shot.get("source_run") is not None and not isinstance(few_shot["source_run"], str):
+        errors.append("arms.B1.few_shot.source_run must be a run id or null")
+    if config["embeddings"]["provider"] == "local":
+        local = config["embeddings"].get("local") or {}
+        if not isinstance(local.get("model"), str) or not local["model"]:
+            errors.append("embeddings.local.model is required with provider local")
+        if not isinstance(local.get("revision"), str) or not _COMMIT.match(local["revision"]):
+            errors.append("embeddings.local.revision must be a 40-hex commit")
+    if errors:
+        raise ConfigError("; ".join(errors))
+
+
 def configure(config: Dict[str, Any]) -> None:
     global _config
+    check_settings(config)
     _config = config
     _models.clear()
 
 
-def start_run(run_id: str, arm: str, calls_path: Path) -> None:
+def config() -> Dict[str, Any]:
+    """The configuration of this process (read by the patched CHESS: seeds, concurrency)."""
+    if _config is None:
+        raise HarnessError("hooks.configure() was not called")
+    return _config
+
+
+def max_workers() -> int:
+    return config()["agent"]["max_workers"]
+
+
+def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Optional[str] = None,
+              few_shot: Optional[Dict[str, List[Dict[str, str]]]] = None,
+              allowed_call_sites: Optional[List[str]] = None) -> None:
+    """`engine` fixes the engine of every call (no routing); `few_shot` is the prefix per call site
+    for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site."""
     global _run
     if _config is None:
         raise HarnessError("hooks.configure() must run before start_run()")
+    if (arm is None) == (engine is None):
+        raise HarnessError("a run is routed by its arm or has a fixed engine, one of the two")
     calls_path.parent.mkdir(parents=True, exist_ok=True)
     calls_path.touch()
-    _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path)
+    prefix = None if few_shot is None else {site: _lc_messages(messages) for site, messages in few_shot.items()}
+    _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, few_shot=prefix,
+                     allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites))
 
 
 def set_question(question_id: str) -> None:
@@ -94,6 +162,13 @@ def take_harness_errors() -> List[str]:
     with run.lock:
         errors, run.harness_errors = run.harness_errors, []
     return errors
+
+
+def unregistered_call_sites() -> List[str]:
+    """Call sites this run tried to call outside the registered set (each aborted the run)."""
+    run = _require_run()
+    with run.lock:
+        return sorted(run.unregistered_call_sites)
 
 
 def end_run() -> None:
@@ -118,17 +193,34 @@ def _harness(what: str, fn: Callable[[], Any]) -> Any:
 
 
 def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
-    """Checks and decisions made before the model is called: question, identity, route."""
+    """Checks and decisions made before the model is called: question, call site, identity, route.
+    The router sees the agent's prompt as CHESS wrote it, before any few-shot prefix."""
     run = _require_run()
     if run.question_id is None:
         raise HarnessError("hooks.set_question() was not called for this question")
+    if run.allowed_call_sites is not None and call_site not in run.allowed_call_sites:
+        with run.lock:
+            run.unregistered_call_sites.add(call_site)
+        raise HarnessError(f"call site {call_site} is not in the set registered on train and calib "
+                           f"(registry/call_sites.json): the run is aborted (REQ-001)")
     with run.lock:
         n = run.occurrences.get((call_site, invocation_key), 0) + 1
         run.occurrences[(call_site, invocation_key)] = n
     key = invocation_key if n == 1 else f"{invocation_key}@{n}"
-    chosen = route(run.arm, call_site, messages, _config)
+    chosen = Route(run.engine, None) if run.engine else route(run.arm, call_site, messages, _config)
     temperature = float(_config["call_sites"][call_site]["temperature"])
     return key, chosen, temperature, chat_model(chosen.engine, temperature)
+
+
+def _prefixed(call_site: str, engine: str, lc_messages: List[Any]) -> List[Any]:
+    """What is sent: B1's few-shot pairs before the prompt whenever the engine is `cheap_alt`."""
+    if engine != "cheap_alt":
+        return lc_messages
+    run = _require_run()
+    if run.few_shot is None:
+        raise HarnessError("cheap_alt was reached without its few-shot prefix (arms.B1.few_shot): "
+                           "the runner must load it before the run starts")
+    return list(run.few_shot.get(call_site, [])) + list(lc_messages)
 
 
 # ---------------------------------------------------------------- models
@@ -169,6 +261,12 @@ def chat_model(engine: str, temperature: float):
 def _message_dicts(messages: List[Any]) -> List[Dict[str, str]]:
     roles = {"human": "user", "ai": "assistant", "system": "system"}
     return [{"role": roles[m.type], "content": m.content} for m in messages]
+
+
+def _lc_messages(messages: List[Dict[str, str]]) -> List[Any]:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+    kinds = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage}
+    return [kinds[m["role"]](content=m["content"]) for m in messages]
 
 
 def _usage(output: Any) -> Dict[str, Any]:
@@ -221,66 +319,108 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
 
 # ---------------------------------------------------------------- calls
 
-def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any], parser: Any) -> Any:
-    """One tool call: route, invoke, parse; retry an empty or unparseable output up to the configured cap."""
+def _transient(exception: BaseException) -> bool:
+    """A transport failure, worth another attempt: 408, 429, 5xx, a timeout, no connection
+    (the OpenAI client wraps every transport error of the HTTP layer in one of these)."""
+    import openai
+    if isinstance(exception, openai.APIConnectionError):  # APITimeoutError included
+        return True
+    return isinstance(exception, openai.APIStatusError) and (
+        exception.status_code in (408, 429) or exception.status_code >= 500)
+
+
+def _misconfigured(exception: BaseException) -> bool:
+    """The endpoint refused the harness itself (a rejected key, no such model): not the model's doing."""
+    import openai
+    return isinstance(exception, (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError))
+
+
+def backoff_s(transport_failures: int) -> float:
+    """Seconds to wait after the n-th transport failure of an invocation: base * 2^(n-1), capped."""
+    backoff = _config["retries"]["http_backoff_s"]
+    return float(min(backoff["max"], backoff["base"] * 2 ** (transport_failures - 1)))
+
+
+def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], interpret: Callable,
+                parse_max_attempts: int):
+    """One invocation, every attempt a C1 line chained by `retry_of`, one attempt counter for both
+    kinds of retry: a transport failure is retried after a backoff up to `retries.http_max_attempts`
+    such failures (then the harness fails: the engine is unreachable); an empty or unparseable
+    output is retried up to `parse_max_attempts` such failures (then OutputParserException).
+
+    `interpret(output)` -> (parsed, parsed_ok, error, outcome, exception), outcome one of `ok`,
+    `answer` (return the text although it did not parse), `parse` (retry), `failed` (raise).
+    Returns (output, parsed)."""
     from langchain_core.exceptions import OutputParserException
 
     messages = _message_dicts(lc_messages)
     key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
-    max_attempts = _config["retries"]["parse_max_attempts"]
-    retry_of = None
-    for attempt in range(1, max_attempts + 1):
+    sent = _harness(call_site, lambda: _prefixed(call_site, chosen.engine, lc_messages))
+    sent_dicts = _message_dicts(sent)
+    http_max_attempts = _config["retries"]["http_max_attempts"]
+    failures = {"transport": 0, "parse": 0}
+    retry_of, attempt = None, 0
+    while True:
+        attempt += 1
         call_id = str(uuid.uuid4())
-        output, exception, started_at, latency_ms = _invoke(model, lc_messages)
-        parsed, parsed_ok, error, retryable = None, False, None, False
+        output, exception, started_at, latency_ms = _invoke(model, sent)
         if exception is not None:
+            parsed, parsed_ok = None, False
             error = f"{type(exception).__name__}: {exception}"
-        elif not output.content.strip():
-            error, retryable = "empty output", True
+            outcome = "transport" if _transient(exception) else "failed"
         else:
-            try:
-                parsed, parsed_ok = parser.invoke(output), True
-            except OutputParserException as e:
-                error, retryable = f"OutputParserException: {e}", True
-            except Exception as e:  # not retried, as in CHESS
-                error, exception = f"{type(e).__name__}: {e}", e
+            parsed, parsed_ok, error, outcome, exception = interpret(output)
         _harness(call_site, lambda: _record(
             call_id=call_id, retry_of=retry_of, attempt=attempt, call_site=call_site, invocation_key=key,
-            chosen=chosen, messages=messages, started_at=started_at, latency_ms=latency_ms,
+            chosen=chosen, messages=sent_dicts, started_at=started_at, latency_ms=latency_ms,
             temperature=temperature, output=output, parsed=parsed, parsed_ok=parsed_ok, error=error))
-        if parsed_ok:
-            return parsed
-        if exception is not None:
+        if outcome in ("ok", "answer"):
+            return output, parsed
+        if outcome == "transport":
+            failures["transport"] += 1
+            if failures["transport"] >= http_max_attempts:
+                raise HarnessError(f"{call_site}: engine {chosen.engine} unreachable after "
+                                   f"{failures['transport']} transport failures: {error}") from exception
+            _sleep(backoff_s(failures["transport"]))
+        elif outcome == "parse":
+            failures["parse"] += 1
+            if failures["parse"] >= parse_max_attempts:
+                raise OutputParserException(error)
+        elif _misconfigured(exception):
+            raise HarnessError(f"{call_site}: engine {chosen.engine} refused the request: {error}") from exception
+        else:
             raise exception
-        if not retryable or attempt == max_attempts:
-            raise OutputParserException(error)
         retry_of = call_id
 
 
+def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any], parser: Any) -> Any:
+    """One tool call: route, invoke, parse; an empty or unparseable output is retried up to the configured cap."""
+    from langchain_core.exceptions import OutputParserException
+
+    def interpret(output):
+        if not output.content.strip():
+            return None, False, "empty output", "parse", None
+        try:
+            return parser.invoke(output), True, None, "ok", None
+        except OutputParserException as e:
+            return None, False, f"OutputParserException: {e}", "parse", None
+        except Exception as e:  # not retried, as in CHESS
+            return None, False, f"{type(e).__name__}: {e}", "failed", e
+    return _invocation(call_site, invocation_key, lc_messages, interpret,
+                       _config["retries"]["parse_max_attempts"])[1]
+
+
 def invoke_agent_call(call_site: str, invocation_key: str, message: str, parse: Callable[[str], Any]) -> str:
-    """The agent's next-tool choice: one attempt, as in CHESS. `parse` is the agent's own reading of the response."""
+    """The agent's next-tool choice: one answer, as in CHESS (transport failures are retried).
+    `parse` is the agent's own reading of the response; the agent raises on it itself."""
     from langchain_core.messages import HumanMessage
 
-    lc_messages = [HumanMessage(content=message)]
-    messages = _message_dicts(lc_messages)
-    key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
-    call_id = str(uuid.uuid4())
-    output, exception, started_at, latency_ms = _invoke(model, lc_messages)
-    parsed, parsed_ok, error = None, False, None
-    if exception is not None:
-        error = f"{type(exception).__name__}: {exception}"
-    else:
+    def interpret(output):
         try:
-            parsed, parsed_ok = parse(output.content), True
+            return parse(output.content), True, None, "ok", None
         except Exception as e:  # the agent itself raises on the same response right after
-            error = f"{type(e).__name__}: {e}"
-    _harness(call_site, lambda: _record(
-        call_id=call_id, retry_of=None, attempt=1, call_site=call_site, invocation_key=key, chosen=chosen,
-        messages=messages, started_at=started_at, latency_ms=latency_ms, temperature=temperature,
-        output=output, parsed=parsed, parsed_ok=parsed_ok, error=error))
-    if exception is not None:
-        raise exception
-    return output.content
+            return None, False, f"{type(e).__name__}: {e}", "answer", None
+    return _invocation(call_site, invocation_key, [HumanMessage(content=message)], interpret, 1)[0].content
 
 
 # ---------------------------------------------------------------- retrieval embeddings
@@ -312,7 +452,32 @@ def embeddings(purpose: str):
     if provider == "fake":
         from langchain_core.embeddings import DeterministicFakeEmbedding
         return _recording(DeterministicFakeEmbedding(size=settings["fake_size"]))
-    raise HarnessError(f"embeddings provider {provider!r} is built in F1")
+    if provider == "local":
+        local = settings["local"]
+        return _recording(_harness("embeddings", lambda: _local_embeddings(local["model"], local["revision"])))
+    raise HarnessError(f"unknown embeddings provider {provider!r}")
+
+
+def _local_embeddings(model: str, revision: str):
+    """Patch 10b: a sentence-transformers model from the agent environment, pinned by revision,
+    on CPU, unit vectors (CHESS compares them by dot product). Loaded once per process."""
+    from langchain_core.embeddings import Embeddings
+
+    with _models_lock:
+        if (model, revision) not in _embedders:
+            from sentence_transformers import SentenceTransformer
+            _embedders[(model, revision)] = SentenceTransformer(model, revision=revision, device="cpu")
+        encoder = _embedders[(model, revision)]
+
+    class Local(Embeddings):
+        def embed_documents(self, texts):
+            with _embed_lock:
+                return encoder.encode(list(texts), normalize_embeddings=True, convert_to_numpy=True).tolist()
+
+        def embed_query(self, text):
+            return self.embed_documents([text])[0]
+
+    return Local()
 
 
 def vector_db_dirname() -> str:

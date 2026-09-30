@@ -7,7 +7,7 @@ import logging
 from database_utils.db_values.preprocess import make_db_lsh
 from database_utils.db_catalog.preprocess import make_db_context_vec_db
 
-load_dotenv(override=True)
+load_dotenv(override=False)  # PATCH 14 (slm-conversion-bench): a .env never overrides the harness's environment
 NUM_WORKERS = 1
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
