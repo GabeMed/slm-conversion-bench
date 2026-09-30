@@ -42,16 +42,14 @@ _KEY_LIKE = re.compile(r"\b(sk|hf)[-_][A-Za-z0-9_\-*.]{6,}")
 
 
 def redact(text: str, config: Dict[str, Any]) -> str:
-    """What is committed to a public repository never carries a key: the values of every
-    `api_key_env` of the configuration and of OPENAI_API_KEY, and anything shaped like a key
-    (provider error bodies sometimes echo a masked one)."""
-    roles = config["roles"]
-    specs = [roles["production_llm"], roles["cheap_alt"], *(roles.get("slm_candidates") or [])]
-    names = [((spec or {}).get("endpoint") or {}).get("api_key_env") for spec in specs]
-    for name in [*names, "OPENAI_API_KEY"]:  # the retrieval embeddings' key too
-        value = os.environ.get(name) if name else None
-        if value and len(value) >= SECRET_MIN_LENGTH:
-            text = text.replace(value, "<redacted>")
+    """What is committed to a public repository never carries a credential: the values of every
+    credential variable of the configuration (API keys and `headers_env` values, C2's
+    `credential_envs`), and anything shaped like a key (provider error bodies sometimes echo a
+    masked one)."""
+    from bench.contracts.config import credential_envs
+    values = {os.environ.get(name) for name in credential_envs(config)}
+    for value in sorted((v for v in values if v and len(v) >= SECRET_MIN_LENGTH), key=len, reverse=True):
+        text = text.replace(value, "<redacted>")  # the longest first: one value may contain another
     return _KEY_LIKE.sub("<redacted>", text)
 
 
@@ -99,7 +97,7 @@ def update_call_sites(run_ids: List[str]) -> Path:
 
 
 def check_keys(key_envs: List[str]) -> None:
-    """Every key an execution on test uses is long enough to be redacted from its public record: a
+    """Every credential an execution on test uses (API keys and header values) is long enough to be redacted from its public record: a
     shorter one would stay verbatim wherever a provider echoes it (redacting it would corrupt the
     record instead: every "1" of it for a key "1")."""
     short = sorted({name for name in key_envs if name and 0 < len(os.environ.get(name, "")) < SECRET_MIN_LENGTH})

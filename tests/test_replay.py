@@ -184,3 +184,12 @@ def test_an_api_error_in_a_replay_fails_it(monkeypatch, repo, source):
             raise openai.APIStatusError("402", response=httpx.Response(402, request=httpx.Request("POST", "http://x")), body=None)
     _, manifest, _ = replayed(monkeypatch, repo, source, model=Unpaid(), engine="production_llm")
     assert manifest["status"] == "failed" and manifest["model_failures"] == {} and manifest["harness_errors"]
+
+
+def test_a_source_whose_snapshot_changed_is_refused(monkeypatch, repo, source):
+    snapshot = paths.RUNS / source / "config.json"
+    config = json.loads(snapshot.read_text())
+    config["eval"]["timeout_s"] += 1  # outside the policy blocks: only the hash against the manifest sees it
+    snapshot.write_text(json.dumps(config))
+    with pytest.raises(runner.data.DataError, match="does not match its manifest"):
+        replay(str(repo), source, engine="production_llm")

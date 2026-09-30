@@ -130,6 +130,11 @@ def validate_fact(name: str, payload: Dict[str, Any]) -> None:
         _require(payload["slm"] not in served, "an adapter cannot be served under the base's name (B4 would silently become B3)")
         _require(all(isinstance(a.get("sha256"), str) and _SHA256.match(a["sha256"]) for a in adapters.values()),
                  "every adapter needs its sha256 (bench.contracts.facts.sha256_dir)")
+        # what the set was trained on, which the router checks against the candidate it is served on
+        _require(isinstance(payload.get("base_revision"), str) and bool(_COMMIT.match(payload["base_revision"])),
+                 "adapters.base_revision must be the 40-hex commit of the base weights they were trained on")
+        _require(isinstance(payload.get("chat_template_kwargs"), dict),
+                 "adapters.chat_template_kwargs must be the mapping the chat template was rendered with in training")
     elif name == "allocation":
         _require(isinstance(payload.get("centroids"), str) and isinstance(payload.get("adapters"), str),
                  "allocation needs the centroids and adapters it was decided on")

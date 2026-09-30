@@ -55,6 +55,15 @@ def test_extends_cycle(tmp_path):
     lambda c: c["agent"]["team_agents"]["schema_selector"]["tools"]["filter_column"]["engine_config"].update(temperature=0.5),
     lambda c: c["agent"].pop("team_order"),
     lambda c: c["agent"].update(team_order=["schema_selector", "candidate_generator"]),
+    lambda c: c["embeddings"].pop("provider"),
+    # the agent's own settings, checked by C2 in every environment (not only when the agent configures)
+    lambda c: c["agent"].update(max_workers=0),
+    lambda c: c["retries"].update(http_max_attempts=0),
+    lambda c: c["seeds"].pop("few_shot"),
+    lambda c: c["arms"]["B1"]["few_shot"].update(k=-1),
+    lambda c: c["arms"]["B1"].update(few_shot=3),
+    lambda c: c["retries"].update(http_backoff_s=2),
+    lambda c: c["roles"]["slm_candidates"][0]["endpoint"].update(headers_env={"Modal-Key": ""}),
 ])
 def test_invalid_configs(mutate):
     config = copy.deepcopy(load_config(BASE))
@@ -107,11 +116,13 @@ def arms(fact_root, monkeypatch):
     """Facts for B3–B5: two clusters; assign() sends prompts that mention 'filter' to c1."""
     choice_path, choice_sha = _write("J6", "choice", {"slm": "qwen3-8b"})
     c_path, c_sha = _write("J5", "centroids", {"embedding": EMBEDDING, "clusters": {"c0": [1.0, 0.0], "c1": [0.0, 1.0]}})
+    config = copy.deepcopy(load_config(BASE))
+    qwen = next(c for c in config["roles"]["slm_candidates"] if c["name"] == "qwen3-8b")
     adapters = {"slm": "qwen3-8b", "choice": choice_sha, "centroids": c_sha,
+                "base_revision": qwen["hf"]["revision"], "chat_template_kwargs": qwen["chat_template_kwargs"],
                 "adapters": {"c0": {"served_name": "c0-aa", "sha256": "1" * 64}, "c1": {"served_name": "c1-bb", "sha256": "2" * 64}}}
     a_path, a_sha = _write("S5", "adapters", adapters)
     alloc_path, _ = _write("J7", "allocation", {"centroids": c_sha, "adapters": a_sha, "allocation": {"c0": "cheap_alt", "c1": "slm"}})
-    config = copy.deepcopy(load_config(BASE))
     config["arms"] = {
         "B3": {"choice": choice_path},
         "B4": {"choice": choice_path, "centroids": c_path, "adapters": a_path},
@@ -202,6 +213,10 @@ def test_router_refuses_unknown_arms_and_call_sites():
     ("adapters", {"slm": "s", "choice": "c", "centroids": "c", "adapters": {"c0": {"served_name": "x", "sha256": "weights"}}}),
     ("adapters", {"slm": "qwen3-8b", "choice": "c", "centroids": "c", "adapters": {"c0": {"served_name": "qwen3-8b", "sha256": "1" * 64}}}),
     ("centroids", {"embedding": {**EMBEDDING, "trust_remote_code": "yes"}, "clusters": {"a": [1.0]}}),
+    *[("adapters", {"slm": "s", "choice": "c", "centroids": "c", "adapters": {"c0": {"served_name": "x", "sha256": "1" * 64}},
+                    **base}) for base in ({"chat_template_kwargs": {}},  # trained on no recorded base
+                                          {"base_revision": "main", "chat_template_kwargs": {}},
+                                          {"base_revision": "0" * 40})],  # nor a recorded template
     ("unknown", {}),
 ])
 def test_fact_shapes_are_checked(fact_root, name, payload):
@@ -290,3 +305,16 @@ def test_unparsed_never_agrees_and_gold_sites_refuse():
     for site in ("generate_candidate", "revise"):
         with pytest.raises(ValueError):
             agree(site, {"SQL": "x"}, {"SQL": "x"})
+
+
+def test_adapters_trained_on_other_weights_or_template_are_refused(arms, fact_root):
+    config, adapters = arms
+    candidate = next(c for c in config["roles"]["slm_candidates"] if c["name"] == "qwen3-8b")
+    pinned = {"base_revision": candidate["hf"]["revision"], "chat_template_kwargs": candidate["chat_template_kwargs"]}
+    same = _write("S5", "adapters", {**adapters, **pinned})[0]
+    alloc = _with(config, "B4", adapters=same)
+    assert route("B4", "select_tables", MSG, alloc).engine.startswith("slm:qwen3-8b+lora:")
+    for stale in ({**pinned, "base_revision": "0" * 40}, {**pinned, "chat_template_kwargs": {"enable_thinking": True}}):
+        path = _write("S5", "adapters", {**adapters, **stale})[0]
+        with pytest.raises(facts.FactError, match="pinned to"):
+            route("B4", "select_tables", MSG, _with(config, "B4", adapters=path))

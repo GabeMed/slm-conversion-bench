@@ -14,11 +14,12 @@ from bench.barrier import prereg_published
 from bench.contracts.config import config_sha256, load_config
 from bench.data import DataError, pilot_sample
 from bench.evaluate import evaluate, evaluate_per_call
-from bench.prereg import PreregError, register
+from bench.prereg import PreregError, check_registered_analysis_code, register
 from synthetic import make_repo, sha256
 
-# distinct seeds, so reading one seed key for another shows (config.yaml gives all three one value)
-CONFIG = {**load_config(paths.ROOT / "config.yaml"), "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303}}
+# distinct seeds, so reading one seed key for another shows
+CONFIG = {**load_config(paths.ROOT / "config.yaml"),
+          "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404}}
 
 
 def git(cwd, *args):
@@ -26,7 +27,8 @@ def git(cwd, *args):
 
 
 CODE = paths.ROOT  # this repository, taken before any test points bench.paths elsewhere
-ANALYSIS = ["bench/data.py", "bench/evaluate.py", "bench/judge/__init__.py", "bench/judge/j1.py", "bench/judge/j4.py"]
+ANALYSIS = ["bench/data.py", "bench/evaluate.py", "bench/judge/__init__.py", "bench/judge/j1.py", "bench/judge/j4.py",
+            "bench/paths.py", *git(CODE, "ls-files", "bench/contracts").splitlines()]
 
 
 def copy_analysis_code(root):
@@ -149,14 +151,17 @@ def test_analysis_code_the_commit_would_not_hold_is_refused(repo, ignored):
 
 
 def test_ignored_bytecode_beside_the_analysis_code_is_not_a_refusal(repo):
-    """Every checkout that imported bench.judge has an ignored __pycache__: that is not unregistered code."""
-    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    """Every checkout that imported bench.judge has an ignored __pycache__, and a Mac writes .DS_Store
+    where Finder looked: neither is unregistered code."""
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.DS_Store\n")
     git(repo, "add", ".gitignore")
     git(repo, "commit", "-q", "-m", "ignore bytecode")
     cache = repo / "bench" / "judge" / "__pycache__"
     cache.mkdir()
     (cache / "j4.cpython-311.pyc").write_bytes(b"\0")
+    (repo / "bench" / "contracts" / ".DS_Store").write_bytes(b"\0")
     assert register("config.yaml", root=repo)["hash"]
+    check_registered_analysis_code(repo)
 
 
 def test_register_refuses_without_the_analysis_code(repo):
@@ -282,3 +287,29 @@ def test_the_command_registers_and_refuses_through_the_cli(repo, monkeypatch, ca
     (repo / "notes.txt").write_text("x\n")
     assert main(["prereg", "--config", str(repo / "config.yaml")]) == 2
     assert "uncommitted" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("rel", ["bench/judge/j4.py", "bench/contracts/concordance.py", "bench/paths.py"])
+def test_a_test_run_is_not_scored_with_analysis_code_other_than_the_registered(published, rel):
+    config, prereg_hash = published
+    changed = paths.ROOT / rel  # the synthetic repository's copy
+    changed.write_text(changed.read_text() + "\n# a reading changed after the pre-registration\n")
+    with pytest.raises(DataError, match=f"analysis code differs from the pre-registered one: {rel}"):
+        evaluate(test_run(config, prereg_hash))
+
+
+def test_a_test_run_is_not_scored_with_analysis_code_no_commit_holds(published):
+    config, prereg_hash = published
+    (paths.ROOT / "bench" / "judge" / "j9.py").write_text("READING = 'new'\n")
+    with pytest.raises(DataError, match="analysis code not committed: bench/judge/j9.py"):
+        evaluate(test_run(config, prereg_hash))
+
+
+def test_a_registration_that_recorded_no_analysis_code_matches_none(repo):
+    register("config.yaml", root=repo)
+    check_registered_analysis_code(repo)
+    manifest = json.loads((repo / "prereg" / "manifest.json").read_text())
+    del manifest["analysis_code"]
+    (repo / "prereg" / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(PreregError, match="differs from the pre-registered one: bench/contracts/"):
+        check_registered_analysis_code(repo)
