@@ -123,8 +123,8 @@ def test_rows_compare_as_sets_and_missing_prediction_is_wrong(db):
 
 def test_timeout_and_read_only(db):
     endless = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
-    assert execute(db, endless, 0.2) == (None, "timeout")
-    rows, error = execute(db, "DELETE FROM t", 5)
+    assert execute(db, endless, 0.2, "2026-09-30") == (None, "timeout", False)
+    rows, error, _ = execute(db, "DELETE FROM t", 5, "2026-09-30")
     assert rows is None and "readonly" in error
 
 

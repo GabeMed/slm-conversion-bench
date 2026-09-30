@@ -112,6 +112,7 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
 
 
 def commit_config(repo, name, text):
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
     (repo / name).write_text(text)
     git(repo, "add", "-f", name)
     git(repo, "commit", "-q", "-m", f"add {name}")
@@ -138,6 +139,21 @@ def test_register_refuses_an_extends_chain_that_the_commit_does_not_hold(repo, t
     with pytest.raises(PreregError, match="outside the repository"):
         register("via-outside.yaml", root=repo)
     assert not (repo / "prereg").exists()
+
+
+def test_the_extends_chain_resolves_each_parent_from_its_own_file(repo):
+    # sub/child.yaml -> sub/deeper/mid.yaml -> config.yaml: resolved from the child's folder or the root,
+    # the second link would point outside the repository
+    commit_config(repo, "sub/deeper/mid.yaml", "extends: ../../config.yaml\n")
+    commit_config(repo, "sub/child.yaml", "extends: deeper/mid.yaml\n")
+    assert register("sub/child.yaml", root=repo)["new"] is True
+    (repo / ".gitignore").write_text("local.yaml\n")
+    (repo / "local.yaml").write_text(yaml.safe_dump(CONFIG))
+    commit_config(repo, ".gitignore", "local.yaml\n")
+    commit_config(repo, "sub/deeper/mid2.yaml", "extends: ../../local.yaml\n")
+    commit_config(repo, "sub/child2.yaml", "extends: deeper/mid2.yaml\n")
+    with pytest.raises(PreregError, match="local.yaml is not tracked"):  # checked at every depth
+        register("sub/child2.yaml", root=repo, replace=True)
 
 
 def test_register_accepts_a_tracked_extends_chain(repo):

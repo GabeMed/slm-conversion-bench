@@ -13,7 +13,7 @@ import yaml
 from bench import data, paths
 from bench.contracts.config import load_config
 from bench.data import DataError, attach_difficulty, check_mini_dev
-from bench.evaluate import check_golds, fix_date, gold_has_limit
+from bench.evaluate import check_golds, execute, fix_keywords, gold_has_limit
 from synthetic import GOLD, make_repo, sha256
 
 CONFIG = load_config(paths.ROOT / "config.yaml")
@@ -174,11 +174,32 @@ def test_real_test_difficulty_and_mini_dev_ids():
     check_mini_dev(test, CONFIG["splits"]["excluded"], data._read_pinned(CONFIG, "mini_dev"))
 
 
+def _reads_the_clock(sql):  # only SQL that names a date function or keyword can: execute just those
+    return re.search(r"date|time|julianday|unixepoch|strftime|now|current_", sql, re.IGNORECASE)
+
+
 @real
 def test_real_sensitivity_sets_are_the_twelve_date_golds_and_the_limit_golds():
     test = data._test_questions(CONFIG)
-    assert {q["question_id"] for q in test if fix_date(q["SQL"], DAY)[1]} == DATE_DEPENDENT_TEST_GOLDS
+    dated = {q["question_id"] for q in test if _reads_the_clock(q["SQL"])
+             and execute(paths.sqlite_path(CONFIG, q["db_id"]), q["SQL"], 10, DAY)[2]}
+    assert dated == DATE_DEPENDENT_TEST_GOLDS
     assert sum(gold_has_limit(q["SQL"]) for q in test) == 86
+
+
+@real
+def test_real_date_golds_give_what_the_text_substitution_gave():
+    # the twelve were checked with 'now' replaced in the text; reading it by value must not change them
+    test = {q["question_id"]: q for q in data._test_questions(CONFIG)}
+    for question_id in sorted(DATE_DEPENDENT_TEST_GOLDS, key=int):
+        gold = test[question_id]
+        path = paths.sqlite_path(CONFIG, gold["db_id"])
+        by_text = re.sub(r"'now'", f"'{DAY} 00:00:00'", fix_keywords(gold["SQL"], DAY)[0], flags=re.IGNORECASE)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        expected = connection.execute(by_text).fetchall()
+        connection.close()
+        rows, error, dated = execute(path, gold["SQL"], 30, DAY)
+        assert (set(rows), error, dated) == (set(expected), None, True), question_id
 
 
 def test_the_committed_manifest_records_the_gold_check():

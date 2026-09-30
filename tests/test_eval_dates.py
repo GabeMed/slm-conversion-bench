@@ -1,6 +1,7 @@
-"""The evaluator's fixed date: `'now'`, CURRENT_TIMESTAMP, CURRENT_DATE (and the forms SQLite reads as
-'now') become the pre-registered `eval.fixed_date` in prediction and gold alike, whatever the day
-and the machine's time zone, and every result says whether a substitution happened. Golds with
+"""The evaluator's fixed date: CURRENT_TIMESTAMP, CURRENT_DATE and CURRENT_TIME in the text, and every
+value 'now' SQLite's date functions read, become the pre-registered `eval.fixed_date` in
+prediction and gold alike, whatever the day and the machine's time zone, and every result says
+whether the current moment was read. Golds with
 LIMIT are flagged too, for the sensitivity analysis."""
 import datetime
 import os
@@ -11,7 +12,7 @@ import pytest
 
 from bench import paths
 from bench.contracts.config import load_config
-from bench.evaluate import execute, fix_date, gold_has_limit, score
+from bench.evaluate import execute, fix_keywords, gold_has_limit, score
 
 CONFIG = load_config(paths.ROOT / "config.yaml")
 DAY = "2026-09-30"
@@ -36,40 +37,50 @@ def test_the_fixed_date_must_be_a_plain_iso_date(value):
 @pytest.mark.parametrize("sql,expected", [
     ("SELECT STRFTIME('%Y', CURRENT_TIMESTAMP)", f"SELECT STRFTIME('%Y', {STAMP})"),
     ("SELECT current_date, CURRENT_TIME", f"SELECT '{DAY}', '00:00:00'"),
-    ("SELECT STRFTIME('%Y', date('NOW'))", f"SELECT STRFTIME('%Y', date({STAMP}))"),
-    ("SELECT julianday('now') - julianday(\"now\")", f"SELECT julianday({STAMP}) - julianday({STAMP})"),
-    ("SELECT date(), datetime( ), julianday(), unixepoch(), time()",
-     f"SELECT date({STAMP}), datetime( {STAMP}), julianday({STAMP}), unixepoch({STAMP}), time({STAMP})"),
-    # the position decides, whatever surrounds the argument: comments, blanks, a format that is not a literal
-    ("SELECT date(/*c*/ 'now'), julianday( /* x */ \"NOW\" -- y\n ), strftime(fmt, 'now'), strftime(fmt) FROM f",
-     f"SELECT date(/*c*/ {STAMP}), julianday( /* x */ {STAMP} -- y\n ), strftime(fmt, {STAMP}), strftime(fmt, {STAMP}) FROM f"),
-    ("SELECT date(strftime('%Y', 'now') || '-01-01')", f"SELECT date(strftime('%Y', {STAMP}) || '-01-01')"),
-    ("SELECT strftime('%Y') - strftime('%Y', dob)", f"SELECT strftime('%Y', {STAMP}) - strftime('%Y', dob)"),
-    ('SELECT strftime("%Y") - 1', f'SELECT strftime("%Y", {STAMP}) - 1'),
-    ("SELECT datetime('now', 'localtime'), time( 'now' ), unixepoch('NOW'), strftime(\"%Y\", 'now')",
-     f"SELECT datetime({STAMP}, 'localtime'), time( {STAMP} ), unixepoch({STAMP}), strftime(\"%Y\", {STAMP})"),
     # an apostrophe inside a comment opens no string literal
-    ("SELECT -- the member's age\n STRFTIME('%Y', 'now') /* it's */ - CURRENT_DATE",
-     f"SELECT -- the member's age\n STRFTIME('%Y', {STAMP}) /* it's */ - '{DAY}'"),
+    ("SELECT -- the member's age\n CURRENT_DATE /* it's */", f"SELECT -- the member's age\n '{DAY}' /* it's */"),
 ])
-def test_now_and_its_synonyms_become_the_fixed_date(sql, expected):
-    assert fix_date(sql, DAY) == (expected, True)
+def test_the_date_keywords_become_the_fixed_date_in_the_text(sql, expected):
+    assert fix_keywords(sql, DAY) == (expected, True)
 
 
 @pytest.mark.parametrize("sql", [
-    "SELECT 'CURRENT_DATE', 'now()', 'right now', \"CURRENT_TIMESTAMP\" FROM t",  # literals and identifiers
-    "SELECT current_dates, my_date() FROM [current_date] WHERE x LIKE '%now%'",
-    "SELECT date(dob), strftime('%Y', dob) FROM t",
-    "SELECT dob FROM t -- as of CURRENT_DATE, i.e. date('now')\n",
-    "SELECT * FROM t WHERE end_date < 'now'",           # not a time value: a TEXT comparison in SQLite
-    "SELECT coalesce(end_date, 'now'), 'now' FROM t",   # an argument, but not of a date function
-    "SELECT strftime('now', dob) FROM t",               # the format, not the time value
-    "SELECT date(dob, 'now') FROM t",                   # a modifier position, not the time value
-    "SELECT date('now' || '') FROM t",                  # an expression, not the literal
-    "SELECT 'date(''now'')' FROM t",                    # inside a string
+    "SELECT 'CURRENT_DATE', \"CURRENT_TIMESTAMP\", [current_time] FROM t",  # literals and identifiers
+    "SELECT current_dates FROM t -- as of CURRENT_DATE",
+    "SELECT date('now') FROM t",  # a value: fixed when SQLite reads it (below), not in the text
 ])
-def test_only_the_current_moment_is_substituted(sql):
-    assert fix_date(sql, DAY) == (sql, False)
+def test_nothing_else_is_rewritten(sql):
+    assert fix_keywords(sql, DAY) == (sql, False)
+
+
+FAR = "1999-12-31"  # far from today: the machine's clock would give another year
+
+
+@pytest.mark.parametrize("sql,expected", [
+    ("SELECT date('now'), date('NOW', '+1 day'), date(\"now\")", ("1999-12-31", "2000-01-01", "1999-12-31")),
+    ("SELECT date(), time(), datetime(), unixepoch()", ("1999-12-31", "00:00:00", "1999-12-31 00:00:00", 946598400)),
+    ("SELECT strftime('%Y'), strftime('%Y', 'now'), strftime(substr('%Y%m', 1, 2), 'now')", ("1999", "1999", "1999")),
+    ("SELECT julianday(COALESCE(NULL, 'now'))", (2451543.5,)),
+    ("SELECT date(('now')), \"date\"('now'), DATE(/*c*/ 'now'), date(lower('NOW'))", ("1999-12-31",) * 4),
+    ("SELECT timediff('now', '1999-12-30')", ("+0000-00-01 00:00:00.000",)),
+    ("SELECT datetime('now', 'localtime')", ("1999-12-31 00:00:00",)),
+])
+def test_the_current_moment_is_the_fixed_date_by_value(db, sql, expected):
+    assert execute(db, sql, 5, FAR) == ([expected], None, True)
+
+
+@pytest.mark.parametrize("sql,expected", [
+    ("SELECT 'now' > '2000', date('2000-01-01', '+1 day')", (1, "2000-01-02")),  # text; a date that is not now
+    ("SELECT strftime('now', '2000-01-01'), date('2000-01-01', 'now')", ("now", None)),  # a format; a modifier
+])
+def test_now_elsewhere_keeps_sqlites_own_meaning(db, sql, expected):
+    assert execute(db, sql, 5, FAR) == ([expected], None, False)
+
+
+def test_a_prediction_that_reads_now_through_an_expression_is_flagged(db):
+    gold = {"1": {"db_id": "t", "SQL": "SELECT 2451543.5"}}
+    result = score({"1": "SELECT julianday(COALESCE(NULL, 'now'))"}, gold, lambda _: db, 5, FAR)[0]
+    assert (result["correct"], result["pred_date_substituted"], result["gold_date_substituted"]) == (True, True, False)
 
 
 def test_a_bare_now_is_text_and_stays_text(db):
@@ -100,7 +111,7 @@ def test_the_time_value_is_fixed_whatever_the_shape_of_the_call(tmp_path):
 
 @pytest.mark.parametrize("sql", ["-- x", "   ", "/* nothing */", "\n-- only a comment\n"])
 def test_no_statement_is_an_execution_error(db, sql):
-    assert execute(db, sql, 5) == (None, "no statement")
+    assert execute(db, sql, 5, DAY) == (None, "no statement", False)
 
 
 def test_no_statement_is_not_an_empty_answer(db):
@@ -160,7 +171,7 @@ def test_the_machine_time_zone_does_not_move_the_date(db, west_of_greenwich):
     gold = {"1": {"db_id": "t", "SQL": "SELECT date('now')"}}
     results = score({"1": "SELECT date('now', 'localtime')"}, gold, lambda _: db, 5, "2026-01-01")
     assert results[0]["correct"] is True
-    rows, _ = execute(db, "SELECT date('2026-01-01 00:00:00', 'localtime')", 5)
+    rows, _, _ = execute(db, "SELECT date('2026-01-01 00:00:00', 'localtime')", 5, DAY)
     assert rows == [("2026-01-01",)]
 
 

@@ -99,7 +99,7 @@ def test_every_generation_and_repair_invocation_is_scored_against_its_gold(repo)
 def test_each_gold_runs_once_per_eval(repo, monkeypatch):
     import bench.evaluate as ev
     ran, real = [], ev.execute
-    monkeypatch.setattr(ev, "execute", lambda path, sql, timeout: ran.append(sql) or real(path, sql, timeout))
+    monkeypatch.setattr(ev, "execute", lambda path, sql, *rest: ran.append(sql) or real(path, sql, *rest))
     evaluate_per_call(replay_run(repo, calls_of_a_replay()))  # two invocations per question, one gold run each
     assert collections.Counter(sql for sql in ran if sql in GOLDS.values()) == {gold: 1 for gold in GOLDS.values()}
 

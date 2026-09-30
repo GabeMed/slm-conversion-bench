@@ -6,7 +6,10 @@ and with a timeout. Correct means the same set of rows, BIRD's rule; SQL that ho
 comment, blanks) is an execution error, never an empty answer.
 
 The current moment is the pre-registered `eval.fixed_date` (midnight UTC), in prediction and gold
-alike, so arms evaluated on different days, on machines in different time zones, stay comparable.
+alike, so arms evaluated on different days, on machines in different time zones, stay comparable:
+the keywords CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME are replaced in the text, and SQLite's
+date functions are overridden on the connection so that every value 'now' they read, however it was
+computed, is the fixed moment.
 """
 import json
 import os
@@ -31,34 +34,15 @@ _TOKEN = re.compile(r"""(?P<comment>--[^\n]*|/\*.*?(?:\*/|$))
                       |(?P<space>\s+)
                       |(?P<word>[A-Za-z_][A-Za-z_0-9$]*)
                       |(?P<other>.)""", re.DOTALL | re.VERBOSE)
-# The date functions and the position of their time value (strftime's comes after the format).
-_TIME_VALUE = {"date": 0, "time": 0, "datetime": 0, "julianday": 0, "unixepoch": 0, "strftime": 1}
+# SQLite's date functions and the positions of the time value they read as 'now' (strftime's
+# comes after the format; timediff reads two). As a format or a modifier 'now' means something
+# else, and keeps it.
+_TIME_VALUE = {"date": (0,), "time": (0,), "datetime": (0,), "julianday": (0,), "unixepoch": (0,),
+               "strftime": (1,), "timediff": (0, 1)}
 
 
 def _tokens(sql: str) -> List[Tuple[str, str]]:
     return [(m.lastgroup, m.group()) for m in _TOKEN.finditer(sql)]
-
-
-def _arguments(tokens: List[Tuple[str, str]], significant: List[int], open_at: int) -> Optional[Tuple[List[List[int]], int]]:
-    """The arguments of the call whose "(" is significant[open_at], each as the indices of its
-    significant tokens, and the index of the closing ")"; None when it never closes."""
-    arguments: List[List[int]] = [[]]
-    depth = 0
-    for i in significant[open_at:]:
-        text = tokens[i][1]
-        if text == "(":
-            depth += 1
-            if depth == 1:
-                continue
-        elif text == ")":
-            depth -= 1
-            if depth == 0:
-                return ([] if arguments == [[]] else arguments), i
-        elif text == "," and depth == 1:
-            arguments.append([])
-            continue
-        arguments[-1].append(i)
-    return None
 
 
 def fixed_date(config: Dict[str, Any]) -> str:
@@ -73,42 +57,54 @@ def fixed_date(config: Dict[str, Any]) -> str:
     return day
 
 
-def fix_date(sql: str, day: str) -> Tuple[str, bool]:
-    """`sql` with every reading of the current moment replaced by `day` at midnight, and whether
-    anything was replaced: CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME, and the time value of
-    date(), time(), datetime(), julianday(), unixepoch() and strftime() (after the format), by
-    position: an argument that is exactly the literal 'now' (any case, either quote), or no time
-    value at all, which SQLite reads as 'now'. A 'now' anywhere else is text (`end_date < 'now'`
-    compares strings) and stays text."""
-    stamp = f"'{day} 00:00:00'"
-    keywords = {"current_timestamp": stamp, "current_date": f"'{day}'", "current_time": "'00:00:00'"}
-    tokens = _tokens(sql)
-    out = [text for _, text in tokens]
-    significant = [i for i, (kind, _) in enumerate(tokens) if kind not in ("space", "comment")]
-    replaced = False
-    for at, i in enumerate(significant):
-        kind, text = tokens[i]
-        if kind != "word":
-            continue
-        name = text.lower()
-        if name in keywords:
-            out[i], replaced = keywords[name], True
-            continue
-        if name not in _TIME_VALUE or at + 1 >= len(significant) or tokens[significant[at + 1]][1] != "(":
-            continue
-        call = _arguments(tokens, significant, at + 1)
-        if call is None:
-            continue
-        arguments, close = call
-        position = _TIME_VALUE[name]
-        if len(arguments) == position:  # no time value: SQLite takes 'now'
-            out[close] = (", " if position else "") + stamp + ")"
-            replaced = True
-        elif len(arguments) > position and len(arguments[position]) == 1:
-            value = tokens[arguments[position][0]]
-            if value[0] == "string" and value[1][1:-1].lower() == "now":
-                out[arguments[position][0]], replaced = stamp, True
+def fix_keywords(sql: str, day: str) -> Tuple[str, bool]:
+    """`sql` with CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME (keywords, which no function
+    override reaches) replaced by `day` at midnight, and whether any was. Nothing inside a comment,
+    a literal or a quoted identifier is touched."""
+    keywords = {"current_timestamp": f"'{day} 00:00:00'", "current_date": f"'{day}'", "current_time": "'00:00:00'"}
+    out, replaced = [], False
+    for kind, text in _tokens(sql):
+        if kind == "word" and text.lower() in keywords:
+            text, replaced = keywords[text.lower()], True
+        out.append(text)
     return "".join(out), replaced
+
+
+class _FixedClock:
+    """SQLite's date functions, installed over the built-ins of a connection, with the current
+    moment fixed: a time value whose value is the text 'now' (in any case, as SQLite compares it),
+    or a time value left out (date(), strftime(fmt)), is the fixed stamp. The result is computed by
+    the real built-in on a connection of its own, so every other meaning is SQLite's. `readings`
+    counts the times the current moment was read."""
+
+    def __init__(self, day: str):
+        self.stamp = f"{day} 00:00:00"
+        self.readings = 0
+        self._builtins = sqlite3.connect(":memory:")
+
+    def install(self, connection: sqlite3.Connection) -> None:
+        for name, positions in _TIME_VALUE.items():
+            connection.create_function(name, -1, self._function(name, positions), deterministic=True)
+
+    def _function(self, name: str, positions: Tuple[int, ...]) -> Callable[..., Any]:
+        query = {}
+
+        def call(*args: Any) -> Any:
+            args = list(args)
+            if name != "timediff" and len(args) == positions[0]:  # no time value: SQLite reads 'now'
+                args.append(self.stamp)
+                self.readings += 1
+            for i in positions:
+                if i < len(args) and isinstance(args[i], str) and args[i].lower() == "now":
+                    args[i] = self.stamp
+                    self.readings += 1
+            if len(args) not in query:
+                query[len(args)] = f"SELECT {name}({', '.join('?' * len(args))})"
+            return self._builtins.execute(query[len(args)], args).fetchone()[0]
+        return call
+
+    def close(self) -> None:
+        self._builtins.close()
 
 
 def gold_has_limit(sql: str) -> bool:
@@ -132,8 +128,13 @@ def _utc() -> Iterator[None]:
         time.tzset()
 
 
-def execute(db_path: Path, sql: str, timeout_s: float) -> Tuple[Optional[List[tuple]], Optional[str]]:
+def execute(db_path: Path, sql: str, timeout_s: float, day: str) -> Tuple[Optional[List[tuple]], Optional[str], bool]:
+    """The rows of `sql` (or its error) at the fixed date, read-only, in UTC, within the timeout,
+    and whether it read the current moment (a keyword in the text, or 'now' at run time)."""
+    sql, keyword = fix_keywords(sql, day)
+    clock = _FixedClock(day)
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    clock.install(connection)
     deadline = time.monotonic() + timeout_s
     connection.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
@@ -141,20 +142,19 @@ def execute(db_path: Path, sql: str, timeout_s: float) -> Tuple[Optional[List[tu
             cursor = connection.execute(sql)
             rows = cursor.fetchall()
         if cursor.description is None:  # a comment or blanks: [] here is not the zero rows of a query
-            return None, "no statement"
-        return rows, None
+            return None, "no statement", keyword
+        return rows, None, keyword or clock.readings > 0
     except Exception as e:
         timed_out = time.monotonic() > deadline
-        return None, "timeout" if timed_out else f"{type(e).__name__}: {e}"
+        return None, "timeout" if timed_out else f"{type(e).__name__}: {e}", keyword or clock.readings > 0
     finally:
         connection.close()
+        clock.close()
 
 
 def run_gold(question: Dict[str, Any], path: Path, timeout_s: float, day: str) -> Tuple[Optional[List[tuple]], Optional[str], bool]:
-    """The gold's rows (or error) at the fixed date, and whether the date was substituted."""
-    gold_sql, substituted = fix_date(question["SQL"], day)
-    rows, error = execute(path, gold_sql, timeout_s)
-    return rows, error, substituted
+    """The gold's rows (or error) at the fixed date, and whether it read the current moment."""
+    return execute(path, question["SQL"], timeout_s, day)
 
 
 def score_one(question: Dict[str, Any], predicted: Optional[str], path: Path, timeout_s: float,
@@ -167,8 +167,7 @@ def score_one(question: Dict[str, Any], predicted: Optional[str], path: Path, ti
     if predicted is None:
         pred_rows, pred_error = None, "no prediction"
     else:
-        pred_sql, pred_substituted = fix_date(predicted, day)
-        pred_rows, pred_error = execute(path, pred_sql, timeout_s)
+        pred_rows, pred_error, pred_substituted = execute(path, predicted, timeout_s, day)
     return {
         "question_id": question["question_id"], "db_id": question["db_id"],
         "difficulty": question.get("difficulty"),
@@ -198,7 +197,7 @@ def check_golds(questions: Dict[str, List[dict]], db_path: Callable[[str], Path]
     errors, timeouts, empty = [], [], []
     for split, items in questions.items():
         for question in items:
-            rows, error = execute(db_path(question["db_id"]), fix_date(question["SQL"], day)[0], timeout_s)
+            rows, error, _ = execute(db_path(question["db_id"]), question["SQL"], timeout_s, day)
             where = {"split": split, "question_id": question["question_id"], "db_id": question["db_id"]}
             if error == "timeout":
                 timeouts.append(where)
