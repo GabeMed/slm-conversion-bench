@@ -8,13 +8,15 @@ reads two blocks (AIPerf's JSON export schema): `request_latency` (unit `ms`, wi
 
 **Sustained throughput within the p95** is read as: the highest request throughput among the load
 levels whose p95 request latency is within `cost.p95_slo_ms`, a pre-registered bound. No level
-within it is an error, not a number. Then, with the GPU's price per hour (`cost.gpu_price_per_hour`,
-keyed by the manifest's `gpu`):
+within it is an error, not a number. Every level must have run with the prefix cache on (SPEC §6.6).
+Then, with the GPU's price (F3's dated `modal.gpu_prices.usd_per_s`, keyed by the manifest's `gpu`):
 
     cost per request at utilization u = price per hour / (sustained requests per hour × u)
 
-The load test replays the agent's real calls, so a request is one SLM call; J3 prices each SLM call
-of an execution at this cost, and the cost per question follows from the calls per question.
+J8 gives the cost **per request**. The load test replays the agent's real calls, so a request is
+one SLM call: J3 prices each SLM call of an execution at this cost, which makes the cost per question
+the execution's SLM calls per question times it. That holds as far as the load test's mix of calls
+is the execution's (F3 replays a source execution's calls; the manifest records which).
 """
 import json
 from typing import Any, Dict, List
@@ -55,17 +57,22 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any]):
     levels, engines, gpus, reads = [], set(), set(), {}
     for run_id in sorted(loadtest_run_ids):
         found = require_done(run_id, type="loadtest")
+        if found.get("prefix_cache") is not True:
+            raise JudgmentError(f"{run_id} did not run with the prefix cache on (SPEC §6.6)")
         engines.add(found["engine"])
         gpus.add(found["gpu"])
         export = json.loads((run_dir(run_id) / EXPORT).read_text())
-        levels.append({"run_id": run_id, "concurrency": found["concurrency"],
-                       "prefix_cache": found.get("prefix_cache"), **level(export)})
+        levels.append({"run_id": run_id, "concurrency": found["concurrency"], "source_run_id": found.get("source_run_id"),
+                       **level(export)})
         reads[run_id] = reference(run_id)
     if len(engines) != 1 or len(gpus) != 1:
         raise JudgmentError(f"the load levels must be one engine on one GPU: {sorted(engines)} on {sorted(gpus)}")
     gpu = gpus.pop()
-    price = (cost.get("gpu_price_per_hour") or {}).get(gpu)
-    if price is None:
-        raise JudgmentError(f"cost.gpu_price_per_hour has no price for {gpu!r}")
-    result = {"engine": engines.pop(), "gpu": gpu, **judge(levels, price, cost["p95_slo_ms"], cost["utilizations"])}
+    prices = (config.get("modal") or {}).get("gpu_prices") or {}
+    per_second = (prices.get("usd_per_s") or {}).get(gpu)
+    if per_second is None or not prices.get("as_of"):
+        raise JudgmentError(f"modal.gpu_prices (F3) has no dated price for {gpu!r}")
+    result = {"engine": engines.pop(), "gpu": gpu, "gpu_prices_as_of": prices["as_of"],
+              "source_run_ids": sorted({lv.get("source_run_id") for lv in levels if lv.get("source_run_id")}),
+              **judge(levels, per_second * 3600, cost["p95_slo_ms"], cost["utilizations"])}
     return write_result(JUDGMENT, {"loadtests": reads}, result)

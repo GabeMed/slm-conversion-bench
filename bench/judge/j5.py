@@ -18,9 +18,10 @@ the `embed` execution of the teacher on `calib`. Writes the `centroids` fact and
   fraction of prompts the embedding cut (`truncation`), since a cut that removed everything but
   the template would make ARI ≈ 1 by construction (design §5.1).
 - **Assignment rate**: how often the prompt-only nearest centroid (what the router does) is the
-  S3 cluster, in sample on `train` and on `calib`, where the S3 cluster of a call is its nearest
-  k-means centre in the prompt + action space. The nearest centroid follows `clusters.nearest`:
-  highest cosine, ties to the smallest id.
+  S3 cluster, in sample on `train` and on `calib` (the teacher, B0), where the S3 cluster of a calib
+  call is the one k-means itself would give it: the nearest centre, by Euclidean distance, in the
+  prompt + action space. The nearest centroid follows `clusters.nearest`: highest cosine, ties to
+  the smallest id.
 """
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -59,7 +60,7 @@ def cluster(vectors, k_min: int, k_max: int, seed: int, n_init: int, silhouette_
             best = (k, model)
     if best is None:
         raise JudgmentError("every k gave a single cluster: the vectors do not separate")
-    return [int(label) for label in best[1].labels_], _unit(best[1].cluster_centers_), scores
+    return [int(label) for label in best[1].labels_], best[1].cluster_centers_, scores
 
 
 def names(labels: Sequence[int]) -> Dict[int, str]:
@@ -75,6 +76,16 @@ def nearest_rows(vectors, centres: Dict[str, Sequence[float]]) -> List[str]:
     matrix = _unit(np.asarray([centres[c] for c in ids], dtype=np.float64))
     similarity = _unit(np.asarray(vectors, dtype=np.float64)) @ matrix.T
     return [ids[i] for i in similarity.argmax(axis=1)]  # argmax keeps the first maximum: the smallest id
+
+
+def nearest_centre(vectors, centres: Dict[str, Any]) -> List[str]:
+    """k-means' own assignment: the centre at the smallest Euclidean distance (unit vectors)."""
+    import numpy as np
+    ids = sorted(centres)
+    matrix = np.asarray([centres[c] for c in ids], dtype=np.float64)
+    x = _unit(np.asarray(vectors, dtype=np.float64))
+    distances = ((x[:, None, :] - matrix[None, :, :]) ** 2).sum(axis=2)
+    return [ids[i] for i in distances.argmin(axis=1)]
 
 
 def adjusted_rand(truth: Sequence[str], found: Sequence[str]) -> float:
@@ -105,17 +116,28 @@ def judge(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[st
         raise JudgmentError(f"{embed_run_id} does not cover every curated example with its action")
     embedding = embedded["embedding"]
 
-    labels, _, silhouettes = cluster(actions[[r["action_row"] for r in index]], settings["k_min"], settings["k_max"],
-                                     settings["seed"], settings["n_init"], settings["silhouette_sample"])
+    calib = None
+    reads = {"curate": reference(curate_run_id), "embed": reference(embed_run_id)}
+    if calib_embed_run_id:
+        calib_manifest, calib_index, calib_prompts, calib_actions = load_embed(calib_embed_run_id)
+        if calib_manifest["embedding"] != embedding:
+            raise JudgmentError(f"{calib_embed_run_id} used another embedding than the clusters")
+        teacher = calib_manifest["source"]["run_id"]
+        if calib_manifest.get("source_type") != "agent" or calib_manifest.get("split") != "calib":
+            raise JudgmentError(f"{calib_embed_run_id} did not embed an agent execution on calib")
+        require_done(teacher, type="agent", arm="B0", split="calib")
+        reads["embed_calib"] = reference(calib_embed_run_id)
+
+    labels, raw_centres, silhouettes = cluster(actions[[r["action_row"] for r in index]], settings["k_min"],
+                                               settings["k_max"], settings["seed"], settings["n_init"],
+                                               settings["silhouette_sample"])
     rename = names(labels)
     found = [rename[label] for label in labels]
     ids = sorted(set(found), key=lambda c: int(c[1:]))
     prompt_matrix = prompts[[r["prompt_row"] for r in index]]
     centroids = {c: [float(v) for v in _unit(prompt_matrix[[i for i, f in enumerate(found) if f == c]].mean(axis=0, keepdims=True))[0]]
                  for c in ids}
-    action_centres = {c: _unit(actions[[index[i]["action_row"] for i, f in enumerate(found) if f == c]]
-                               .mean(axis=0, keepdims=True))[0] for c in ids}  # the k-means centre, in PA space
-    fact = write_fact(JUDGMENT, "centroids", {"embedding": embedding, "clusters": centroids}, root)
+    action_centres = {rename[label]: raw_centres[label] for label in rename}  # k-means' own, in PA space
 
     sites = [e["call_site"] for e in examples]  # read here, after clustering, for validation only
     composition = {c: {} for c in ids}
@@ -123,20 +145,15 @@ def judge(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[st
         composition[c][site] = composition[c].get(site, 0) + 1
     in_sample = nearest_rows(prompt_matrix, centroids)
 
-    calib = None
-    reads = {"curate": reference(curate_run_id), "embed": reference(embed_run_id)}
     if calib_embed_run_id:
-        calib_manifest, calib_index, calib_prompts, calib_actions = load_embed(calib_embed_run_id)
-        if calib_manifest["embedding"] != embedding:
-            raise JudgmentError(f"{calib_embed_run_id} used another embedding than the clusters")
         with_action = [r for r in calib_index if r["action_row"] is not None]
-        s3 = nearest_rows(calib_actions[[r["action_row"] for r in with_action]], action_centres)
+        s3 = nearest_centre(calib_actions[[r["action_row"] for r in with_action]], action_centres)
         routed = nearest_rows(calib_prompts[[r["prompt_row"] for r in with_action]], centroids)
-        calib = {"split": calib_manifest.get("split"), "n": len(with_action),
+        calib = {"split": "calib", "n": len(with_action),
                  "rate": sum(a == b for a, b in zip(s3, routed)) / len(with_action) if with_action else None,
                  "routed_sizes": {c: routed.count(c) for c in ids},
                  "truncation": calib_manifest["tokens"]}
-        reads["embed_calib"] = reference(calib_embed_run_id)
+    fact = write_fact(JUDGMENT, "centroids", {"embedding": embedding, "clusters": centroids}, root)
 
     result = {
         "method": "k-means on unit prompt+action vectors, k by cosine silhouette",

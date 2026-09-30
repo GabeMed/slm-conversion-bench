@@ -15,12 +15,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from bench import paths
 from bench.contracts.calls import read_calls, validate_calls
+from bench.judge import JudgeError
 
 Identity = Tuple[str, str, str]  # (question_id, call_site, invocation_key): one invocation, across runs
-
-
-class JudgmentError(ValueError):
-    pass
+JudgmentError = JudgeError  # one error type for every judgment, F2's and F4's
 
 
 def canonical(payload: Any) -> bytes:
@@ -60,9 +58,12 @@ def reference(run_id: str) -> Dict[str, str]:
 
 def require_done(run_id: str, **expected: Any) -> Dict[str, Any]:
     """The manifest of a finished execution, checked against what the caller needs of it
-    (`type`, `arm`, `split`, ...). An incomplete or failed execution is never judged."""
+    (`type`, `arm`, `split`, ...). An incomplete or failed execution is never judged. An `eval`
+    execution records no status: it writes its manifest last, after every result, so a manifest
+    means it finished."""
     found = manifest(run_id)
-    if found.get("status") != "done":
+    finished = found.get("status") == "done" or (found.get("type") == "eval" and "status" not in found)
+    if not finished:
         raise JudgmentError(f"{run_id} is {found.get('status')!r}, not 'done': an incomplete execution is never judged")
     for key, value in expected.items():
         allowed = value if isinstance(value, (tuple, list, set)) else (value,)
@@ -142,6 +143,14 @@ def result_reference(path) -> Dict[str, str]:
 def read_json_judgment(path) -> str:
     path = Path(path)
     return json.loads((path if path.is_absolute() else paths.ROOT / path).read_bytes())["judgment"]
+
+
+def n_boot(config: Dict[str, Any]) -> int:
+    """J4's bootstrap resamples: F2's `stats.n_boot`."""
+    value = (config.get("stats") or {}).get("n_boot")
+    if not isinstance(value, int) or value < 1:
+        raise JudgmentError("stats.n_boot (J4's bootstrap resamples, F2) is not set")
+    return value
 
 
 def relative(path: Path) -> str:

@@ -1,5 +1,10 @@
 # Judgments J1-J8 and the report: current Python, no agent dependencies (never imports CHESS).
 # Install: uv venv .venv-analysis && uv pip install --python .venv-analysis/bin/python -r env/analysis/requirements.txt -e ".[test]"
-numpy>=2.1
-scipy>=1.14
-scikit-learn>=1.6
+# Pinned: J5's centroids fact is addressed by its content, so the k-means floats must not move with a
+# library upgrade. Tested with Python 3.12. The executions F4 adds, `bench curate` (it runs SQL, and
+# needs datasketch) and `bench embed` (it needs clusters.embed), run in the agent environment.
+numpy==2.5.3
+scipy==1.18.1
+scikit-learn==1.9.1
+joblib==1.6.0
+threadpoolctl==3.7.0

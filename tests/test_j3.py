@@ -47,7 +47,8 @@ def test_usage_missing_is_refused_estimated_is_labelled_failures_are_unbilled():
     estimated = teacher_call("1", use=usage(1_000_000, 0, 0, source="estimated"))
     result = j3.judge([failed, estimated], ["1"], None, PRICES, "teacher-model")
     assert result["failed_unbilled"] == 1 and result["estimated"] == 1 and result["label"] == "estimated"
-    assert result["total"]["standard"] == pytest.approx(2.0)
+    assert result["total"]["standard"] == pytest.approx(2.0) and result["lower_bound"]
+    assert result["per_call"]["standard"] == pytest.approx(1.0)  # two calls, one unpriced
 
 
 def test_refuses_an_undated_table_and_an_unknown_model():
@@ -77,13 +78,18 @@ def test_run_reads_the_execution_its_eval_and_j8(tmp_path, monkeypatch):
     calls = [call("agent-B4", "1", "select_tables", parsed={}, role="slm", engine="slm:qwen3-8b+lora:c0",
                   model="qwen3-8b-c0", use=usage(1000, 0, 10))]
     write_run("agent-B4", {"type": "agent", "arm": "B4", "split": "test", "question_ids": ["1", "2"]}, calls)
-    write_run("eval-B4", {"type": "eval", "source_run_id": "agent-B4"},
+    write_run("eval-B4", {"type": "eval", "source_run_id": "agent-B4", "status": None},
               files={"results.jsonl": [{"question_id": "1", "correct": True}, {"question_id": "2", "correct": False}]})
     j8 = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM})
     result = read_result(j3.run("agent-B4", "eval-B4", str(j8), config), "J3")
     assert result["result"]["per_correct"]["standard@50%"] == pytest.approx(0.004)
     assert result["result"]["per_question"]["standard@50%"] == pytest.approx(0.002)
     assert result["reads"]["j8"]["sha256"] == j8.parent.name and result["result"]["arm"] == "B4"
+    assert not result["result"]["lower_bound"]
+    write_run("eval-B4-per-call", {"type": "eval", "source_run_id": "agent-B4", "per_call": True, "status": None},
+              files={"results.jsonl": [{"question_id": "1", "call_site": "select_tables", "invocation_key": "single", "correct": True}]})
+    with pytest.raises(JudgmentError, match="per-call"):
+        j3.run("agent-B4", "eval-B4-per-call", str(j8), config)
     other = write_result("J8", {}, {"engine": "slm:granite-4.2-8b", "cost_per_request": SLM})
     with pytest.raises(JudgmentError, match="measured"):
         j3.run("agent-B4", "eval-B4", str(other), config)

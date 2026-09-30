@@ -42,13 +42,24 @@ def test_success_filter_uses_the_production_signal_never_the_gold():
     assert {(e["question_id"], e["call_site"]) for e in examples} == {("1", "generate_candidate"), ("4", "revise"),
                                                                       ("6", "select_tables")}
     assert counts["per_call_site"]["generate_candidate"] | {} == {
-        "invocations": 3, "unparsed": 0, "sql_error": 1, "sql_empty": 1, "passed_filter": 1,
+        "invocations": 3, "unparsed": 0, "sql_error": 1, "sql_empty": 1, "passed_filter": 1, "masked_sql": 0,
         "exact_duplicates": 0, "near_duplicates": 0, "kept": 1}
     assert counts["per_call_site"]["filter_column"]["unparsed"] == 1
     six = next(e for e in examples if e["question_id"] == "6")
     assert six["completion"] == [{"role": "assistant", "content": '{"table_names": ["t"]}'}]  # the attempt that parsed
     assert six["call_id"] == retry["call_id"]
     assert counts["total"]["kept"] == 3 and "not applied" in counts["paraphrase"]
+
+
+def test_masking_that_would_change_a_sql_completion_drops_the_example():
+    sql = "SELECT * FROM users WHERE email = 'bob@corp.com'"
+    c = call("r", "1", "generate_candidate", "t:0", response=sql, parsed={"SQL": sql})
+    examples, counts = curate([c], SETTINGS, fake_sql({sql: ([(1,)], None)}))
+    assert examples == [] and counts["per_call_site"]["generate_candidate"]["masked_sql"] == 1
+    ids = "SELECT * FROM schools WHERE CDSCode = '01100170109835'"  # a 14-digit id, not a card
+    c = call("r", "2", "generate_candidate", "t:0", response=ids, parsed={"SQL": ids})
+    examples, _ = curate([c], SETTINGS, fake_sql({ids: ([(1,)], None)}))
+    assert examples[0]["completion"][0]["content"] == ids
 
 
 def test_an_unparsed_last_attempt_is_dropped_even_if_an_earlier_one_parsed():
@@ -134,15 +145,22 @@ def b0_train_run(config, run_id="agent-B0-train-1", calls=None, **manifest):
 
 def test_run_curate_executes_the_sql_on_the_pinned_database(tmp_path, monkeypatch):
     _, config_path, config = make_repo(tmp_path, monkeypatch)
-    source = b0_train_run(teacher_config(config))
+    other = "SELECT id FROM gas_t WHERE segment = 'Value'"  # not the gold, returns a row: kept
+    calls = [call("agent-B0-train-1", "1", "generate_candidate", "t:0", response=GOLD, parsed={"SQL": GOLD}),
+             call("agent-B0-train-1", "2", "generate_candidate", "t:0", response="x", parsed={"SQL": "SELECT nope FROM gas_t"}),
+             call("agent-B0-train-1", "3", "generate_candidate", "t:0", response=other, parsed={"SQL": other}),
+             call("agent-B0-train-1", "3", "revise", "revise_1:0", response="y",
+                  parsed={"refined_sql_query": "SELECT id FROM gas_t WHERE country = 'XXX'"}),
+             call("agent-B0-train-1", "3", "select_tables", response='{"table_names": ["gas_t"]}', parsed={"table_names": ["gas_t"]})]
+    source = b0_train_run(teacher_config(config), calls=calls)
     out = run_curate([source], str(config_path))
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["type"] == "curate" and manifest["sources"] == [reference(source)]
     assert manifest["counts"]["per_call_site"]["generate_candidate"]["sql_error"] == 1
-    assert manifest["counts"]["per_call_site"]["generate_candidate"]["sql_empty"] == 1
+    assert manifest["counts"]["per_call_site"]["revise"]["sql_empty"] == 1
     examples = read_jsonl(out / "examples.jsonl")
-    assert sorted((e["question_id"], e["call_site"]) for e in examples) == [("1", "generate_candidate"),
-                                                                            ("3", "select_tables")]
+    assert sorted((e["question_id"], e["call_site"]) for e in examples) == [
+        ("1", "generate_candidate"), ("3", "generate_candidate"), ("3", "select_tables")]
 
 
 def test_run_curate_refuses_outputs_it_may_not_train_on(tmp_path, monkeypatch):
@@ -165,7 +183,10 @@ def test_datasets_follow_the_s3_clusters_in_trl_shape(tmp_path, monkeypatch):
     members = {examples[0]["call_id"]: "c0", examples[1]["call_id"]: "c1"}
     result = write_result("J5", {"curate": reference(curated)},
                           {"members": members, "clusters": ["c0", "c1", "c2"], "centroids": {"sha256": "ab" * 32}})
+    (paths.ROOT / "train" / "datasets").mkdir(parents=True)
+    (paths.ROOT / "train" / "datasets" / "c7.jsonl").write_text("{}\n")  # an earlier J5's cluster
     out = write_datasets(curated, str(result), str(config_path))
+    assert sorted(p.name for p in out.glob("*.jsonl")) == ["c0.jsonl", "c1.jsonl", "c2.jsonl"]
     lines = read_jsonl(out / "c0.jsonl")
     assert lines == [{"prompt": examples[0]["prompt"], "completion": examples[0]["completion"]}]
     assert lines[0]["completion"][0]["role"] == "assistant"

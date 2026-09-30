@@ -52,6 +52,36 @@ def test_gold_clusters_need_non_inferiority_at_half_the_margin():
     assert j7.allocate(["c0"], few, {"c0": {"slm": 1.0}}, fake_noninferiority, SETTINGS)["c0"]["engine"] == "production_llm"
 
 
+def test_half_the_margin_is_stricter_than_the_margin():
+    """Discordant both ways, no difference: non-inferior at Δ, not at Δ/2 (J4's Δ from calib's d)."""
+    teacher_ok = {str(q): q % 10 != 0 for q in range(400)}
+    engine_ok = dict(teacher_ok)
+    for q in range(0, 100, 10):   # 10 questions only the engine gets right
+        engine_ok[str(q)] = True
+    for q in range(1, 100, 10):   # 10 only the teacher does
+        engine_ok[str(q)] = False
+    verdict = j7.passes(gold(teacher_ok, engine_ok), fake_noninferiority, SETTINGS)
+    test = verdict["gold"]["j4"]
+    assert test["testable"] and test["d_pilot"] == test["d"] == 0.05 and test["margin_from"] == "pilot"
+    assert -test["delta"] < test["ci_low"] < -test["delta"] / 2 and test["noninferior"]
+    assert not verdict["passes"] and verdict["why"] == "gold: not non-inferior at Δ/2"
+
+
+def test_a_comparison_j4_cannot_test_never_passes():
+    teacher_ok = {str(q): q < 16 for q in range(20)}
+    engine_ok = {**teacher_ok, "18": True, "19": True}  # better, but on 20 questions Δ is above the cap
+    verdict = j7.passes(gold(teacher_ok, engine_ok), fake_noninferiority, SETTINGS)
+    test = verdict["gold"]["j4"]
+    assert not test["testable"] and test["ci_low"] > -test["delta"] / 2
+    assert not verdict["passes"] and verdict["why"] == "gold: not testable"
+
+
+def test_agreement_needs_enough_calls():
+    verdict = j7.passes(evidence(agreement(1.0, n=4)), fake_noninferiority, SETTINGS)
+    assert not verdict["passes"] and "min_calls" in verdict["why"]
+    assert j7.passes(evidence(agreement(1.0, n=5)), fake_noninferiority, SETTINGS)["passes"]
+
+
 def test_a_mixed_cluster_must_pass_both_tests():
     teacher_ok = {str(q): True for q in range(400)}
     mixed = gold(teacher_ok, dict(teacher_ok))
@@ -73,7 +103,7 @@ def allocation_world(tmp_path, monkeypatch):
     config_path, config = repo(tmp_path, monkeypatch, {
         "prices": {"as_of": "2026-09-30", "table": {"engine-model": {"input_per_mtok": 0.5, "cached_input_per_mtok": 0.05,
                                                                      "output_per_mtok": 1.5, "batch_discount": 0.5}}},
-        "allocation": {"min_calls": 5}})
+        "allocation": {"min_calls": 5}, "stats": {"n_boot": 100}})
     embedding = {"model": "fake-embedder", "revision": "0" * 40, "max_seq_length": 64, "truncation": "tail", "text": "prompt"}
     centroids = facts.write_fact("J5", "centroids", {"embedding": embedding, "clusters": {"c0": [1.0, 0.0], "c1": [0.0, 1.0]}})
     choice = facts.write_fact("J6", "choice", {"slm": "qwen3-8b"})
@@ -120,6 +150,15 @@ def test_run_refuses_mismatched_facts_and_missing_settings(tmp_path, monkeypatch
                                                   "clusters": {"c0": [1.0, 0.0]}})
     with pytest.raises(JudgmentError, match="not trained on these centroids"):
         j7.run(str(other), str(adapters), replays, "eval-t", str(j8), config, fake_noninferiority)
+    manifest_path = paths.RUNS / "replay-b4" / "manifest.json"
+    routed = __import__("json").loads(manifest_path.read_text())
+    manifest_path.write_text(__import__("json").dumps({**routed, "facts": {}}))
+    with pytest.raises(JudgmentError, match="does not record"):
+        j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), config, fake_noninferiority)
+    manifest_path.write_text(__import__("json").dumps(routed))
+    other_j8 = write_result("J8", {}, {"engine": "slm:granite-4.2-8b", "cost_per_request": {"20%": 0.1}})
+    with pytest.raises(JudgmentError, match="not the base of these adapters"):
+        j7.run(str(centroids), str(adapters), replays, "eval-t", str(other_j8), config, fake_noninferiority)
     config["allocation"]["min_calls"] = None
     with pytest.raises(JudgmentError, match="min_calls"):
         j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), config, fake_noninferiority)

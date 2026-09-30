@@ -62,11 +62,12 @@ def main(argv=None) -> int:
 
 def _pairs(values):
     """`RUN=EVAL` arguments as {run: eval}."""
+    from bench.judge.base import JudgmentError
     pairs = {}
     for value in values or []:
         run_id, sep, eval_run_id = value.partition("=")
         if not sep or not run_id or not eval_run_id:
-            raise ValueError(f"expected RUN=EVAL, got {value!r}")
+            raise JudgmentError(f"expected RUN=EVAL, got {value!r}")
         pairs[run_id] = eval_run_id
     return pairs
 
@@ -111,7 +112,7 @@ def _f4(args) -> int:
         elif args.judgment == "j8":
             from bench.judge import j8
             print(j8.run(args.loadtest, config))
-    except (JudgmentError, FactError, ConfigError, DataError, TestSplitLocked, ValueError) as e:
+    except (JudgmentError, FactError, ConfigError, DataError, TestSplitLocked) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2
     return 0

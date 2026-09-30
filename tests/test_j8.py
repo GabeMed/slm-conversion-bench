@@ -13,8 +13,8 @@ def export(p95_ms, rps):
             "request_throughput": {"unit": "requests/sec", "avg": rps}}
 
 
-def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b", gpu="L4"):
-    write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": gpu, "concurrency": concurrency, "prefix_cache": True},
+def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b", gpu="L4", cache=True):
+    write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": gpu, "concurrency": concurrency, "prefix_cache": cache},
               files={j8.EXPORT: export(p95_ms, rps)})
     return run_id
 
@@ -39,17 +39,22 @@ def test_units_are_checked():
 
 
 def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
-    _, config = repo(tmp_path, monkeypatch, {"cost": {"gpu_price_per_hour": {"L4": 0.8}, "p95_slo_ms": 1000}})
+    _, config = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_ms": 1000},
+                                             "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}})
     runs = [loadtest("loadtest-1", 1, 400, 2.0), loadtest("loadtest-8", 8, 900, 10.0)]
     result = read_result(j8.run(runs, config), "J8")
     assert result["result"]["engine"] == "slm:qwen3-8b" and result["result"]["gpu"] == "L4"
     assert result["result"]["cost_per_request"]["50%"] == pytest.approx(0.8 / 18000)
+    assert result["result"]["gpu_prices_as_of"] == "2026-09-30"
     assert set(result["reads"]["loadtests"]) == set(runs)
     loadtest("loadtest-other", 4, 500, 5.0, engine="slm:granite-4.2-8b")
     with pytest.raises(JudgmentError, match="one engine"):
         j8.run(runs + ["loadtest-other"], config)
-    config["cost"]["gpu_price_per_hour"] = {}
-    with pytest.raises(JudgmentError, match="no price"):
+    loadtest("loadtest-nocache", 2, 500, 5.0, cache=False)
+    with pytest.raises(JudgmentError, match="prefix cache"):
+        j8.run(runs + ["loadtest-nocache"], config)
+    config["modal"]["gpu_prices"]["usd_per_s"] = {}
+    with pytest.raises(JudgmentError, match="no dated price"):
         j8.run(runs, config)
     config["cost"]["p95_slo_ms"] = None
     with pytest.raises(JudgmentError, match="p95_slo_ms"):

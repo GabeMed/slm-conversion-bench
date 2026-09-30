@@ -10,7 +10,9 @@ must have parsed), in this order, with the count of each step, overall and per c
    agent's own format check (C1 `parsed_ok`).
 2. **Masking of sensitive data** by the regular expressions of `config.yaml › curation.mask`, in the
    prompt and in the completion alike, with the number of detections per pattern. Applied after the
-   filter, so the SQL that is executed is the one the agent executed.
+   filter, so the SQL that is executed is the one the agent executed. A SQL completion that masking
+   changes is dropped (`masked_sql`): it is no longer the SQL that passed the filter, and training on
+   it would teach a query that never ran.
 3. **Exact duplicates**: the same masked prompt and completion.
 4. **Near duplicates** by MinHash (`curation.near_duplicate`). CHESS prompts are mostly template (a
    column-filter prompt is ~17 kB of fixed examples around a few lines that vary), so the Jaccard
@@ -47,7 +49,7 @@ from bench.judge.base import (JudgmentError, calls_of, canonical, final, invocat
 from bench.provenance import git_state
 
 SQL_OUTPUT_KEY = {"generate_candidate": "SQL", "revise": "refined_sql_query"}  # CHESS's parsers (llm/parsers.py)
-STEPS = ("invocations", "unparsed", "sql_error", "sql_empty", "passed_filter", "exact_duplicates",
+STEPS = ("invocations", "unparsed", "sql_error", "sql_empty", "passed_filter", "masked_sql", "exact_duplicates",
          "near_duplicates", "kept")
 
 
@@ -171,7 +173,11 @@ def curate(calls: List[dict], settings: Dict[str, Any], run_sql: Callable[[str, 
         seen, unique = set(), []
         for example in candidates[call_site]:
             example["prompt"] = [{"role": m["role"], "content": masker(m["content"])} for m in example["prompt"]]
-            example["completion"] = [{"role": "assistant", "content": masker(example["completion"][0]["content"])}]
+            completion = example["completion"][0]["content"]
+            if call_site in SQL_OUTPUT_KEY and masker(completion) != completion:
+                counts[call_site]["masked_sql"] += 1
+                continue
+            example["completion"] = [{"role": "assistant", "content": masker(completion)}]
             key = hashlib.sha256(canonical([example["prompt"], example["completion"]])).hexdigest()
             if key in seen:
                 counts[call_site]["exact_duplicates"] += 1
@@ -271,6 +277,8 @@ def write_datasets(curate_run_id: str, j5_result: str, config_path: str = "confi
     for example in examples:
         by_cluster[members[example["call_id"]]].append({"prompt": example["prompt"], "completion": example["completion"]})
     low, high = config["curation"]["rule_of_thumb"]
+    for stale in out.glob("*.jsonl"):  # the files of earlier clusters: never left for S5 to train on
+        stale.unlink()
     for cluster, rows in by_cluster.items():
         write_jsonl(out / f"{cluster}.jsonl", rows)
     manifest = {

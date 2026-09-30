@@ -1,34 +1,50 @@
 """R · the report (SPEC §8), from the judgments J1–J8 and the test registry only.
 
 `bench report --plan <plan.yaml>` reads a plan that names, and only names, what the report is made
-of: per arm, its `eval` execution (J1) and its J3 result; the J2 results (the per-call-site
-evaluation on the test inputs, and format validity per arm); the J5, J6, J7 and J8 results. No
-number enters by hand: every figure is read from a judgment or computed by one (J1's per-question
-table and J4's tests, run here through F2's functions). The test registry is read from git: the
-manifests of test-split executions committed under `runs/`, and intents without a manifest
-(interrupted executions).
+of (no number goes in it):
+
+    split: test
+    arms:       {<arm>: {eval: <eval execution>, cost: <its J3 result>}}      # B0, B1, B2-production, B2-cheap, B3, B4, B5
+    pilot:      {arms: {<arm>: <eval execution on calib>}, per_call: <J2 result of the calib replay routed as B4>}
+    format:     {B0: <J2 result, format validity of its run>, B4: <...>}
+    per_call:   <J2 result of the test inputs replayed as B4>
+    j5: <J5 result>   j6: <J6 result>   j7: <J7 result>   j8: <J8 result>
+    teacher_train_cost: <J3 result of the teacher on train>
+
+Every figure is read from a judgment or computed by one: J1's per-question table and summary
+(`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
+second), run here through F2's functions. **Each J4 margin comes from the pilot** (SPEC §6.4): its
+`d_pilot` is the discordance J4 measures between the same two arms on the pilot's calib questions;
+a comparison with no pilot gets no verdict (J4 returns `noninferior: None`), never a pass. The test
+registry is read from git as F1 records it: `registry/test/<run_id>.intent.json` before a test
+execution starts and `<run_id>.manifest.json` when it ends, as committed at HEAD; an intent with no
+manifest is an interrupted execution.
 
 Writes `reports/<sha256>/`: `report.md`, `report.json` (every number, with the judgments it came
 from; its sha256 names the directory) and `ex_cost.svg`, the main chart.
 
 **How each row of the SPEC §5 map is decided** (the SPEC fixes the criteria; where it leaves a
-term open, the reading is stated here and in the row):
-- V1/A1: confirms if B4 or B5 is non-inferior to B0 (J4, testable); refutes if both are testable and
-  their difference is below −Δ; "not testable" if neither is testable; inconclusive otherwise.
+term open, the reading is stated here and in the row). A J4 comparison has one of five outcomes,
+shared by every row: no pilot (no verdict), not testable (Δ above the cap), non-inferior, worse
+(the difference is below −Δ) or inconclusive (neither).
+- V1/A1: confirms if B4 or B5 is non-inferior to B0; refutes if both are worse; otherwise the
+  outcomes say why not (no pilot, not testable, inconclusive).
 - A4/A11: the replaceable fraction of B5 by call, token and cost; the SPEC says "high" without a
   number, so the row is descriptive.
-- Appendix B: on the per-call-site evaluation of B4 on the test inputs, the SLM "loses on repair"
-  when its repair EX is not non-inferior to the teacher's (J4); it "passes the routine" when every
-  call site the paper assigns to SLMs (keywords, column filter, table and column selection) agrees
-  with the teacher at `thresholds.concordance_min` or more (a proxy). Confirms when it loses on
-  repair and passes the routine; refutes when it ties on repair or fails the routine.
-- A5: format validity over all invocations, B4 against B0.
+- Appendix B: on the per-call-site evaluation of B4 on the test inputs. The routine (the call sites
+  the paper assigns to SLMs: keywords, column filter, table and column selection) passes when each
+  agrees with the teacher at `thresholds.concordance_min` or more (a proxy). Refutes when the
+  routine fails, or when repair is non-inferior (a tie: the partition is conservative); confirms
+  when repair is worse and the routine passes; otherwise repair's outcome says why not.
+- A5: format validity per call site (SPEC §6.3), B4 against B0: confirms when B4 is at least B0's
+  on every call site both have, refutes when it is below on any.
 - A6, V3/A2, AV2: per utilization of the SLM. "The best arm without training" is the cheapest per
-  correct query among B0, B1 and B2 that is non-inferior to B0 (B0 always is). A6 confirms if B5 is
-  non-inferior to B0 and cheaper than it, refutes if B5 is not cheaper. V3 compares it with the
-  cheapest of B4 and B5 that are non-inferior to B0: confirms at 3× cheaper or more, refutes below,
-  inconclusive with no such arm. AV2 wins (the paper is refuted) when B1 costs no more per correct
-  query than the cheaper of B4 and B5.
+  correct query among B0, B1 and B2 that is non-inferior to B0 (B0 always is). A6 refutes if B5 is
+  not cheaper than it and confirms if B5 is cheaper and non-inferior to B0. V3 compares it with the
+  cheapest of B4 and B5 that are non-inferior to B0: confirms at `claims.v3_min_ratio` times cheaper
+  or more, refutes below. AV2 wins (the paper is refuted) when B1 costs no more per correct query
+  than the cheaper of B4 and B5; the fixed cost and its payback (SPEC §6.6) are not a J1–J8 output
+  and are left out, which the row says.
 - A7, A2/A3, B2: not measured by J1–J8 in the core; stated as such.
 """
 import hashlib
@@ -39,15 +55,19 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import paths
-from bench.judge.base import JudgmentError, canonical, read_result, result_reference, run_dir
+from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
+                              run_dir)
 
 UNTRAINED = ("B0", "B1", "B2-production", "B2-cheap")
 TRAINED = ("B4", "B5")
 SLM_ARMS = ("B3", "B4", "B5")
 ARMS = ("B0", "B1", "B2-production", "B2-cheap", "B3", "B4", "B5")
+# how J1 names an arm of the plan: (arm, engine); B2 is one arm with two single-call engines
+J1_KEY = {arm: (arm, None) for arm in ARMS} | {"B2-production": ("B2", "production_llm"), "B2-cheap": ("B2", "cheap_alt")}
 ROUTINE = ("extract_keywords", "filter_column", "select_tables", "select_columns")
-PAIRS = (("B0", "B4"), ("B0", "B5"), ("B3", "B4"), ("B4", "B5"), ("B0", "B1"), ("B0", "B2-production"),
-         ("B0", "B2-cheap"), ("B0", "B3"))
+PAIRS = (("B4", "B0"), ("B5", "B0"), ("B4", "B3"), ("B5", "B4"), ("B1", "B0"), ("B2-production", "B0"),
+         ("B2-cheap", "B0"), ("B3", "B0"))  # (candidate, reference)
+REGISTRY_DIR = "registry/test"
 
 
 # ---------------------------------------------------------------- reading
@@ -65,34 +85,70 @@ def costs_of(j3: Dict[str, Any]) -> Dict[str, Optional[float]]:
     return {k.split("@", 1)[1]: v for k, v in per_correct.items() if k.startswith("standard@")}
 
 
-def ex_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """EX overall and per difficulty, from J1's per-question table."""
-    def share(subset):
-        return sum(r["correct"] for r in subset) / len(subset) if subset else None
-    difficulties = sorted({r.get("difficulty") or "unknown" for r in rows})
-    return {"n": len(rows), "ex": share(rows),
-            "by_difficulty": {d: share([r for r in rows if (r.get("difficulty") or "unknown") == d]) for d in difficulties}}
-
-
-def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, noninferiority: Callable) -> Dict[str, Any]:
-    """Every number of the report, each from a judgment."""
-    sources: Dict[str, Any] = {"arms": {}}
-    arms, correct = {}, {}
-    for arm, spec in (plan.get("arms") or {}).items():
+def per_arm(evals: Dict[str, str], split: str, ex_table: Callable) -> Dict[str, List[Dict[str, Any]]]:
+    """J1's rows of each arm's eval execution, checked to be that arm, on that split. One call to
+    `ex_table` for all of them, so J1 checks they share the instrument."""
+    rows = ex_table([run_dir(e) for e in evals.values()])
+    out = {}
+    for arm, eval_run_id in evals.items():
         if arm not in ARMS:
             raise JudgmentError(f"unknown arm {arm!r} in the plan (one of {ARMS})")
-        rows = ex_table([run_dir(spec["eval"])])
+        source = manifest(eval_run_id)["source_run_id"]
+        mine = [r for r in rows if r["source_run_id"] == source]
+        wrong = {(r["arm"], r["engine"], r["split"]) for r in mine} - {(*J1_KEY[arm], split)}
+        if not mine or wrong:
+            raise JudgmentError(f"{eval_run_id} is not {arm} on {split}: J1 reads {sorted(map(str, wrong)) or 'nothing'}")
+        out[arm] = mine
+    return out
+
+
+def correct_of(rows: List[Dict[str, Any]]) -> Dict[str, bool]:
+    return {str(r["question_id"]): bool(r["correct"]) for r in rows}
+
+
+def pilot_d(pilot: Dict[str, Dict[str, bool]], candidate: str, reference_arm: str, noninferiority: Callable,
+            settings: tuple) -> Optional[float]:
+    """The discordance J4 measures between two arms on the pilot's questions (both answered)."""
+    if candidate not in pilot or reference_arm not in pilot:
+        return None
+    shared = sorted(set(pilot[candidate]) & set(pilot[reference_arm]))
+    if not shared:
+        return None
+    return plain(noninferiority({q: pilot[candidate][q] for q in shared}, {q: pilot[reference_arm][q] for q in shared},
+                                *settings))["d"]
+
+
+def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_summary: Callable,
+           noninferiority: Callable) -> Dict[str, Any]:
+    """Every number of the report, each from a judgment."""
+    split = plan["split"]
+    specs = plan.get("arms") or {}
+    rows = per_arm({arm: spec["eval"] for arm, spec in specs.items()}, split, ex_table)
+    pilot_plan = plan.get("pilot") or {}
+    pilot_rows = per_arm(pilot_plan["arms"], "calib", ex_table) if pilot_plan.get("arms") else {}
+    sources: Dict[str, Any] = {"arms": {}, "pilot": {arm: reference(e) for arm, e in (pilot_plan.get("arms") or {}).items()}}
+    arms, correct = {}, {}
+    for arm, spec in specs.items():
         j3 = read_result(spec["cost"], "J3")
         if j3["reads"].get("eval", {}).get("run_id") != spec["eval"]:
             raise JudgmentError(f"the J3 result of {arm} was not computed with {spec['eval']}")
-        correct[arm] = {str(r["question_id"]): bool(r["correct"]) for r in rows}
-        arms[arm] = {**ex_summary(rows), "split": plan["split"], "cost_per_correct": costs_of(j3["result"]),
-                     "cost_label": j3["result"]["label"], "prices_as_of": j3["result"]["prices_as_of"],
+        (summary,) = ex_summary(rows[arm])
+        correct[arm] = correct_of(rows[arm])
+        arms[arm] = {"n": summary["n"], "ex": summary["ex"],
+                     "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
+                     "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(j3["result"]),
+                     "cost_label": j3["result"]["label"], "lower_bound": j3["result"].get("lower_bound", False),
+                     "failed_unbilled": j3["result"]["failed_unbilled"], "prices_as_of": j3["result"]["prices_as_of"],
                      "calls": j3["result"]["calls"], "replaceable_fraction": j3["result"]["replaceable_fraction"]}
-        sources["arms"][arm] = {"eval": spec["eval"], "j3": result_reference(spec["cost"])}
-    settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], config["noninferiority"]["n_boot"])
-    tests = {f"{a}|{b}": plain(noninferiority(correct[a], correct[b], *settings))
-             for a, b in PAIRS if a in correct and b in correct}
+        sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
+    settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
+    pilot = {arm: correct_of(r) for arm, r in pilot_rows.items()}
+    tests = {}
+    for candidate, reference_arm in PAIRS:
+        if candidate in correct and reference_arm in correct:
+            d = pilot_d(pilot, candidate, reference_arm, noninferiority, settings)
+            tests[f"{reference_arm}|{candidate}"] = plain(noninferiority(correct[candidate], correct[reference_arm],
+                                                                         *settings, d_pilot=d))
 
     judged = {}
     for key, judgment in (("j5", "J5"), ("j6", "J6"), ("j7", "J7"), ("j8", "J8"), ("per_call", "J2"),
@@ -101,19 +157,32 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, non
         judged[key] = found["result"] if found else None
         if found:
             sources[key] = result_reference(plan[key])
+    if judged["per_call"] and (judged["per_call"].get("arm"), judged["per_call"].get("split")) != ("B4", split):
+        raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
     formats = {}
     for arm, path in (plan.get("format") or {}).items():
-        formats[arm] = read_result(path, "J2")["result"]["format_validity"]
+        found = read_result(path, "J2")
+        if arm not in arms or found["reads"]["run"]["run_id"] != arms[arm]["run_id"]:
+            raise JudgmentError(f"the format result of {arm} is not of {arm}'s execution")
+        formats[arm] = found["result"]["format_validity"]
         sources.setdefault("format", {})[arm] = result_reference(path)
     repair = None
-    if judged["per_call"]:
-        revise = judged["per_call"]["per_call_site"].get("revise")
-        if revise and revise["gold"]:
-            repair = plain(noninferiority(revise["gold"]["by_question"]["teacher"], revise["gold"]["by_question"]["replay"],
-                                          *settings))
-    return {"split": plan["split"], "arms": arms, "tests": tests, "repair_test": repair, "formats": formats,
+    revise = (judged["per_call"] or {}).get("per_call_site", {}).get("revise")
+    if revise and revise["gold"]:
+        d = None
+        if pilot_plan.get("per_call"):
+            calib = read_result(pilot_plan["per_call"], "J2")["result"]
+            if (calib.get("arm"), calib.get("split")) != ("B4", "calib"):
+                raise JudgmentError("the pilot's per-call evaluation must be a calib replay routed as B4")
+            gold = (calib["per_call_site"].get("revise") or {}).get("gold")
+            if gold:
+                d = plain(noninferiority(gold["by_question"]["replay"], gold["by_question"]["teacher"], *settings))["d"]
+            sources["pilot_per_call"] = result_reference(pilot_plan["per_call"])
+        repair = plain(noninferiority(revise["gold"]["by_question"]["replay"], revise["gold"]["by_question"]["teacher"],
+                                      *settings, d_pilot=d))
+    return {"split": split, "arms": arms, "tests": tests, "repair_test": repair, "formats": formats,
             "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
-            "registry": test_registry(), "sources": sources}
+            "v3_min_ratio": config["claims"]["v3_min_ratio"], "registry": test_registry(), "sources": sources}
 
 
 def plain(value: Any) -> Any:
@@ -124,6 +193,22 @@ def plain(value: Any) -> Any:
 
 # ---------------------------------------------------------------- the SPEC §5 map
 
+NO_PILOT = "no verdict (no pilot d)"
+
+
+def outcome(test: Optional[Dict[str, Any]]) -> str:
+    """The one reading of a J4 comparison every row shares."""
+    if not test:
+        return "no data"
+    if test.get("d_pilot") is None:
+        return "no pilot"
+    if not test["testable"]:
+        return "not testable"
+    if test["noninferior"]:
+        return "non-inferior"
+    return "worse" if test["diff"] < -test["delta"] else "inconclusive"
+
+
 def _cost(data, arm, u) -> Optional[float]:
     costs = data["arms"].get(arm, {}).get("cost_per_correct") or {}
     return costs.get("") if "" in costs else costs.get(u)
@@ -132,8 +217,7 @@ def _cost(data, arm, u) -> Optional[float]:
 def _passes_v1(data, arm) -> bool:
     if arm == "B0":
         return "B0" in data["arms"]
-    test = data["tests"].get(f"B0|{arm}")
-    return bool(test and test["testable"] and test["noninferior"])
+    return outcome(data["tests"].get(f"B0|{arm}")) == "non-inferior"
 
 
 def utilizations(data) -> List[str]:
@@ -151,26 +235,33 @@ def _power(*tests) -> str:
     return ", ".join(f"{t['power']:.2f}" for t in tests if t and t.get("power") is not None) or "—"
 
 
+def _why_not(outcomes: List[str]) -> str:
+    """The verdict when a row neither confirms nor refutes, from its comparisons' outcomes."""
+    if outcomes and all(o == "no pilot" for o in outcomes):
+        return NO_PILOT
+    if outcomes and all(o == "not testable" for o in outcomes):
+        return "not testable"
+    return "inconclusive"
+
+
+def v1_verdict(t4, t5) -> str:
+    outcomes = [outcome(t) for t in (t4, t5) if t]
+    if not outcomes:
+        return "no data"
+    if "non-inferior" in outcomes:
+        return "confirms"
+    if outcomes == ["worse", "worse"]:
+        return "refutes"
+    return _why_not(outcomes)
+
+
 def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     rows = []
     t4, t5 = data["tests"].get("B0|B4"), data["tests"].get("B0|B5")
-
-    present = [t for t in (t4, t5) if t]
-    testable = [t for t in present if t["testable"]]
-    if not present:
-        v1 = "no data"
-    elif not testable:
-        v1 = "not testable"
-    elif any(t["noninferior"] for t in testable):
-        v1 = "confirms"
-    elif len(testable) == 2 and all(t["diff"] < -t["delta"] for t in testable):
-        v1 = "refutes"
-    else:
-        v1 = "inconclusive"
     rows.append({"claim": "V1 / A1: SLMs suffice for agent calls (p.3–4)",
-                 "result": "; ".join(f"{a} − B0: {_pp(t['diff'])} (Δ {_margin(t['delta'])}, CI low {_pp(t['ci_low'])})"
-                                     for a, t in (("B4", t4), ("B5", t5)) if t) or "—",
-                 "verdict": v1, "power": _power(t4, t5)})
+                 "result": "; ".join(f"{a} − B0: {_pp(t['diff'])} (Δ {_margin(t['delta'])} from the {t['margin_from']}, "
+                                     f"CI low {_pp(t['ci_low'])})" for a, t in (("B4", t4), ("B5", t5)) if t) or "—",
+                 "verdict": v1_verdict(t4, t5), "power": _power(t4, t5)})
 
     fraction = data["arms"].get("B5", {}).get("replaceable_fraction")
     rows.append({"claim": "A4 / A11: calls are narrow, subtasks simple (p.5, p.7)",
@@ -179,14 +270,7 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
                  "verdict": "descriptive (the SPEC fixes no number for 'high')" if fraction else "no data", "power": "—"})
 
     rows.append(_appendix_b(data))
-
-    b0f, b4f = data["formats"].get("B0"), data["formats"].get("B4")
-    if b0f and b4f:
-        rate = lambda f: sum(e["valid"] for e in f.values()) / sum(e["n"] for e in f.values())  # noqa: E731
-        a5 = ("confirms" if rate(b4f) >= rate(b0f) else "refutes", f"B4 {_pct(rate(b4f))} vs B0 {_pct(rate(b0f))} valid")
-    else:
-        a5 = ("no data", "—")
-    rows.append({"claim": "A5: one format with a trained SLM is preferable (p.6)", "result": a5[1], "verdict": a5[0], "power": "—"})
+    rows.append(_a5(data))
 
     a6, v3, av2 = [], [], []
     for u in utilizations(data) or [""]:
@@ -197,15 +281,15 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
         elif b5_cost >= base_cost:
             a6.append((u, "refutes"))
         else:
-            a6.append((u, "confirms" if _passes_v1(data, "B5") else "inconclusive"))
+            a6.append((u, "confirms" if _passes_v1(data, "B5") else _why_not([outcome(t5)])))
         trained = [c for a in TRAINED if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
         if base_cost is None:
             v3.append((u, "no data"))
         elif not trained:
-            v3.append((u, "inconclusive (no trained arm passes V1)"))
+            v3.append((u, f"{_why_not([outcome(t) for t in (t4, t5) if t])} (no trained arm passes V1)"))
         else:
             ratio = base_cost / min(trained)
-            v3.append((u, f"{'confirms' if ratio >= 3 else 'refutes'} ({ratio:.1f}× vs {base})"))
+            v3.append((u, f"{'confirms' if ratio >= data['v3_min_ratio'] else 'refutes'} ({ratio:.1f}× vs {base})"))
         slm_costs = [c for a in TRAINED for c in [_cost(data, a, u)] if c is not None]
         b1 = _cost(data, "B1", u)
         av2.append((u, "no data" if b1 is None or not slm_costs else
@@ -215,9 +299,11 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
                  "verdict": per_u(a6), "power": _power(t5)})
     rows.append({"claim": "A7: agent logs become data (p.6)", "result": "needs extension 2 (teacher × gold)",
                  "verdict": "not testable in the core", "power": "—"})
-    rows.append({"claim": "V3 / A2: a 7B SLM is 10–30× cheaper (p.4)", "result": "cost per correct query, best trained vs best untrained arm",
+    rows.append({"claim": "V3 / A2: a 7B SLM is 10–30× cheaper (p.4)",
+                 "result": f"cost per correct query, best trained vs best untrained arm (confirms at {data['v3_min_ratio']}×)",
                  "verdict": per_u(v3), "power": _power(t4, t5)})
-    rows.append({"claim": "AV2 / CA3–CA4: centralized scale can be cheaper (p.7–8)", "result": "B1 vs the cheaper of B4, B5",
+    rows.append({"claim": "AV2 / CA3–CA4: centralized scale can be cheaper (p.7–8)",
+                 "result": "B1 vs the cheaper of B4, B5, marginal cost only: the fixed cost and its payback (SPEC §6.6) are not a J1–J8 output",
                  "verdict": per_u(av2), "power": "—"})
     rows.append({"claim": "A2 / A3: adapting is fast and cheap (p.5)", "result": "time and cost per adapter: S5 training manifests",
                  "verdict": "descriptive (not a J1–J8 output)", "power": "—"})
@@ -234,6 +320,18 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     return rows
 
 
+def _a5(data) -> Dict[str, str]:
+    row = {"claim": "A5: one format with a trained SLM is preferable (p.6)", "power": "—"}
+    b0f, b4f = data["formats"].get("B0"), data["formats"].get("B4")
+    sites = sorted(set(b0f or {}) & set(b4f or {}))
+    if not sites:
+        return {**row, "result": "—", "verdict": "no data"}
+    worse = [s for s in sites if b4f[s]["rate"] < b0f[s]["rate"]]
+    result = ("B4 below B0 on " + ", ".join(f"{s} ({_pct(b4f[s]['rate'])} vs {_pct(b0f[s]['rate'])})" for s in worse)
+              if worse else f"B4 at least B0 on all {len(sites)} call sites")
+    return {**row, "result": result, "verdict": "refutes" if worse else "confirms"}
+
+
 def _appendix_b(data) -> Dict[str, str]:
     row = {"claim": "Appendix B: the LLM keeps unstructured error resolution (p.16)", "power": _power(data["repair_test"])}
     per_call, repair = data["judgments"]["per_call"], data["repair_test"]
@@ -242,13 +340,17 @@ def _appendix_b(data) -> Dict[str, str]:
     routine = {site: e["agreement"]["rate"] for site, e in per_call["per_call_site"].items()
                if site in ROUTINE and e["agreement"] and e["agreement"]["rate"] is not None}
     passes_routine = bool(routine) and all(rate >= data["concordance_min"] for rate in routine.values())
-    loses_repair = not repair["noninferior"]
-    result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])}); routine agreement: "
-              + ", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())))
-    if not repair["testable"]:
-        verdict = "not testable"
+    repaired = outcome(repair)
+    result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])} from the {repair['margin_from']}), "
+              f"{repaired}; routine agreement: " + ", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())))
+    if not passes_routine:
+        verdict = "refutes (the SLM loses on the routine)"
+    elif repaired == "non-inferior":
+        verdict = "refutes (the SLM ties on repair)"
+    elif repaired == "worse":
+        verdict = "confirms"
     else:
-        verdict = "confirms" if loses_repair and passes_routine else "refutes"
+        verdict = _why_not([repaired])
     return {**row, "result": result, "verdict": verdict}
 
 
@@ -257,31 +359,33 @@ def _appendix_b(data) -> Dict[str, str]:
 def steps(data: Dict[str, Any]) -> List[Dict[str, str]]:
     j = data["judgments"]
     train, j5, j6, j7 = j["teacher_train_cost"], j["j5"], j["j6"], j["j7"]
+    unmeasured = "not measured by J1–J8"
     rows = [{"step": "S1 · collection", "did": (f"{train['calls']} teacher calls logged on train (C1)" if train else "—"),
              "cost": (_usd(train["total"].get("standard")) if train else "—"), "changed": "the training data exists"}]
     if j5:
         c = j5["curation"]["total"]
         rows.append({"step": "S2 · curation",
                      "did": (f"{c['invocations']} invocations; {c['passed_filter']} passed the production signal; "
+                             f"{c.get('masked_sql', 0)} SQL completions dropped because masking changed them; "
                              f"{c['exact_duplicates']} exact and {c['near_duplicates']} near duplicates removed; "
                              f"{sum(j5['curation']['mask_detections'].values())} sensitive-data detections masked; paraphrase not applied"),
-                     "cost": "—", "changed": f"{c['kept']} training examples"})
+                     "cost": unmeasured, "changed": f"{c['kept']} training examples"})
         calib = j5["assignment"]["calib"]
         rows.append({"step": "S3 · clustering",
                      "did": f"{j5['k']} clusters on prompt+action, ARI {j5['ari_call_sites']:.3f} against call sites",
-                     "cost": "—", "changed": (f"assignment by prompt: {_pct(j5['assignment']['train_in_sample'])} in sample, "
-                                             f"{_pct(calib['rate']) if calib else '—'} on calib")})
+                     "cost": unmeasured, "changed": (f"assignment by prompt: {_pct(j5['assignment']['train_in_sample'])} in sample, "
+                                                     f"{_pct(calib['rate']) if calib else '—'} on calib")})
     else:
         rows += [{"step": "S2 · curation", "did": "—", "cost": "—", "changed": "—"},
                  {"step": "S3 · clustering", "did": "—", "cost": "—", "changed": "—"}]
     rows.append({"step": "S4 · selection", "did": (f"zero-shot on calib: " + ", ".join(
-        f"{n} {s:.3f}" for n, s in sorted(j6["score"].items())) if j6 else "—"), "cost": "—",
+        f"{n} {s:.3f}" for n, s in sorted(j6["score"].items())) if j6 else "—"), "cost": unmeasured,
         "changed": f"base {j6['choice']} (by {j6['decided_by']})" if j6 else "—"})
     rows.append({"step": "S5 · specialization", "did": f"one adapter per cluster (adapters fact {j7['adapters'][:12]})" if j7 else "—",
-                 "cost": "S5 training manifests", "changed": _test_line(data, "B3|B4")})
+                 "cost": "S5 training manifests (not a J1–J8 output)", "changed": _test_line(data, "B3|B4")})
     rows.append({"step": "S6 · router", "did": ("allocation: " + ", ".join(f"{c} → {e}" for c, e in sorted(j7["allocation"].items()))
                                                  if j7 else "—"),
-                 "cost": "—", "changed": _test_line(data, "B4|B5")})
+                 "cost": unmeasured, "changed": _test_line(data, "B4|B5")})
     return rows
 
 
@@ -289,33 +393,35 @@ def _test_line(data, key) -> str:
     test = data["tests"].get(key)
     if not test:
         return "—"
-    a, b = key.split("|")
-    return f"{b} − {a}: {_pp(test['diff'])} (CI low {_pp(test['ci_low'])})"
+    reference_arm, candidate = key.split("|")
+    return f"{candidate} − {reference_arm}: {_pp(test['diff'])} (CI low {_pp(test['ci_low'])}), {outcome(test)}"
 
 
 # ---------------------------------------------------------------- the test registry
 
 def test_registry(root: Optional[Path] = None) -> Dict[str, Any]:
-    """Test-split executions as committed: manifests, and intents without one (interrupted)."""
+    """Test-split executions as F1 commits them (`registry/test/`), read at HEAD: each intent, and
+    its manifest if the execution ended; an intent without one is an interrupted execution."""
     root = root or paths.ROOT
-    listed = subprocess.run(["git", "-C", str(root), "ls-files", "runs"], capture_output=True, text=True)
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    listed = git("ls-tree", "-r", "--name-only", "HEAD", REGISTRY_DIR)
     if listed.returncode != 0:
-        return {"available": False, "runs": []}
-    by_run: Dict[str, set] = {}
-    for line in listed.stdout.splitlines():
-        parts = Path(line).parts
-        if len(parts) >= 3:
-            by_run.setdefault(parts[1], set()).add(parts[2])
+        return {"available": False, "reason": (listed.stderr.strip() or "git failed")[:200], "runs": []}
+    files = {Path(line).name for line in listed.stdout.splitlines()}
+    run_ids = sorted({name.rsplit(".", 2)[0] for name in files if name.endswith((".intent.json", ".manifest.json"))})
     runs = []
-    for run_id, files in sorted(by_run.items()):
-        if "manifest.json" in files:
-            found = json.loads((root / "runs" / run_id / "manifest.json").read_text())
-            if found.get("split") == "test":
-                runs.append({"run_id": run_id, "type": found.get("type"), "arm": found.get("arm"),
-                             "status": found.get("status"), "commit": found.get("commit")})
-        elif "intent.json" in files:
-            runs.append({"run_id": run_id, "type": None, "arm": None, "status": "interrupted (intent, no manifest)",
-                         "commit": None})
+    for run_id in run_ids:
+        name = f"{run_id}.manifest.json" if f"{run_id}.manifest.json" in files else f"{run_id}.intent.json"
+        shown = git("show", f"HEAD:{REGISTRY_DIR}/{name}")
+        if shown.returncode != 0:
+            raise JudgmentError(f"cannot read {REGISTRY_DIR}/{name} at HEAD")
+        found = json.loads(shown.stdout)
+        ended = name.endswith(".manifest.json")
+        runs.append({"run_id": run_id, "type": found.get("type"), "arm": found.get("arm"), "engine": found.get("engine"),
+                     "status": found.get("status") if ended else "interrupted (intent, no manifest)",
+                     "commit": found.get("commit"), "prereg_hash": found.get("prereg_hash")})
     return {"available": True, "runs": runs}
 
 
@@ -420,13 +526,14 @@ def render(data: Dict[str, Any]) -> str:
         if a:
             costs = ", ".join(f"{u + ': ' if u else ''}{_usd(c)}" for u, c in
                               sorted(a["cost_per_correct"].items(), key=lambda kv: float(kv[0].rstrip("%") or 0)))
+            usage = a["cost_label"] + (f", lower bound ({a['failed_unbilled']} failed calls unpriced)" if a["lower_bound"] else "")
             rows.append([arm, a["n"], _pct(a["ex"])] + [_pct(a["by_difficulty"].get(d)) for d in difficulties]
-                        + [costs, a["cost_label"]])
+                        + [costs, usage])
     parts += [_table(["arm", "n", "EX"] + [f"EX {d}" for d in difficulties] + ["cost per correct query (standard prices)", "usage"], rows), ""]
     parts += ["## The SPEC §5 map", "", _table(["claim", "result", "verdict", "power"],
-                                               [[r["claim"], r["result"], r["verdict"], r["power"]] for r in claims_map(data)]), ""]
+                                               [[r["claim"], r["result"], r["verdict"], r["power"]] for r in data["map"]]), ""]
     parts += ["## S1–S6: what each step did, cost and changed", "",
-              _table(["step", "what it did", "cost", "what it changed"], [[s["step"], s["did"], s["cost"], s["changed"]] for s in steps(data)]), ""]
+              _table(["step", "what it did", "cost", "what it changed"], [[s["step"], s["did"], s["cost"], s["changed"]] for s in data["steps"]]), ""]
     parts += ["## S4 desk triage", ""]
     triage = (j6 or {}).get("triage") or []
     if triage:
@@ -446,17 +553,20 @@ def render(data: Dict[str, Any]) -> str:
         rows = []
         for site, e in per_call["per_call_site"].items():
             rows.append([site, e["n"], _pct(e["format_valid_rate"]),
-                         f"{_pct(e['gold']['ex_replay'])} vs teacher {_pct(e['gold']['ex_teacher'])}" if e["gold"] else "—",
+                         (f"{_pct(e['gold']['ex_replay'])} vs teacher {_pct(e['gold']['ex_teacher'])} per call; "
+                          f"{_pct(e['gold']['ex_by_question']['replay'])} vs {_pct(e['gold']['ex_by_question']['teacher'])} "
+                          f"per question") if e["gold"] else "—",
                          _pct(e["agreement"]["rate"]) if e["agreement"] else "—"])
         parts += [f"## Per-call-site evaluation ({per_call.get('arm') or per_call.get('engine')}, teacher's context)", "",
                   _table(["call site", "n", "format valid", "EX (gold)", "agreement with the teacher (fidelity)"], rows), ""]
     registry = data["registry"]
     parts += ["## Test registry", ""]
     if not registry["available"]:
-        parts.append("Not a git checkout: the registry could not be read.")
+        parts.append(f"The registry could not be read from git: {registry['reason']}.")
     elif registry["runs"]:
-        parts.append(_table(["execution", "type", "arm", "status", "commit"],
-                            [[r["run_id"], r["type"] or "—", r["arm"] or "—", r["status"], (r["commit"] or "—")[:12]] for r in registry["runs"]]))
+        parts.append(_table(["execution", "type", "arm", "status", "commit", "pre-registration"],
+                            [[r["run_id"], r["type"] or "—", r["arm"] or "—", r["status"], (r["commit"] or "—")[:12],
+                              (r["prereg_hash"] or "—")[:12]] for r in registry["runs"]]))
     else:
         parts.append("No test-split execution is committed.")
     parts += ["", "## Error analysis, limitations, external references", "",
@@ -464,15 +574,16 @@ def render(data: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def run(plan_path: str, config: Dict[str, Any], ex_table: Optional[Callable] = None,
+def run(plan_path: str, config: Dict[str, Any], ex_table: Optional[Callable] = None, ex_summary: Optional[Callable] = None,
         noninferiority: Optional[Callable] = None, out_root: Optional[Path] = None) -> Path:
     import yaml
     plan = yaml.safe_load(Path(plan_path).read_text())
-    if ex_table is None:
-        from bench.judge.j1 import ex_table  # F2's J1
+    if ex_table is None or ex_summary is None:
+        from bench.judge import j1  # F2's J1
+        ex_table, ex_summary = ex_table or j1.ex_table, ex_summary or j1.ex_summary
     if noninferiority is None:
         from bench.judge.j4 import noninferiority  # F2's J4
-    data = gather(plan, config, ex_table, noninferiority)
+    data = gather(plan, config, ex_table, ex_summary, noninferiority)
     data["map"], data["steps"] = claims_map(data), steps(data)
     raw = canonical(data)
     out = (out_root or paths.ROOT / "reports") / hashlib.sha256(raw).hexdigest()

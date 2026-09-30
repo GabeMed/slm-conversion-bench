@@ -35,6 +35,15 @@ def test_embeds_curated_examples_prompt_and_prompt_with_action(tmp_path, monkeyp
     assert manifest["tokens"]["prompt"]["truncated_fraction"] == 1.0 and manifest["tokens"]["prompt"]["n"] == 2
 
 
+def test_counts_only_the_texts_longer_than_the_limit(tmp_path, monkeypatch):
+    config_path, _ = repo(tmp_path, monkeypatch, {"clustering": {"embedding": {"max_seq_length": 100}}})
+    short = {**example("1", "select_tables"), "prompt": [{"role": "user", "content": "a short prompt"}]}
+    curate_run("curate-y", [short, example("2", "filter_column"), example("3", "revise")])
+    out = run_embed("curate-y", str(config_path), embed_fn=fake_embed, count_tokens=fake_tokens)
+    tokens = json.loads((out / "manifest.json").read_text())["tokens"]["prompt"]
+    assert (tokens["n"], tokens["truncated"]) == (3, 2) and tokens["truncated_fraction"] == pytest.approx(2 / 3)
+
+
 def test_embeds_an_agent_run_by_invocation_first_prompt_and_last_parsed_action(tmp_path, monkeypatch):
     config_path, _ = repo(tmp_path, monkeypatch)
     failed = call("agent-c", "5", "select_tables", response="x", parsed_ok=False)

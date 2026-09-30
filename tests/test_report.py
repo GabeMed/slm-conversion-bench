@@ -9,39 +9,57 @@ import yaml
 
 from bench import paths, report
 from bench.contracts import clusters, facts
-from bench.judge.base import read_jsonl, read_result, relative, write_result
-from fixtures.world import fake_noninferiority, unit
+from bench.judge.base import JudgmentError, read_jsonl, read_result, relative, write_result
+from fixtures.world import fake_ex_summary, fake_ex_table, fake_noninferiority, unit
 
-VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute")
-
-
-def j4_results(ok4=True, ok5=True, testable=True, diff=-0.01):
-    t = lambda ok: {"d": 0.1, "delta": 0.04, "diff": diff, "ci_low": 0.0 if ok else -0.09,  # noqa: E731
-                    "noninferior": ok, "power": 0.8, "testable": testable}
-    return {"B0|B4": t(ok4), "B0|B5": t(ok5)}
+VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute",
+              "no verdict")
 
 
-def data_with(tests, costs, formats=None):
+def j4(ok=True, testable=True, diff=-0.01, pilot=0.1, ci_low=None):
+    """A J4 result as F2's J4 returns it."""
+    return {"d": 0.1, "d_pilot": pilot, "margin_from": "pilot" if pilot is not None else "pairs", "delta": 0.04,
+            "diff": diff, "ci_low": ci_low if ci_low is not None else (0.0 if ok else -0.09),
+            "noninferior": (ok if testable else None) if pilot is not None else None, "power": 0.8, "testable": testable}
+
+
+def j4_results(ok4=True, ok5=True, testable=True, diff=-0.01, pilot=0.1):
+    return {"B0|B4": j4(ok4, testable, diff, pilot), "B0|B5": j4(ok5, testable, diff, pilot)}
+
+
+def data_with(tests, costs, formats=None, repair=None, per_call=None):
     arms = {arm: {"cost_per_correct": c, "replaceable_fraction": None} for arm, c in costs.items()}
-    return {"arms": arms, "tests": tests, "formats": formats or {}, "repair_test": None,
-            "judgments": {"j5": None, "per_call": None}, "concordance_min": 0.95}
+    return {"arms": arms, "tests": tests, "formats": formats or {}, "repair_test": repair,
+            "judgments": {"j5": None, "per_call": per_call}, "concordance_min": 0.95, "v3_min_ratio": 3}
 
 
 def row(rows, prefix):
     return next(r for r in rows if r["claim"].startswith(prefix))
 
 
-def test_v1_confirms_refutes_and_not_testable():
+def test_the_outcome_of_a_comparison():
+    assert report.outcome(None) == "no data"
+    assert report.outcome(j4(pilot=None)) == "no pilot"
+    assert report.outcome(j4(testable=False)) == "not testable"
+    assert report.outcome(j4(True)) == "non-inferior"
+    assert report.outcome(j4(False, diff=-0.2)) == "worse"
+    assert report.outcome(j4(False, diff=-0.02)) == "inconclusive"
+
+
+def test_v1_confirms_refutes_and_says_why_not():
     costs = {"B0": {"": 1.0}}
     assert row(report.claims_map(data_with(j4_results(), costs)), "V1")["verdict"] == "confirms"
     assert row(report.claims_map(data_with(j4_results(False, False, diff=-0.2), costs)), "V1")["verdict"] == "refutes"
     assert row(report.claims_map(data_with(j4_results(False, False), costs)), "V1")["verdict"] == "inconclusive"
     assert row(report.claims_map(data_with(j4_results(testable=False), costs)), "V1")["verdict"] == "not testable"
     assert row(report.claims_map(data_with({}, costs)), "V1")["verdict"] == "no data"
+    # without the pilot's d, J4 gives no verdict, and the report never reads it as a pass
+    no_pilot = row(report.claims_map(data_with(j4_results(pilot=None), costs)), "V1")
+    assert no_pilot["verdict"] == "no verdict (no pilot d)" and "from the pairs" in no_pilot["result"]
 
 
 def test_cost_claims_per_utilization():
-    tests = {**j4_results(), "B0|B1": {"testable": True, "noninferior": False}}
+    tests = {**j4_results(), "B0|B1": j4(False)}
     costs = {"B0": {"": 1.0}, "B1": {"": 0.2}, "B4": {"20%": 0.5, "100%": 0.1}, "B5": {"20%": 0.4, "100%": 0.05}}
     rows = report.claims_map(data_with(tests, costs))
     # B1 is not non-inferior to B0, so the best arm without training is B0 at $1.00
@@ -50,30 +68,68 @@ def test_cost_claims_per_utilization():
     assert row(rows, "AV2")["verdict"] == "20%: refutes the paper (AV2 wins) · 100%: does not refute"
     worse = {**costs, "B5": {"20%": 2.0, "100%": 1.5}}
     assert row(report.claims_map(data_with(tests, worse)), "A6")["verdict"] == "20%: refutes · 100%: refutes"
+    unpiloted = row(report.claims_map(data_with(j4_results(pilot=None), costs)), "V3")["verdict"]
+    assert unpiloted.startswith("20%: no verdict (no pilot d) (no trained arm passes V1)")
 
 
-def test_format_claim_compares_all_invocations():
-    formats = {"B0": {"a": {"n": 10, "valid": 9}}, "B4": {"a": {"n": 10, "valid": 10}}}
+def test_format_claim_compares_each_call_site():
+    formats = {"B0": {"a": {"rate": 0.9}, "b": {"rate": 1.0}}, "B4": {"a": {"rate": 1.0}, "b": {"rate": 1.0}}}
     assert row(report.claims_map(data_with({}, {}, formats)), "A5")["verdict"] == "confirms"
-    formats["B4"]["a"]["valid"] = 8
-    assert row(report.claims_map(data_with({}, {}, formats)), "A5")["verdict"] == "refutes"
+    formats["B4"]["b"]["rate"] = 0.99  # better overall, worse on one call site
+    a5 = row(report.claims_map(data_with({}, {}, formats)), "A5")
+    assert a5["verdict"] == "refutes" and a5["result"].startswith("B4 below B0 on b")
 
 
-def test_registry_reads_committed_test_manifests_and_intents(tmp_path):
+def per_call(rates):
+    return {"per_call_site": {site: {"agreement": {"rate": rate}} for site, rate in rates.items()}}
+
+
+def test_appendix_b_confirms_only_when_repair_is_worse_and_the_routine_passes():
+    routine = per_call({"filter_column": 0.97, "select_tables": 0.99})
+    verdict = lambda repair, calls=routine: row(report.claims_map(data_with({}, {}, repair=repair, per_call=calls)),  # noqa: E731
+                                               "Appendix B")["verdict"]
+    assert verdict(j4(False, diff=-0.2)) == "confirms"
+    assert verdict(j4(True)) == "refutes (the SLM ties on repair)"
+    assert verdict(j4(False, diff=-0.02)) == "inconclusive"
+    assert verdict(j4(pilot=None)) == "no verdict (no pilot d)"
+    assert verdict(j4(False, diff=-0.2), per_call({"filter_column": 0.90})) == "refutes (the SLM loses on the routine)"
+
+
+def test_the_steps_table_reads_the_judgments():
+    curation = {"total": {"invocations": 10, "passed_filter": 8, "masked_sql": 1, "exact_duplicates": 2,
+                          "near_duplicates": 3, "kept": 2}, "mask_detections": {"email": 4}}
+    data = data_with({"B3|B4": j4(True, diff=0.1)}, {})
+    data["judgments"].update(teacher_train_cost={"calls": 10, "total": {"standard": 1.5}}, j6=None, j7=None, j5={
+        "curation": curation, "k": 3, "ari_call_sites": 0.5, "assignment": {"train_in_sample": 1.0, "calib": {"rate": 0.75}}})
+    rows = {r["step"].split(" ")[0]: r for r in report.steps(data)}
+    assert rows["S1"]["did"].startswith("10 teacher calls") and rows["S1"]["cost"] == "$1.5"
+    assert ("8 passed the production signal; 1 SQL completions dropped because masking changed them; "
+            "2 exact and 3 near duplicates removed; 4 sensitive-data detections masked") in rows["S2"]["did"]
+    assert rows["S2"]["changed"] == "2 training examples" and "75.0% on calib" in rows["S3"]["changed"]
+    assert rows["S5"]["changed"] == "B4 − B3: +10.0 pp (CI low +0.0 pp), non-inferior"
+
+
+def test_registry_reads_f1s_committed_intents_and_manifests(tmp_path):
     def git(*args):
         subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
     git("init", "-q")
-    for run_id, files in {"agent-B0-test-1": {"manifest.json": {"split": "test", "type": "agent", "arm": "B0",
-                                                                  "status": "done", "commit": "a" * 40}},
-                          "agent-B4-test-2": {"intent.json": {"arm": "B4"}},
-                          "agent-B0-train-3": {"manifest.json": {"split": "train"}}}.items():
-        (tmp_path / "runs" / run_id).mkdir(parents=True)
-        for name, content in files.items():
-            (tmp_path / "runs" / run_id / name).write_text(json.dumps(content))
-    git("add", "-f", "runs")
+    git("config", "user.email", "t@example.org")
+    git("config", "user.name", "t")
+    registry = tmp_path / "registry" / "test"
+    registry.mkdir(parents=True)
+    for name, content in {"agent-B0-test-1.intent.json": {"arm": "B0", "type": "agent"},
+                          "agent-B0-test-1.manifest.json": {"type": "agent", "arm": "B0", "status": "done",
+                                                            "commit": "a" * 40, "prereg_hash": "b" * 64},
+                          "agent-B4-test-2.intent.json": {"arm": "B4", "type": "agent"}}.items():
+        (registry / name).write_text(json.dumps(content))
+    git("add", "registry")
+    git("commit", "-q", "-m", "registry")
+    (registry / "agent-B0-test-1.manifest.json").write_text(json.dumps({"status": "edited after the commit"}))
     found = report.test_registry(tmp_path)
     assert found["available"] and [r["run_id"] for r in found["runs"]] == ["agent-B0-test-1", "agent-B4-test-2"]
+    assert found["runs"][0]["status"] == "done" and found["runs"][0]["prereg_hash"] == "b" * 64  # as committed
     assert found["runs"][1]["status"].startswith("interrupted")
+    assert not report.test_registry(tmp_path / "not-a-repo")["available"]
 
 
 # ---------------------------------------------------------------- end to end
@@ -81,18 +137,6 @@ def test_registry_reads_committed_test_manifests_and_intents(tmp_path):
 TEST_IDS = [str(q) for q in range(5000, 5400)]
 CALIB_IDS = [str(q) for q in range(2000, 2060)]
 QUALITY = {"B0": 1.0, "B1": 0.7, "B2-production": 0.6, "B2-cheap": 0.5, "B3": 0.5, "B4": 0.99, "B5": 0.995}
-
-
-def fake_ex_table(eval_dirs):
-    """A stand-in for F2's J1: the per-question table of eval executions."""
-    rows = []
-    for directory in eval_dirs:
-        evaluated = json.loads((directory / "manifest.json").read_text())
-        source = json.loads((paths.RUNS / evaluated["source_run_id"] / "manifest.json").read_text())
-        rows += [{"arm": source["arm"], "split": source["split"], "question_id": r["question_id"],
-                  "difficulty": r["difficulty"], "correct": r["correct"]}
-                 for r in read_jsonl(directory / "results.jsonl")]
-    return rows
 
 
 @pytest.fixture
@@ -113,7 +157,9 @@ def pipeline(tmp_path, monkeypatch):
     config["prices"] = {"as_of": "2026-09-30", "table": {
         "teacher-model": {"input_per_mtok": 3.0, "cached_input_per_mtok": 0.3, "output_per_mtok": 12.0, "batch_discount": 0.5},
         "engine-model": {"input_per_mtok": 0.2, "cached_input_per_mtok": 0.02, "output_per_mtok": 0.6, "batch_discount": 0.5}}}
-    config["cost"].update(gpu_price_per_hour={"L4": 0.8}, p95_slo_ms=1000)
+    config["cost"]["p95_slo_ms"] = 1000
+    config["modal"] = {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}  # F3's key
+    config["stats"] = {"n_boot": 100}  # F2's key
     config["allocation"]["min_calls"] = 5
     config["clustering"].update(k_min=2, k_max=6, n_init=3)
     config["selection"]["triage"] = [
@@ -157,7 +203,8 @@ def pipeline(tmp_path, monkeypatch):
     assigned = lambda c: clusters.assign(c["prompt_messages"], payload)  # noqa: E731
     # load test and S6 on calib
     for concurrency, p95, rps in ((1, 300, 3.0), (8, 800, 12.0), (32, 2500, 20.0)):
-        write_run(f"loadtest-{concurrency}", {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency},
+        write_run(f"loadtest-{concurrency}", {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
+                                              "prefix_cache": True},
                   files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
                                                          "request_throughput": {"unit": "requests/sec", "avg": rps}}})
     j8_path = j8.run(["loadtest-1", "loadtest-8", "loadtest-32"], config)
@@ -189,15 +236,23 @@ def pipeline(tmp_path, monkeypatch):
             b5 += replay([c], "agent-B5-test", "slm:qwen3-8b+lora:c" if engine == "slm" else "cheap_alt", 1.0,
                          cluster_of=assigned)
     arms_calls["B5"] = b5
-    plan = {"split": "test", "arms": {}, "format": {}}
-    b0_ok = {q: unit("B0", q) < 0.8 for q in TEST_IDS}
+    plan = {"split": "test", "arms": {}, "format": {}, "pilot": {"arms": {}}}
+    b0_ok = {q: unit("B0", q) < 0.8 for q in TEST_IDS + CALIB_IDS}
+
+    def evaluation(eval_run_id, source_run_id, arm, split, ids):
+        """An end-to-end eval execution, as F2 writes it: no status, the arm and engine it scored."""
+        engine = {"B2-production": "production_llm", "B2-cheap": "cheap_alt"}.get(arm)
+        rows = [{"question_id": q, "difficulty": ("simple", "moderate", "challenging")[int(q) % 3],
+                 "correct": b0_ok[q] if unit(arm, "keep", q) < QUALITY[arm] else not b0_ok[q]} for q in ids]
+        write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "arm": arm.split("-")[0], "engine": engine,
+                                "split": split, "n": len(rows), "status": None}, files={"results.jsonl": rows})
     for arm, calls in arms_calls.items():
         run_id = f"agent-{arm}-test"
         calls = [{**c, "run_id": run_id} for c in calls]
         run(run_id, {"type": "agent", "arm": arm.split("-")[0], "split": "test", "question_ids": TEST_IDS}, calls)
-        rows = [{"question_id": q, "difficulty": ("simple", "moderate", "challenging")[int(q) % 3],
-                 "correct": b0_ok[q] if unit(arm, "keep", q) < QUALITY[arm] else not b0_ok[q]} for q in TEST_IDS]
-        write_run(f"eval-{arm}", {"type": "eval", "source_run_id": run_id}, files={"results.jsonl": rows})
+        evaluation(f"eval-{arm}", run_id, arm, "test", TEST_IDS)
+        evaluation(f"eval-{arm}-pilot", f"agent-{arm}-pilot", arm, "calib", CALIB_IDS)  # the pilot, on calib
+        plan["pilot"]["arms"][arm] = f"eval-{arm}-pilot"
         has_slm = any(c["model_role"] == "slm" for c in calls)
         cost = j3.run(run_id, f"eval-{arm}", str(j8_path) if has_slm else None, config)
         plan["arms"][arm] = {"eval": f"eval-{arm}", "cost": relative(cost)}
@@ -210,6 +265,8 @@ def pipeline(tmp_path, monkeypatch):
     per_call_eval("eval-B0-test-per-call", "agent-B0-test", b0, gold_correct("teacher-test", 0.9))
     per_call_eval("eval-B4-test-per-call", "replay-B4-test", b4_replay, gold_correct("teacher-test", 0.9))
     reads, result = j2.judge_replay("replay-B4-test", "eval-B4-test-per-call", "eval-B0-test-per-call")
+    calib_reads, calib_result = j2.judge_replay("replay-B4-calib", "eval-B4-calib", "eval-B0-calib-per-call")
+    plan["pilot"]["per_call"] = relative(write_result("J2", calib_reads, calib_result))
     plan.update(per_call=relative(write_result("J2", reads, result)), j5=relative(j5_path), j6=relative(j6_path),
                 j7=relative(j7_path), j8=relative(j8_path),
                 teacher_train_cost=relative(j3.run("agent-B0-train", None, None, config)))
@@ -219,7 +276,7 @@ def pipeline(tmp_path, monkeypatch):
 
 
 def test_report_end_to_end_on_a_fake_execution(pipeline):
-    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_noninferiority)
+    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority)
     data = json.loads((out / "report.json").read_text())
     markdown = (out / "report.md").read_text()
     for heading in ("## EX and cost per correct query", "## The SPEC §5 map", "## S1–S6", "## S4 desk triage",
@@ -234,6 +291,9 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     assert data["arms"]["B4"]["cost_per_correct"] == {u: b4_cost[f"standard@{u}"] for u in ("20%", "50%", "100%")}
     assert data["judgments"]["j7"]["allocation"] == pipeline["allocation"]
     assert len(data["map"]) == 12 and all(any(v in r["verdict"] for v in VOCABULARY) for r in data["map"])
+    # every margin came from the pilot: no comparison is left without a verdict
+    assert all(t["margin_from"] == "pilot" for t in data["tests"].values()) and data["repair_test"]["d_pilot"] is not None
+    assert "no verdict" not in markdown
     assert data["arms"]["B5"]["replaceable_fraction"] is not None
     j5 = read_result(pipeline["j5"], "J5")["result"]
     assert f"ARI {j5['ari_call_sites']:.3f}" in markdown
@@ -245,4 +305,12 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     manifest = json.loads((pipeline["datasets"] / "manifest.json").read_text())
     assert set(manifest["clusters"]) == set(j5["clusters"])
     # re-running gives the same report
-    assert report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_noninferiority) == out
+    assert report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority) == out
+
+
+def test_report_refuses_an_eval_of_another_arm(pipeline):
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    plan["arms"]["B1"]["eval"], plan["arms"]["B3"]["eval"] = plan["arms"]["B3"]["eval"], plan["arms"]["B1"]["eval"]
+    pipeline["plan"].write_text(yaml.safe_dump(plan))
+    with pytest.raises(JudgmentError, match="is not B1 on test"):
+        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority)

@@ -7,8 +7,10 @@ correct query.
   `no_cache` (cached tokens at the input price) and `batch` (standard less the entry's
   `batch_discount`, when the table has one). Retries are calls and are priced (SPEC §2).
 - **`usage.source`**: `missing` on a call that returned a response is refused (the cost would be
-  invented); a call that failed before any response carries no usage and is counted, unpriced, as
-  `failed_unbilled`; `estimated` is priced and the result is labelled `estimated`.
+  invented). A call that failed before any response (a timeout, an HTTP error) has no usage by
+  construction (C1): it is counted as `failed_unbilled` and not priced, and the result is marked a
+  `lower_bound`, since a provider may bill such a call; refusing it would leave the arm with no cost
+  at all. `estimated` usage is priced and the result is labelled `estimated`.
 - **The SLM** has no token price: each SLM call costs the load test's cost per request (J8) at each
   utilization of `cost.utilizations`, so an arm with SLM calls has one total per API variant and
   utilization (`standard@50%`).
@@ -130,9 +132,11 @@ def judge(calls: List[dict], question_ids: List[str], correct: Optional[Dict[str
         by_site.setdefault(call["call_site"], []).append(call)
     return {
         "prices_as_of": prices.get("as_of"), "label": "estimated" if priced["estimated"] else "measured",
+        "lower_bound": priced["failed_unbilled"] > 0,
         "n_questions": len(question_ids), "n_correct": n_correct, **{k: priced[k] for k in
                                                                     ("calls", "slm_calls", "failed_unbilled", "estimated", "tokens")},
         "total": totals,
+        "per_call": {k: v / priced["calls"] if v is not None and priced["calls"] else None for k, v in totals.items()},
         "per_question": {k: v / len(question_ids) if v is not None and question_ids else None for k, v in totals.items()},
         "per_correct": {k: v / n_correct if v is not None and n_correct else None for k, v in totals.items()},
         "by_call_site": {site: price_calls(site_calls, prices, slm_per_request) for site, site_calls in sorted(by_site.items())},
@@ -155,12 +159,14 @@ def slm_cost_per_request(j8_path: Optional[str], calls: List[dict]) -> Tuple[Opt
 
 
 def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config: Dict[str, Any]):
-    found = require_done(run_id, type=("agent", "replay", "single"))
+    found = require_done(run_id, type=("agent", "replay"))
     calls = calls_of(run_id)
     reads: Dict[str, Any] = {"run": reference(run_id)}
     correct = None
     if eval_run_id:
         evaluated = require_done(eval_run_id, type="eval")
+        if evaluated.get("per_call"):
+            raise JudgmentError(f"{eval_run_id} is a per-call evaluation: the cost per correct query needs the end-to-end one")
         if evaluated.get("source_run_id") != run_id:
             raise JudgmentError(f"{eval_run_id} evaluated {evaluated.get('source_run_id')}, not {run_id}")
         correct = {r["question_id"]: bool(r["correct"]) for r in read_jsonl(run_dir(eval_run_id) / "results.jsonl")}

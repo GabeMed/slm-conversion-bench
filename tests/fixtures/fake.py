@@ -51,7 +51,10 @@ def write_run(run_id: str, manifest: Dict[str, Any], calls: Optional[List[dict]]
               config: Optional[Dict[str, Any]] = None, files: Optional[Dict[str, Any]] = None) -> Path:
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "manifest.json").write_text(json.dumps({"run_id": run_id, "status": "done", **manifest}, indent=1))
+    manifest = {"run_id": run_id, "status": "done", **manifest}
+    if manifest["status"] is None:  # an eval execution records no status (it writes its manifest last)
+        del manifest["status"]
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=1))
     if calls is not None:
         (run_dir / "calls.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
     if config is not None:

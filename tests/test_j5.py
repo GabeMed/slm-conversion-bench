@@ -92,3 +92,27 @@ def test_refuses_an_embedding_of_another_source(tmp_path, monkeypatch):
         j5.judge("curate-other", train, None, config["clustering"])
     manifest = json.loads((paths.RUNS / "curate-t" / "manifest.json").read_text())
     assert manifest["type"] == "curate"
+
+
+def test_the_calib_rate_counts_calls_the_prompt_sends_elsewhere(tmp_path, monkeypatch):
+    """Calls whose action looks like another call site: their S3 cluster (prompt + action) is not
+    where the prompt alone sends them, and the rate counts them as misses."""
+    from fixtures.fake import TEMPLATES
+    config, _, train, _, calib_calls = build(tmp_path, monkeypatch)
+    odd = [call("agent-c2", str(q), "select_tables", messages=prompt("select_tables", f"question {q}", ""),
+                response=TEMPLATES["generate_candidate"] * 3, parsed={}) for q in range(200, 203)]
+    write_run("agent-c2", {"type": "agent", "arm": "B0", "split": "calib"}, [{**c, "run_id": "agent-c2"} for c in calib_calls] + odd)
+    config_path = tmp_path / "config.yaml"
+    calib2 = run_embed("agent-c2", str(config_path), embed_fn=fake_embed, count_tokens=fake_tokens).name
+    result = j5.judge("curate-t", train, calib2, config["clustering"])[0]
+    assert result["assignment"]["calib"]["n"] == len(calib_calls) + 3
+    assert result["assignment"]["calib"]["rate"] == pytest.approx(len(calib_calls) / (len(calib_calls) + 3))
+
+
+def test_the_calib_embedding_must_be_the_teacher_on_calib(tmp_path, monkeypatch):
+    config, _, train, _, calib_calls = build(tmp_path, monkeypatch)
+    write_run("agent-b1", {"type": "agent", "arm": "B1", "split": "calib"}, [{**c, "run_id": "agent-b1"} for c in calib_calls])
+    b1 = run_embed("agent-b1", str(tmp_path / "config.yaml"), embed_fn=fake_embed, count_tokens=fake_tokens).name
+    with pytest.raises(JudgmentError, match="arm"):
+        j5.judge("curate-t", train, b1, config["clustering"])
+    assert not (paths.ROOT / "judgments" / "J5").exists()  # nothing written when a check fails

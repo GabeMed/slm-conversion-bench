@@ -74,20 +74,56 @@ def per_call_eval(eval_run_id: str, source_run_id: str, calls: List[dict], corre
     rows = [{"question_id": c["question_id"], "call_site": c["call_site"], "invocation_key": c["invocation_key"],
              "correct": bool(c["parsed_ok"] and correct(c))}
             for c in calls if c["call_site"] in GOLD_SITES and c["parsed_ok"]]
-    write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "per_call": True},
+    write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "per_call": True, "status": None},
               files={"results.jsonl": rows})
     return eval_run_id
 
 
 def fake_noninferiority(correct_a: Dict[str, bool], correct_b: Dict[str, bool], delta_cap_pp: float, seed: int,
-                        n_boot: int) -> Dict[str, Any]:
-    """A stand-in for F2's J4 with its signature: b against a, paired by question id, a normal
-    approximation instead of the bootstrap. Proportions, with Δ compared to the cap in pp."""
-    shared = sorted(set(correct_a) & set(correct_b))
-    n = len(shared)
-    diff = sum(correct_b[q] - correct_a[q] for q in shared) / n
-    d = sum(correct_a[q] != correct_b[q] for q in shared) / n
-    delta = (1.6449 + 0.8416) * math.sqrt(d / n)
-    ci_low = diff - 1.6449 * math.sqrt(d / n)
-    return {"d": d, "delta": delta, "diff": diff, "ci_low": ci_low, "noninferior": ci_low >= -delta,
-            "power": 0.8, "testable": delta * 100 <= delta_cap_pp}
+                        n_boot: int, *, d_pilot: Optional[float] = None) -> Dict[str, Any]:
+    """A stand-in for F2's J4 with its contract (bench/judge/j4.py on F2's branch): A, the
+    candidate, against B, the reference, on the same questions; diff = EX_A − EX_B; Δ from
+    `d_pilot` (or from these pairs, with no verdict); non-inferior when the lower bound is above −Δ.
+    A normal approximation stands in for the bootstrap."""
+    from bench.judge import JudgeError
+    if set(correct_a) != set(correct_b) or not correct_a:
+        raise JudgeError("the two arms must be scored on the same questions, and on at least one")
+    ids = sorted(correct_a)
+    diffs = [int(correct_a[q]) - int(correct_b[q]) for q in ids]
+    n = len(ids)
+    d = sum(x != 0 for x in diffs) / n
+    delta = (1.6449 + 0.8416) * math.sqrt((d if d_pilot is None else d_pilot) / n)
+    testable = delta * 100 <= delta_cap_pp
+    ci_low = sum(diffs) / n - 1.6449 * math.sqrt(d / n)
+    return {"n": n, "d": d, "d_pilot": d_pilot, "margin_from": "pairs" if d_pilot is None else "pilot",
+            "delta": delta, "testable": testable, "diff": sum(diffs) / n, "ci_low": ci_low,
+            "noninferior": ci_low > -delta if testable and d_pilot is not None else None, "power": 0.8}
+
+
+def fake_ex_table(eval_run_dirs) -> List[Dict[str, Any]]:
+    """A stand-in for F2's J1 `ex_table`: one row per question of each end-to-end eval execution."""
+    import json
+    from pathlib import Path
+    rows = []
+    for run_dir in map(Path, eval_run_dirs):
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert manifest["type"] == "eval" and not manifest.get("per_call")
+        for line in (run_dir / "results.jsonl").read_text().splitlines():
+            r = json.loads(line)
+            rows.append({"arm": manifest["arm"], "engine": manifest.get("engine"), "split": manifest["split"],
+                         "question_id": r["question_id"], "difficulty": r["difficulty"], "correct": bool(r["correct"]),
+                         "source_run_id": manifest["source_run_id"]})
+    return rows
+
+
+def fake_ex_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A stand-in for F2's J1 `ex_summary`: EX per (arm, engine, split), with its difficulties."""
+    def ex(group):
+        return {"n": len(group), "correct": sum(r["correct"] for r in group),
+                "ex": sum(r["correct"] for r in group) / len(group) if group else None}
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault((row["arm"], row["engine"] or "", row["split"]), []).append(row)
+    return [{"arm": arm, "engine": engine or None, "split": split, **ex(group),
+             "by_difficulty": {d: ex([r for r in group if r["difficulty"] == d]) for d in sorted({r["difficulty"] for r in group})}}
+            for (arm, engine, split), group in sorted(groups.items())]

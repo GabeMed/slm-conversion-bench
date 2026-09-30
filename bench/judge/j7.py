@@ -2,9 +2,11 @@
 
 Per cluster of the centroids, **the cheapest engine that passes on calib**, else the production LLM:
 - the calls of a cluster that have gold (SQL generation and repair) pass by **non-inferiority with
-  margin Δ/2** (J4, the question as the unit), when J4 finds them testable and they number at
-  least `allocation.min_calls`: J4's lower confidence bound on the engine's EX minus the teacher's
-  is at least −Δ/2, with J4's Δ;
+  margin Δ/2** (J4, F2's: the engine is the candidate, the teacher the reference, the question the
+  unit), when they number at least `allocation.min_calls` and J4 finds them testable: J4's lower
+  confidence bound on EX(engine) − EX(teacher) is above −Δ/2. Δ comes from the pilot's discordance
+  (SPEC §6.4): calibration is the pilot, so `d_pilot` is the discordance J4 measures on this
+  cluster's calib pairs;
 - the calls without gold pass by **agreement with the teacher** of at least
   `thresholds.concordance_min`, over at least `allocation.min_calls` calls: a proxy, declared as
   such (D15), which supports no claim per cluster;
@@ -26,8 +28,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from bench.contracts.facts import read_fact, write_fact
 from bench.judge import j2, j3
-from bench.judge.base import (Identity, JudgmentError, calls_of, invocations, read_result, reference, require_done,
-                              result_reference, write_result)
+from bench.judge.base import (Identity, JudgmentError, calls_of, invocations, n_boot, read_result, reference,
+                              require_done, result_reference, write_result)
 
 JUDGMENT = "J7"
 ENGINES = ("cheap_alt", "slm")
@@ -48,8 +50,12 @@ def passes(entry: Optional[Dict[str, Any]], noninferiority: NonInferiority, sett
     verdict: Dict[str, Any] = {"passes": True, "why": []}
     if entry["gold"]:
         gold = entry["gold"]
-        test = plain(noninferiority(gold["by_question"]["teacher"], gold["by_question"]["replay"],
-                                    settings["delta_cap_pp"], settings["seed"], settings["n_boot"]))
+        engine, teacher = gold["by_question"]["replay"], gold["by_question"]["teacher"]
+        args = (settings["delta_cap_pp"], settings["seed"], settings["n_boot"])
+        d = plain(noninferiority(engine, teacher, *args))["d"]  # the calib discordance: the pilot's
+        test = plain(noninferiority(engine, teacher, *args, d_pilot=d))
+        # at or above −Δ/2: with no discordance on calib (d = 0, so Δ = 0) the bound is exactly 0, and an
+        # engine that answers every calib question as the teacher does passes
         ok = gold["n"] >= settings["min_calls"] and test["testable"] and test["ci_low"] >= -test["delta"] / 2
         verdict["gold"] = {"n": gold["n"], "ex_engine": gold["ex_replay"], "ex_teacher": gold["ex_teacher"],
                            "j4": test, "passes": bool(ok)}
@@ -129,12 +135,14 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
     b4_run, _ = replays["slm"]
     b4 = require_done(b4_run, type="replay", arm="B4", split="calib")
     recorded = b4.get("facts") or {}
-    if recorded and (recorded.get("centroids"), recorded.get("adapters")) != (centroids_sha, adapters_sha):
-        raise JudgmentError(f"{b4_run} was routed with other centroids or adapters than these")
+    if (recorded.get("centroids"), recorded.get("adapters")) != (centroids_sha, adapters_sha):
+        raise JudgmentError(f"{b4_run} does not record that it was routed with these centroids and adapters")
     cluster_of = router_clusters(calls_of(b4_run), clusters)
     group = lambda identity, attempts: cluster_of.get(identity)  # noqa: E731
 
     j8 = read_result(j8_path, "J8")["result"]
+    if j8["engine"].split("+lora:")[0] != f"slm:{adapters['slm']}":
+        raise JudgmentError(f"the load test measured {j8['engine']!r}, not the base of these adapters, slm:{adapters['slm']}")
     lowest = j3.utilization_label(min(config["cost"]["utilizations"]))
     evidence, costs, reads = {}, {}, {"teacher_eval": reference(teacher_eval_run_id), "j8": result_reference(j8_path)}
     for engine in ENGINES:
@@ -153,7 +161,7 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
             costs.setdefault(cluster, {})[engine] = cost
         reads[engine] = run_reads
     settings = {"delta_cap_pp": config["thresholds"]["delta_cap_pp"], "seed": config["seeds"]["bootstrap"],
-                "n_boot": config["noninferiority"]["n_boot"], "min_calls": config["allocation"]["min_calls"],
+                "n_boot": n_boot(config), "min_calls": config["allocation"]["min_calls"],
                 "concordance_min": config["thresholds"]["concordance_min"]}
     decided = allocate(clusters, evidence, costs, noninferiority, settings)
     fact = write_fact(JUDGMENT, "allocation", {"centroids": centroids_sha, "adapters": adapters_sha,

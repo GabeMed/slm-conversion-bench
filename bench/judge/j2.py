@@ -5,8 +5,11 @@ another engine, with the same retry policy (design §5.1). J2 pairs the two by i
 (question id, call site, invocation key) and judges the engine's final output:
 - **SQL generation and repair** (the call sites with gold): execution accuracy of the replayed SQL,
   from the per-call evaluation of the replay (`bench eval <replay> --per-call`, F2), next to the
-  teacher's own on the same invocations. For the non-inferiority test (J4), each question is one
-  unit: it counts as correct when every one of its paired invocations in the group is.
+  teacher's own on the same invocations. For the non-inferiority test (J4, which takes one boolean
+  per question), each question is one unit: it counts as correct when every one of its paired
+  invocations in the group is. Both are reported: EX per call (`ex_replay`, `ex_teacher`) and EX
+  per question (`ex_by_question`), the quantity J4 tests; they differ only where a question has
+  more than one gold call in the group (several repair rounds, or generation and repair together).
 - **Every other call site**: agreement with the teacher's decision (`bench.contracts.concordance.agree`),
   over the invocations whose teacher output parsed. This is fidelity, not accuracy (SPEC §6.2).
 - **Format validity** for every call site: the share of the engine's invocations whose final attempt
@@ -109,6 +112,8 @@ def compare(teacher_calls: List[dict], replay_calls: List[dict], replay_eval: Op
         if entry["gold"]:
             entry["gold"]["ex_replay"] = entry["gold"]["correct_replay"] / entry["gold"]["n"]
             entry["gold"]["ex_teacher"] = entry["gold"]["correct_teacher"] / entry["gold"]["n"]
+            by_question = entry["gold"]["by_question"]
+            entry["gold"]["ex_by_question"] = {who: sum(v.values()) / len(v) for who, v in by_question.items()}
         if entry["agreement"]:
             n = entry["agreement"]["n"]
             entry["agreement"]["rate"] = entry["agreement"]["agree"] / n if n else None
