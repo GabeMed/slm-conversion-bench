@@ -1,0 +1,39 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    # contracts, data splits, evaluation and the test barrier: no agent dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[test]"
+      - run: pytest -q
+        env:
+          PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
+
+  agent-env:
+    # P-1 on Linux: CHESS's pinned requirements install on Python 3.11 and the patched agent imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      # CPU wheels of torch (pulled by CHESS's sentence-transformers pin); the agent never uses it
+      - run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -r env/agent/requirements.lock -e ".[test]"
+      - name: import the patched agent
+        env: {DB_ROOT_PATH: /tmp, INDEX_SERVER_PORT: "0", ANONYMIZED_TELEMETRY: "False"}
+        run: |
+          python - <<'PY'
+          import sys; sys.path.insert(0, "vendor/chess/src")
+          from bench.agent import hooks
+          from bench.contracts.config import load_config
+          hooks.configure(load_config("configs/smoke-local.yaml"))
+          import llm.models, workflow.team_builder, runner.run_manager
+          print("patched CHESS imports")
+          PY
+      - run: pytest -q

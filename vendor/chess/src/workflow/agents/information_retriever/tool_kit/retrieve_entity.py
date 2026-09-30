@@ -2,7 +2,7 @@ import numpy as np
 import difflib
 from typing import List, Dict, Any, Tuple, Optional
 
-from langchain_openai import OpenAIEmbeddings
+from bench.agent import hooks  # PATCH 10 (slm-conversion-bench): embeddings from the configuration
 from google.oauth2 import service_account
 from google.cloud import aiplatform
 import vertexai
@@ -31,7 +31,7 @@ class RetrieveEntity(Tool):
 
     def __init__(self):
         super().__init__()
-        self.embedding_function = OpenAIEmbeddings(model="text-embedding-3-small")
+        self.embedding_function = hooks.embeddings("entity")  # PATCH 10
         self.edit_distance_threshold = 0.3
         self.embedding_similarity_threshold = 0.6
         

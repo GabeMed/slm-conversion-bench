@@ -15,7 +15,7 @@ from database_utils.db_info import get_db_all_tables, get_table_all_columns, get
 from database_utils.sql_parser import get_sql_tables, get_sql_columns_dict, get_sql_condition_literals
 from database_utils.db_values.search import query_lsh
 from database_utils.db_catalog.search import query_vector_db
-from database_utils.db_catalog.preprocess import EMBEDDING_FUNCTION
+from bench.agent import hooks  # PATCH 10 (slm-conversion-bench): embeddings from the configuration
 from database_utils.db_catalog.csv_utils import load_tables_description
 
 load_dotenv(override=True)
@@ -92,8 +92,10 @@ class DatabaseManager:
         """Sets the vector_db attribute by loading from the context vector database."""
         if self.vector_db is None:
             try:
-                vector_db_path = self.db_directory_path / "context_vector_db"
-                self.vector_db = Chroma(persist_directory=str(vector_db_path), embedding_function=EMBEDDING_FUNCTION)
+                vector_db_path = self.db_directory_path / hooks.vector_db_dirname()  # PATCH 10
+                if not vector_db_path.is_dir():
+                    raise FileNotFoundError(f"{vector_db_path} does not exist: run `bench preprocess`")
+                self.vector_db = Chroma(persist_directory=str(vector_db_path), embedding_function=hooks.embeddings("context"))
                 return "success"
             except Exception as e:
                 self.vector_db = "error"

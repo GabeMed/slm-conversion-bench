@@ -1,0 +1,75 @@
+[
+ {
+  "run_id": "fixture",
+  "call_id": "6b181324-d4e3-49de-9cb1-836cc304b658",
+  "retry_of": null,
+  "attempt": 1,
+  "question_id": "1470",
+  "call_site": "agent_ss",
+  "invocation_key": "ss:0",
+  "cluster": null,
+  "engine": "production_llm:qwen3-4b-q4_k_m",
+  "model_role": "production_llm",
+  "model": "qwen3-4b-q4_k_m",
+  "endpoint": "llamacpp",
+  "prompt_messages": [
+   {
+    "role": "user",
+    "content": "<system>\nHuman: You are the schema_selector agent, in a team of agents trying to collaboratively transform a natural language question into a SQL query.\nYour task is to narrow down the schema into the"
+   }
+  ],
+  "response_text": "<tool_call>\nselect_tables\n<tool_call>",
+  "parsed_output": {
+   "tool": "select_tables"
+  },
+  "parsed_ok": true,
+  "usage": {
+   "input": 194,
+   "cached_input": 193,
+   "output": 7,
+   "source": "api"
+  },
+  "latency_ms": 231,
+  "started_at": "2026-09-30T17:14:40.454196+00:00",
+  "temperature": 0.0,
+  "error": null
+ },
+ {
+  "run_id": "fixture",
+  "call_id": "29bf94bd-07bf-4d79-9569-caad8348ee81",
+  "retry_of": null,
+  "attempt": 1,
+  "question_id": "1470",
+  "call_site": "select_tables",
+  "invocation_key": "single",
+  "cluster": null,
+  "engine": "production_llm:qwen3-4b-q4_k_m",
+  "model_role": "production_llm",
+  "model": "qwen3-4b-q4_k_m",
+  "endpoint": "llamacpp",
+  "prompt_messages": [
+   {
+    "role": "user",
+    "content": "You are an expert and very smart data analyst. \nYour task is to analyze the provided database schema, comprehend the posed question, and leverage the hint to identify which tables are needed to genera"
+   }
+  ],
+  "response_text": "{\n  \"chain_of_thought_reasoning\": \"The question asks for the number of gas stations in CZE that have Premium gas. To answer this, we need to look at the 'gasstations' table to find gas stations locate",
+  "parsed_output": {
+   "chain_of_thought_reasoning": "The question asks for the number of gas stations in CZE that have Premium gas. To answer this, we need to look at the 'gasstations' table to find gas stations located in CZE and the 'Segment' column to identify those with 'Premium' as their segment. The 'Country' column in the gasstations table indicates the country, and the 'Segment' column indicates the type of gas station. Therefore, the 'gasstations' table is necessary. No other tables are required as the question does not involve customers, products, or transactions.",
+   "table_names": [
+    "gasstations"
+   ]
+  },
+  "parsed_ok": true,
+  "usage": {
+   "input": 1422,
+   "cached_input": 0,
+   "output": 135,
+   "source": "api"
+  },
+  "latency_ms": 9100,
+  "started_at": "2026-09-30T17:14:40.804556+00:00",
+  "temperature": 0.0,
+  "error": null
+ }
+]

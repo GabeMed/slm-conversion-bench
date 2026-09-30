@@ -1,0 +1,129 @@
+# C2 · the single source of every parameter of the benchmark (bench/contracts/config.py).
+# Model and provider names live here and only here (SPEC §10, level rule).
+# Values marked `null  # before runs` are decided by the author before any paid run.
+version: 1
+
+roles:
+  production_llm:              # the LLM the agent uses = the teacher (SPEC §3, D6)
+    model: MiMo-V2.6-Pro
+    endpoint: {kind: api, base_url: null, api_key_env: PRODUCTION_LLM_API_KEY}  # provider: before runs
+    params: {max_tokens: 4096}
+    terms:                     # both must allow training on outputs (D6); link and date
+      weights_license: null    # before runs
+      provider_terms: null     # before runs
+      checked_on: null         # before runs
+  cheap_alt:                   # cheaper open-weight generalist, no training (B1)
+    model: gpt-oss-120b
+    endpoint: {kind: api, base_url: null, api_key_env: CHEAP_ALT_API_KEY}  # provider: before runs
+    params: {max_tokens: 4096}
+  slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
+    - {name: qwen3-8b, base: Qwen3-8B, endpoint: {kind: vllm, base_url: null, api_key_env: null}}
+    - {name: granite-4.2-8b, base: Granite-4.2-8B, endpoint: {kind: vllm, base_url: null, api_key_env: null}}
+  slm_reserve: [Nemotron-3-Nano-4B]
+
+# CHESS IR -> SS -> CG, as published (run/configs/CHESS_IR_SS_CG.yaml), with every engine routed
+# by C4. Temperatures live in `call_sites`, never here.
+agent:
+  setting_name: CHESS_IR_SS_CG
+  team_agents:
+    information_retriever:
+      engine: routed
+      tools:
+        extract_keywords:
+          template_name: extract_keywords
+          engine_config: {engine_name: routed}
+          parser_name: python_list_output_parser
+        retrieve_entity: {}
+        retrieve_context: {top_k: 5}
+    schema_selector:
+      engine: routed
+      tools:
+        filter_column:
+          template_name: filter_column
+          engine_config: {engine_name: routed}
+          parser_name: filter_column
+        select_tables:
+          mode: ask_model
+          template_name: select_tables
+          engine_config: {engine_name: routed}
+          parser_name: select_tables
+        select_columns:
+          mode: ask_model
+          template_name: select_columns
+          engine_config: {engine_name: routed}
+          parser_name: select_columns
+    candidate_generator:
+      engine: routed
+      tools:
+        generate_candidate:
+          generator_configs:
+            - template_name: generate_candidate_one
+              engine_config: {engine_name: routed}
+              parser_name: generate_candidate_gemini_markdown_cot
+              sampling_count: 1
+        revise:
+          template_name: revise_one
+          engine_config: {engine_name: routed}
+          parser_name: revise_new
+
+call_sites:                    # CHESS published temperatures, per call site
+  agent_ir: {temperature: 0.0}
+  agent_ss: {temperature: 0.0}
+  agent_cg: {temperature: 0.0}
+  extract_keywords: {temperature: 0.2}
+  filter_column: {temperature: 0.0}
+  select_tables: {temperature: 0.0}
+  select_columns: {temperature: 0.0}
+  generate_candidate: {temperature: 0.01}
+  revise: {temperature: 0.0}
+
+retries:
+  parse_max_attempts: 2        # CHESS published 12 identical retries; every attempt is logged (C1)
+
+seeds:
+  calib_split: 20260930
+  schema_shuffle: 20260930
+  bootstrap: 20260930
+
+splits:
+  calib_size: 200
+  excluded: ["119", "120"]     # absent from Arcwise-Plat-SQL; out of train and test (D14)
+
+thresholds:
+  delta_cap_pp: 5
+  concordance_min: 0.95
+
+prices:
+  as_of: null                  # dated price table: before runs
+  table: {}
+
+embeddings:                    # retrieval inside CHESS (not an LLM call)
+  provider: openai             # recommendation; the author decides before runs
+  entity_model: text-embedding-3-small
+  context_model: text-embedding-3-large
+  fake_size: 64
+
+preprocess:                    # CHESS run/run_preprocess.sh, as published
+  signature_size: 100
+  n_gram: 3
+  threshold: 0.01
+  use_value_description: true
+
+data:
+  bird_dev_databases:          # BIRD dev databases and column descriptions (CC BY-SA 4.0)
+    url: https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip
+    sha256: cdd6d19faeb45a23970b98d3ef6c40a87987c95459c2cf12076897a60cf5a630
+    root: dev_20240627
+  bird_dev_questions:          # BIRD dev, 2025-11-06 revision: questions, evidence and gold SQL
+    url: https://huggingface.co/datasets/birdsql/bird_sql_dev_20251106/resolve/3c11fb193e5439b338e23677fa0aae11e8b85db9/data/dev_20251106-00000-of-00001.json
+    sha256: ffd8018378ddb1a8794753e0a31cfc81862ff7318a5184c22f3dc4ce03a03feb
+  plat_sql_test:               # Arcwise-Plat-SQL, 498 questions, used as in the file (D14)
+    url: https://raw.githubusercontent.com/uiuc-kang-lab/text_to_sql_benchmarks/fe766045c55b6875a43b30e9ac7683df5582f8cf/data/arcwise_plat_sql_only_with_diff.json
+    sha256: e7bf76408f99266506ea558d84982c69422e5db3dfecab5f08a3a8d3900e8395
+
+eval:
+  timeout_s: 60
+  fixed_date: null             # F2: pre-registered date substituted for 'now' in pred and gold
+
+arms:
+  B5: {allocation_file: judgments/J7/allocation.json}

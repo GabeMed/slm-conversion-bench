@@ -37,6 +37,7 @@ class FilterColumn(Tool):
         )
 
         list_of_kwargs = []
+        invocation_keys = []  # PATCH 6: one invocation per column, keyed `table.column`
         for table_name, columns in column_profiles.items():
             for column_name, column_profile in columns.items():
                 kwargs = {
@@ -45,14 +46,16 @@ class FilterColumn(Tool):
                     "COLUMN_PROFILE": column_profile,
                 }
                 list_of_kwargs.append(kwargs)
+                invocation_keys.append(f"{table_name}.{column_name}")
 
         response = async_llm_chain_call(
             prompt=get_prompt(template_name=self.template_name),
             engine=get_llm_chain(**self.engine_config),
             parser=get_parser(self.parser_name),
             request_list=list_of_kwargs,
-            step=self.tool_name, 
-            sampling_count=1
+            step=self.tool_name,
+            sampling_count=1,
+            invocation_keys=invocation_keys
         )
         
         index = 0

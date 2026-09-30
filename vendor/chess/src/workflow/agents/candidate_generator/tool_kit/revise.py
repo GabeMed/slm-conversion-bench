@@ -40,6 +40,7 @@ class Revise(Tool):
             SQL_id = self.tool_name + "_1"  
         state.SQL_meta_infos[SQL_id] = []
         request_list = []
+        invocation_keys = []  # PATCH 6: `<revision round>:<index of the SQL being repaired>`
         for SQL_meta_info in target_SQL_meta_infos:
             try:
                 execution_status = SQL_meta_info.execution_status
@@ -51,13 +52,15 @@ class Revise(Tool):
         for index, target_SQL_meta_info in need_fixing_SQL_meta_infos:   
             try:            
                 request_kwargs = {
-                    "DATABASE_SCHEMA": state.get_schema_string(schema_type="complete"),
+                    # PATCH 1 (D13, CHESS issue #34): repair against the selected schema
+                    "DATABASE_SCHEMA": state.get_schema_string(schema_type="tentative"),
                     "QUESTION": state.task.question,
                     "HINT": state.task.evidence,
                     "QUERY": target_SQL_meta_info.SQL  ,
                     "RESULT": self.get_formatted_execution_result(target_SQL_meta_info)
                 }
                 request_list.append(request_kwargs)
+                invocation_keys.append(f"{SQL_id}:{index}")
             except Exception as e:
                 print(f"Error in Checker while creating request list: {e}")
                 continue
@@ -68,7 +71,8 @@ class Revise(Tool):
                 engine=get_llm_chain(**self.engine_config),
                 parser=get_parser(self.parser_name),
                 request_list=request_list,
-                step=self.tool_name
+                step=self.tool_name,
+                invocation_keys=invocation_keys
             )
             response = [r[0] for r in response]
         except Exception as e:

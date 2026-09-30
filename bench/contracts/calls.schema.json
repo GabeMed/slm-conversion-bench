@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GabeMed/slm-conversion-bench/bench/contracts/calls.schema.json",
+  "title": "C1 · one LLM invocation (one line of calls.jsonl)",
+  "description": "One record per invocation of a language model, including retries and failures. `error` carries the failure message: the invocation failed when `response_text` is null, and the output did not parse otherwise. Frozen contract: changed only by the orchestrator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id", "call_id", "retry_of", "attempt", "question_id", "call_site", "invocation_key",
+    "cluster", "engine", "model_role", "model", "endpoint", "prompt_messages", "response_text",
+    "parsed_output", "parsed_ok", "usage", "latency_ms", "started_at", "temperature", "error"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1},
+    "call_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "retry_of": {"type": ["string", "null"]},
+    "attempt": {"type": "integer", "minimum": 1},
+    "question_id": {"type": "string", "minLength": 1},
+    "call_site": {
+      "enum": ["agent_ir", "agent_ss", "agent_cg", "extract_keywords", "filter_column",
+               "select_tables", "select_columns", "generate_candidate", "revise"]
+    },
+    "invocation_key": {"type": "string", "minLength": 1},
+    "cluster": {"type": ["string", "null"]},
+    "engine": {"type": "string", "minLength": 1},
+    "model_role": {"enum": ["production_llm", "cheap_alt", "slm"]},
+    "model": {"type": "string", "minLength": 1},
+    "endpoint": {"enum": ["api", "vllm", "llamacpp", "fake"]},
+    "prompt_messages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "content"],
+        "properties": {
+          "role": {"enum": ["system", "user", "assistant"]},
+          "content": {"type": "string"}
+        }
+      }
+    },
+    "response_text": {"type": ["string", "null"]},
+    "parsed_output": {},
+    "parsed_ok": {"type": "boolean"},
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "cached_input", "output", "source"],
+      "properties": {
+        "input": {"type": ["integer", "null"], "minimum": 0},
+        "cached_input": {"type": ["integer", "null"], "minimum": 0},
+        "output": {"type": ["integer", "null"], "minimum": 0},
+        "source": {"enum": ["api", "estimated", "missing"]}
+      }
+    },
+    "latency_ms": {"type": "integer", "minimum": 0},
+    "started_at": {"type": "string", "format": "date-time"},
+    "temperature": {"type": "number", "minimum": 0},
+    "error": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"attempt": {"const": 1}}},
+      "then": {"properties": {"retry_of": {"type": "null"}}},
+      "else": {"properties": {"retry_of": {"type": "string"}}}
+    },
+    {
+      "if": {"properties": {"usage": {"properties": {"source": {"enum": ["api", "estimated"]}}}}},
+      "then": {"properties": {"usage": {"properties": {"input": {"type": "integer"}, "output": {"type": "integer"}}}}}
+    },
+    {
+      "if": {"properties": {"parsed_ok": {"const": false}}},
+      "then": {"properties": {"parsed_output": {"type": "null"}, "error": {"type": "string"}}},
+      "else": {"properties": {"error": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"response_text": {"type": "null"}}},
+      "then": {"properties": {"parsed_ok": {"const": false}}}
+    },
+    {
+      "if": {
+        "properties": {"call_site": {"enum": ["agent_ir", "agent_ss", "agent_cg"]}, "parsed_ok": {"const": true}}
+      },
+      "then": {
+        "properties": {
+          "parsed_output": {
+            "oneOf": [
+              {"type": "object", "additionalProperties": false, "required": ["tool"], "properties": {"tool": {"type": "string", "minLength": 1}}},
+              {"type": "object", "additionalProperties": false, "required": ["done"], "properties": {"done": {"const": true}}}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

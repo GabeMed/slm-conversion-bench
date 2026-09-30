@@ -4,7 +4,6 @@ import logging
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain.schema.document import Document
-from langchain_openai import OpenAIEmbeddings
 from langchain_google_vertexai import VertexAIEmbeddings
 from google.oauth2 import service_account
 from google.cloud import aiplatform
@@ -27,8 +26,10 @@ if GCP_CREDENTIALS and GCP_PROJECT and GCP_REGION:
     vertexai.init(project=GCP_PROJECT, location=GCP_REGION, credentials=service_account.Credentials.from_service_account_file(GCP_CREDENTIALS))
 
 
+from bench.agent import hooks  # PATCH 10 (slm-conversion-bench): embeddings from the configuration
+
 # EMBEDDING_FUNCTION = VertexAIEmbeddings(model_name="text-embedding-004")#OpenAIEmbeddings(model="text-embedding-3-large")
-EMBEDDING_FUNCTION = OpenAIEmbeddings(model="text-embedding-3-large")
+# PATCH 10: the embedding function is no longer built at import time; see hooks.embeddings("context").
 
 
 def make_db_context_vec_db(db_directory_path: str, **kwargs) -> None:
@@ -59,13 +60,13 @@ def make_db_context_vec_db(db_directory_path: str, **kwargs) -> None:
                     docs.append(Document(page_content=column_info[key], metadata=metadata))
     
     logging.info(f"Creating context vector database for {db_id}")
-    vector_db_path = Path(db_directory_path) / "context_vector_db"
+    vector_db_path = Path(db_directory_path) / hooks.vector_db_dirname()  # PATCH 10: one DB per provider
 
     if vector_db_path.exists():
         os.system(f"rm -r {vector_db_path}")
 
     vector_db_path.mkdir(exist_ok=True)
 
-    Chroma.from_documents(docs, EMBEDDING_FUNCTION, persist_directory=str(vector_db_path))
+    Chroma.from_documents(docs, hooks.embeddings("context"), persist_directory=str(vector_db_path))
 
     logging.info(f"Context vector database created at {vector_db_path}")

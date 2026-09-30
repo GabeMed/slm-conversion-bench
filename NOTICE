@@ -1,0 +1,9 @@
+slm-conversion-bench
+Copyright 2026 Gabriel Medeiros
+
+This repository includes CHESS (https://github.com/ShayanTalaei/CHESS, commit 3d6e835),
+licensed under the Apache License 2.0, in vendor/chess/. It is modified: every change is
+listed in vendor/chess/PATCHES.md.
+
+The data (BIRD dev and Arcwise-Plat-SQL, both CC BY-SA 4.0) is not redistributed here:
+`bench data` downloads it from its publishers and checks it against the hashes in config.yaml.

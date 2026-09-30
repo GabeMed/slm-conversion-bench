@@ -44,7 +44,8 @@ class GenerateCandidate(Tool):
             for i in range(generator_config.sampling_count):
                 try:
                     request_kwargs = {
-                        "DATABASE_SCHEMA": state.get_schema_string(schema_type="complete"),
+                        # PATCH 1 (D13, CHESS issue #34): generate from the selected schema
+                        "DATABASE_SCHEMA": state.get_schema_string(schema_type="tentative"),
                         "QUESTION": state.task.question,
                         "HINT": state.task.evidence,
                     }
@@ -59,7 +60,8 @@ class GenerateCandidate(Tool):
                     engine=get_llm_chain(**generator_config.engine_config),
                     parser=get_parser(generator_config.parser_name),
                     request_list=request_list,
-                    step=f"{self.tool_name}_{generator_config.engine_config['engine_name']}",
+                    step=self.tool_name,  # PATCH 6: the call site, no longer suffixed with the engine name
+                    invocation_keys=[f"{generator_config.template_name}:{i}" for i in range(len(request_list))],
                 )
                 response = [res for sublist in response for res in sublist]
             except Exception as e:

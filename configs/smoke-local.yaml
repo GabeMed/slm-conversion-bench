@@ -1,0 +1,17 @@
+# Local end-to-end smoke test, no paid calls: every role on a tiny model served by llama.cpp,
+# fake embeddings. Start the server with `scripts/serve-local.sh`.
+extends: ../config.yaml
+
+roles:
+  production_llm:
+    model: qwen3-4b-q4_k_m
+    endpoint: {kind: llamacpp, base_url: "http://127.0.0.1:8080/v1", api_key_env: null}
+    params: {max_tokens: 1024}
+    terms: null
+  cheap_alt:
+    model: qwen3-4b-q4_k_m
+    endpoint: {kind: llamacpp, base_url: "http://127.0.0.1:8080/v1", api_key_env: null}
+    params: {max_tokens: 1024}
+
+embeddings:
+  provider: fake

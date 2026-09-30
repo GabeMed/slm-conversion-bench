@@ -4,6 +4,13 @@ from workflow.agents.tool import Tool
 from llm.models import call_engine, get_llm_chain
 from llm.prompts import get_prompt
 
+# PATCH 6: the agents' own LLM calls are logged under a call site of their own (C1)
+AGENT_CALL_SITES = {
+    "Information Retriever": "agent_ir",
+    "schema_selector": "agent_ss",
+    "Candidate Generator": "agent_cg",
+}
+
 class Agent:
     """
     Abstract base class for agents.
@@ -36,7 +43,7 @@ class Agent:
         
         try:
             for i in range(10):
-                response = self.call_agent(system_state)
+                response = self.call_agent(system_state, iteration=i)
                 print(f"Agent {self.name} response: {response}")
                 if self.is_done(response):
                     break
@@ -80,7 +87,7 @@ class Agent:
             raise ValueError(f"Tool {tool_name} not found")
         return tool_name
     
-    def call_agent(self, system_state: SystemState) -> SystemState:
+    def call_agent(self, system_state: SystemState, iteration: int = 0) -> SystemState:
         """
         Call the agent with the given system state.
         """
@@ -93,8 +100,20 @@ class Agent:
         messages += f"<agent>\n"
         
         llm_chain = get_llm_chain(engine_name=self.config["engine"], temperature=0)
-        response = call_engine(message=messages, engine=llm_chain)
+        call_site = AGENT_CALL_SITES[self.name]
+        response = call_engine(message=messages, engine=llm_chain, call_site=call_site,
+                               invocation_key=f"{call_site[len('agent_'):]}:{iteration}",
+                               parse=self.parse_action)
         return response
+
+    def parse_action(self, response: str) -> dict:
+        """
+        PATCH 6: the action this response selects, read with the agent's own rules
+        (`is_done`, then `get_next_tool_name`); raises where the agent would.
+        """
+        if self.is_done(response):
+            return {"done": True}
+        return {"tool": self.get_next_tool_name(response)}
         
     def get_tools_description(self) -> str:
         """
