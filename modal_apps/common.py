@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 ENV = "BENCH_MODAL"
 ROOT = Path(__file__).resolve().parent.parent
@@ -277,3 +277,46 @@ def serving_state(plan: Dict[str, Any], nvidia_smi: str) -> Dict[str, Any]:
 
 def state_path(root: str, name: str) -> Path:
     return Path(root) / STATE_DIR / f"{name}.json"
+
+
+def gpu_names() -> List[str]:
+    """The GPUs this container got (nvidia-smi), or none where there is no GPU."""
+    try:
+        smi = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return []
+    return [line.strip() for line in smi.stdout.splitlines() if line.strip()]
+
+
+def start_serving(plan: Dict[str, Any], environ: Dict[str, str], launch: Callable = subprocess.Popen,
+                  adapters_root: str = ADAPTERS, state_root: str = VLLM_CACHE, commit: Callable[[], Any] = lambda: None,
+                  base: str = f"http://127.0.0.1:{PORT}", gpus: Callable[[], List[str]] = gpu_names) -> Any:
+    """The serving container's start, in order: refuse without any auth (before anything runs), check the
+    adapters' bytes, launch vLLM, wait until healthy, warm up the base and every adapter, record what this
+    server observed about itself (for the load test). Returns the vLLM process."""
+    auth = check_auth(plan, environ)
+    check_adapters(plan, adapters_root)
+    process = launch(vllm_command(plan))
+    wait_healthy(base, process, plan["startup_timeout_s"])
+    warm_up(base, plan, environ.get("VLLM_API_KEY"), plan["warmup_timeout_s"])
+    state = state_path(state_root, plan["name"])
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({**serving_state(plan, "\n".join(gpus())), "auth": auth}, indent=2))
+    commit()
+    return process
+
+
+def run_training(root: str, key: str, now: float, train: Callable[[], Dict[str, Any]],
+                 commit: Callable[[], Any]) -> Dict[str, Any]:
+    """The training container's bookkeeping around `train()`: the plan is marked started (and committed, so a
+    second attempt sees it), the result is stored under `key` without its files; the marker is released and
+    the volume committed whatever happens, so a failed training never blocks the next attempt."""
+    mark_started(root, key, now)
+    commit()
+    try:
+        result = train()
+        store_training(root, key, {k: v for k, v in result.items() if k != "files"})
+        return result
+    finally:
+        release_started(root, key)
+        commit()

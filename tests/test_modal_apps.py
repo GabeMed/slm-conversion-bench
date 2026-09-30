@@ -346,6 +346,7 @@ def test_the_shipped_config_serves_behind_proxy_auth_with_headers_for_every_cand
     assert config["serving"]["unauthenticated"] is False
     for entry in config["roles"]["slm_candidates"]:
         assert set(entry["endpoint"]["headers_env"]) == {"Modal-Key", "Modal-Secret"}
+        assert entry["endpoint"]["api_key_env"]  # the server always holds vLLM's key: clients must send it
 
 
 def test_a_failed_training_releases_its_marker(tmp_path):
@@ -377,3 +378,175 @@ def test_a_candidate_whose_template_ignores_its_kwargs_is_not_served(serving, mo
     monkeypatch.setattr(common, "check_serving_template", refuse)
     with pytest.raises(common.SettingsError, match=f"{TINY_NAME}: the chat template does not read"):
         common.serve_plan(config, TINY_NAME)
+
+
+# ---------------------------------------------------------------- the container sequences, run for real
+
+class FakeVolume:
+    def __init__(self):
+        self.commits, self.reloads = 0, 0
+
+    def commit(self):
+        self.commits += 1
+
+    def reload(self):
+        self.reloads += 1
+
+
+def test_run_training_releases_its_marker_whatever_happens(tmp_path):
+    root, commits = str(tmp_path / "adapters"), []
+    started = Path(root) / common.RESULTS / "k.started"
+
+    def fails():
+        assert started.is_file() and commits == [1]  # marked and committed before training
+        raise RuntimeError("CUDA out of memory")
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        common.run_training(root, "k", 1.0, fails, lambda: commits.append(1))
+    assert not started.exists() and commits == [1, 1]  # released and committed in the finally
+    result = common.run_training(root, "k", 2.0, lambda: {"sha256": "s", "files": {"a": b"x"}}, lambda: None)
+    assert result["files"] == {"a": b"x"}
+    assert json.loads((Path(root) / common.RESULTS / "k.json").read_text()) == {"sha256": "s"}  # stored without files
+
+
+def test_start_serving_refuses_without_auth_before_launching_anything(serving, tmp_path):
+    _, config = serving
+    plan = {**common.serve_plan(config, TINY_NAME), "unauthenticated": True}
+    launched = []
+    with pytest.raises(common.SettingsError, match="neither Modal proxy auth nor a VLLM_API_KEY"):
+        common.start_serving(plan, {}, launch=launched.append, adapters_root=str(tmp_path), state_root=str(tmp_path))
+    assert not launched
+
+
+def test_start_serving_launches_warms_up_and_records_what_it_got(serving, tmp_path):
+    import shutil
+
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    volume = tmp_path / "adapters"
+    shutil.copytree(paths.ROOT / "train" / "adapters" / "c0" / "adapter", volume / plan["adapters"][0]["sha256"])
+    server, launched, commits = FakeVLLMServer(), [], []
+
+    class Running:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def launch(cmd):
+        launched.append(cmd)
+        return Running()
+
+    try:
+        common.start_serving(plan, {"VLLM_API_KEY": "k"}, launch=launch, adapters_root=str(volume),
+                             state_root=str(tmp_path / "cache"), commit=lambda: commits.append(1), base=server.base,
+                             gpus=lambda: ["NVIDIA H200"])
+    finally:
+        server.server.shutdown()
+    assert launched == [common.vllm_command(plan)] and commits == [1]
+    assert [body["model"] for _, body in server.posts] == [TINY_NAME, served("c0")]  # warmed up, base and adapter
+    state = json.loads(common.state_path(str(tmp_path / "cache"), TINY_NAME).read_text())
+    assert state["gpus"] == ["NVIDIA H200"] and state["auth"] == "proxy+vllm-key"
+
+
+def test_serving_refuses_a_served_name_its_bytes_do_not_give(serving):
+    config_path, config = serving
+    fake_adapter("c1", config, served_name="c1")  # the old, non content-addressed name
+    with pytest.raises(common.SettingsError, match="served name 'c1' is not 'c1-"):
+        common.adapters_to_serve(config, TINY_NAME)
+
+
+def test_the_training_function_releases_its_marker_when_training_fails(apps, tmp_path, monkeypatch):
+    from bench import train as bench_train
+    from bench.train import run_identity, training_plan
+
+    config, (_, train, _) = apps
+    monkeypatch.setattr(train, "adapters", FakeVolume())
+    monkeypatch.setattr(train, "hf_cache", FakeVolume())
+    monkeypatch.setattr(common, "ADAPTERS", str(tmp_path / "volume"))
+
+    def out_of_memory(*args):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(bench_train, "train_lora", out_of_memory)
+    plan, raw = training_plan(config, "c1")
+    with pytest.raises(RuntimeError, match="out of memory"):
+        train.train_adapter.local(plan, raw, run_identity(config))
+    assert not list((tmp_path / "volume" / common.RESULTS).glob("*.started")) and train.adapters.commits == 2
+
+
+def test_the_training_function_stores_its_own_run_and_a_second_call_collects_it(apps, tmp_path, monkeypatch):
+    from bench import train as bench_train
+    from bench.train import run_identity, training_plan
+
+    config, (_, train, _) = apps
+    monkeypatch.setattr(train, "adapters", FakeVolume())
+    monkeypatch.setattr(train, "hf_cache", FakeVolume())
+    monkeypatch.setattr(common, "ADAPTERS", str(tmp_path / "volume"))
+
+    def trains(plan, rows, out, device):
+        out.mkdir(parents=True)
+        (out / "adapter_model.safetensors").write_bytes(b"w")
+        return {"global_step": 2}
+
+    monkeypatch.setattr(bench_train, "train_lora", trains)
+    plan, raw = training_plan(config, "c1")
+    identity = run_identity(config)
+    first = train.train_adapter.local(plan, raw, identity)
+    assert first["reused"] is False and first["run"]["commit"] == identity["commit"]
+    assert first["run"]["observed_gpus"] == [] and first["run"]["started_at"] <= first["run"]["finished_at"]
+    again = train.train_adapter.local(plan, raw, identity)
+    assert again["reused"] is True and again["run"] == first["run"] and again["files"] == first["files"]
+    assert "collection_seconds" in again
+
+
+def test_the_modal_load_client_scrubs_the_key_and_the_proxy_headers(apps, tmp_path, monkeypatch):
+    import shutil
+    import sys as system
+
+    from bench import loadtest as bench_loadtest
+    from test_loadtest import FakeServer
+
+    _, (_, _, load) = apps
+    server = FakeServer(["c0"])
+    monkeypatch.setattr(load, "vllm_cache", FakeVolume())
+    monkeypatch.setattr(common, "VLLM_CACHE", str(tmp_path / "cache"))
+    for name, value in {"VLLM_API_KEY": "vk-secret", "T_MK": "mk-secret", "T_MS": "ms-secret"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(shutil, "which", lambda name: system.executable)
+
+    def aiperf_that_leaks(run_dir, cmd):  # as AIPerf 0.13.0 writes Modal-Key into its export
+        (run_dir / "profile_export_aiperf.json").write_text(json.dumps({"headers": {"Modal-Key": "mk-secret"},
+                                                                         "key": "vk-secret", "s": "ms-secret"}))
+        return 0
+
+    monkeypatch.setattr(bench_loadtest, "run_aiperf", aiperf_that_leaks)
+    args = {"url": server.base_url[:-3], "base_url": server.base_url, "model": "c0", "concurrency": 1, "request_count": 1,
+            "warmup": [], "tokenizer": TINY, "timeout_s": 5, "stream": False, "ready_timeout_s": 5,
+            "headers_env": {"Modal-Key": "T_MK", "Modal-Secret": "T_MS"}, "candidate": TINY_NAME}
+    try:
+        result = load.run_aiperf.local(b"{}\n", args)
+    finally:
+        server.close()
+    assert result["secrets_redacted_in"] == ["profile_export_aiperf.json"]
+    everything = b"".join(result["files"].values())
+    assert not any(secret in everything for secret in (b"vk-secret", b"mk-secret", b"ms-secret"))
+    assert {(h["Authorization"], h["Modal-Key"], h["Modal-Secret"]) for h in server.headers} == {
+        ("Bearer vk-secret", "mk-secret", "ms-secret")}
+    assert "${VLLM_API_KEY}" in result["files"]["aiperf.yaml"].decode()
+
+
+def test_the_server_class_starts_through_start_serving(apps, monkeypatch):
+    """The Modal server's enter method is common.start_serving (auth first, fail closed), nothing else."""
+    from modal._utils.async_utils import synchronizer
+
+    _, (serve, _, _) = apps
+    calls, volume = [], FakeVolume()
+    monkeypatch.setattr(serve, "vllm_cache", volume)
+    monkeypatch.setattr(common, "start_serving", lambda plan, environ, commit: calls.append((plan, commit)) or "vllm")
+    cls = synchronizer._translate_in(serve.Server)._user_cls
+    instance = cls.__new__(cls)
+    cls.__dict__["start"]._get_raw_f()(instance)
+    (plan, commit), = calls
+    assert plan == serve.PLAN and instance.process == "vllm"
+    assert commit == volume.commit  # its recorded state is committed to the vLLM-cache volume

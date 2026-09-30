@@ -201,7 +201,9 @@ def _adapter_files(tmp_path):
 
 def _modal_result(sha, files, stats, identity, seconds=100.0, reused=False, **run):
     return {"sha256": sha, "files": files, "stats": stats, "function_seconds": seconds, "reused": reused,
-            "run": {**identity, "observed_gpus": ["NVIDIA L40S"], **run}}
+            **({"collection_seconds": 7.5} if reused else {}),
+            "run": {**identity, "observed_gpus": ["NVIDIA L40S"], "started_at": "2026-10-01T02:00:00+00:00",
+                    "finished_at": "2026-10-01T03:00:00+00:00", **run}}
 
 
 def test_training_on_modal_keeps_what_modal_trained_and_costs_its_gpu_seconds(tmp_path, monkeypatch):
@@ -229,7 +231,12 @@ def test_training_on_modal_keeps_what_modal_trained_and_costs_its_gpu_seconds(tm
     assert (manifest["where"], manifest["gpu"], manifest["gpu_seconds"]) == ("modal", config["train"]["gpu"], 100.0)
     assert manifest["cost_usd"] == round(100.0 * price, 4) and manifest["adapter_sha256"] == sha
     assert manifest["served_name"] == f"c0-{sha[:12]}" and manifest["code_sha256"] == code_sha256()
-    assert manifest["stats"] == {**stats, "collected_from_earlier_run": False, "observed_gpus": ["NVIDIA L40S"]}
+    assert manifest["stats"] == {**stats, "collected_from_earlier_run": False, "observed_gpus": ["NVIDIA L40S"],
+                                 "collection_seconds": None}
+    assert (manifest["started_at"], manifest["finished_at"]) == ("2026-10-01T02:00:00+00:00", "2026-10-01T03:00:00+00:00")
+    from bench.train import modal_key
+
+    assert manifest["modal_key"] == result["modal_key"] == modal_key(plan, identity)
     assert result["missing"] == ["c1"]
 
 
@@ -247,6 +254,9 @@ def test_a_reused_result_records_its_own_gpu_seconds_price_and_commit(tmp_path, 
     assert (manifest["price_usd_per_s"], manifest["price_as_of"], manifest["commit"]) == (0.0009, "2026-09-01", "c" * 40)
     assert (manifest["gpu_seconds"], manifest["cost_usd"]) == (200.0, round(200.0 * 0.0009, 4))
     assert manifest["stats"]["collected_from_earlier_run"] is True
+    # the training's own times, not the collection's; the collecting call's seconds apart
+    assert (manifest["started_at"], manifest["finished_at"]) == ("2026-10-01T02:00:00+00:00", "2026-10-01T03:00:00+00:00")
+    assert manifest["stats"]["collection_seconds"] == 7.5
 
 
 def test_a_stored_result_of_another_gpu_or_code_is_refused(tmp_path, monkeypatch):

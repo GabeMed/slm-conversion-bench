@@ -41,7 +41,7 @@ def main(argv=None) -> int:
     p.add_argument("--on", required=True, choices=("local", "modal"), help="local: this machine; modal: a Modal GPU")
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
     p.add_argument("--config", default="config.yaml")
-    p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3")
+    p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")
     p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed")
     p.add_argument("--on", required=True, choices=("local", "modal"), help="where the AIPerf client runs")
     p.add_argument("--concurrency", type=int, nargs="+", help="levels (default: loadtest.concurrency)")

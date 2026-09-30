@@ -122,6 +122,17 @@ def test_verdict_when_the_serving_itself_disagrees_does_not_blame_the_lora():
     assert "not decided" in verdict["action"]
 
 
+def test_undecided_still_reports_a_divergence_it_saw():
+    """No decisive HF-PEFT change (undecided, as decided), but the served adapter diverges from HF-PEFT
+    beyond the near-tie rule while the base matches: the diagnosis says so."""
+    ref_base = {"tokens": [10, 20], "top": [[10, 40], [20]]}
+    ref_adapter = {"tokens": [40, 50], "top": [[40, 10], [50]]}
+    served_adapter = gen([77, 78])  # neither side's token in the other's top-k
+    verdict = parity_verdict([ref_base], [served_adapter], [ref_base], [ref_adapter], STOP)
+    assert verdict["status"] == UNDECIDED and verdict["adapter_matches_peft"] == 0
+    assert "diverges from HF-PEFT on 1 prompt(s)" in verdict["diagnosis"]
+
+
 def test_an_adapter_that_changes_nothing_even_in_peft_leaves_p4_undecided():
     base = [gen([10, 20])]
     verdict = parity_verdict(base, base, base, base, STOP)
@@ -366,6 +377,11 @@ def test_agent_runs_and_the_call_site_record_count_only_b0_runs_on_this_configur
     _agent_run("agent-B0-train-2", "train", config, status="failed", sites=("revise",))
     assert check_agent_runs(config)["status"] == FAIL
     assert check_call_sites(config)["evidence"]["b0_runs"] == {"train": 1, "calib": 0}  # only the slow one, done
+    bad = paths.RUNS / "agent-B0-train-badtime"
+    _agent_run(bad.name, "train", config)
+    manifest = json.loads((bad / "manifest.json").read_text())
+    (bad / "manifest.json").write_text(json.dumps({**manifest, "finished_at": "not a time"}))
+    assert check_agent_runs(config)["evidence"]["runs_without_readable_times"] == [bad.name]  # reported, not dropped
     _agent_run("agent-B0-train-1", "train", config)
     passed = check_agent_runs(config)
     assert passed["status"] == PASS and passed["evidence"]["b0_runs_within_3h"] == ["agent-B0-train-1"]

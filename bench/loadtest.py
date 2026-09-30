@@ -179,6 +179,11 @@ def wait_ready(base_url: str, headers: Dict[str, str], model: str, timeout_s: fl
             if model in cards:
                 return time.monotonic() - started, cards[model]
             last = f"listed {sorted(listed)}"
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):  # the credentials are refused: waiting will not change that
+                raise LoadtestError(f"{base_url} refused the credentials (HTTP {e.code}): check api_key_env and "
+                                    "headers_env") from None
+            last = f"HTTP {e.code}"
         except (urllib.error.URLError, OSError, ValueError) as e:
             last = f"{type(e).__name__}: {e}"
         if time.monotonic() - started > timeout_s:
@@ -198,6 +203,26 @@ def run_aiperf(run_dir: Path, cmd: List[str]) -> int:
     """Run AIPerf inside run_dir; its console output goes to aiperf.out beside its own log."""
     with open(run_dir / "aiperf.out", "w") as out:
         return subprocess.run(cmd, cwd=run_dir, stdout=out, stderr=subprocess.STDOUT).returncode
+
+
+# ---------------------------------------------------------------- one level, here or in the Modal load client
+
+def run_level(run_dir: Path, args: Dict[str, Any], api_key: Optional[str], headers: Dict[str, str],
+              api_key_var: Optional[str], aiperf: Optional[str]) -> Dict[str, Any]:
+    """One concurrency level, the same sequence locally and in modal_apps/loadtest.py: wait for the model,
+    warm up on calls outside the measured slice, write aiperf.yaml (credentials by reference only), run
+    AIPerf, scrub every credential value from what it wrote. `api_key_var` is the variable holding
+    `api_key` in AIPerf's environment."""
+    cmd = aiperf_command(aiperf, args["tokenizer"])
+    sent = auth_headers(api_key, headers)
+    waited, card = wait_ready(args["base_url"], sent, args["model"], args["ready_timeout_s"])
+    warm_up(args["base_url"], sent, args["warmup"], args["timeout_s"])
+    write_aiperf_config(run_dir, aiperf_config(args["url"], args["model"], args["concurrency"], args["request_count"],
+                                               args["timeout_s"], args["stream"], api_key_var if api_key else None,
+                                               args["headers_env"]))
+    returncode = run_aiperf(run_dir, cmd)
+    return {"returncode": returncode, "ready_after_s": waited, "served_model": card,
+            "secrets_redacted_in": scrub_secrets(run_dir, [api_key or "", *headers.values()])}
 
 
 # ---------------------------------------------------------------- the execution
@@ -272,7 +297,10 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     vllm = endpoint["kind"] == "vllm"
     levels = concurrency or settings["concurrency"]
 
-    remote = None
+    remote, aiperf = None, None
+    if on == "local":
+        aiperf = local_aiperf()
+        aiperf_command(aiperf, tok)  # no AIPerf: refused before any run directory or request
     if on == "modal":
         sys.path.insert(0, str(paths.ROOT))
         from modal_apps import loadtest as modal_loadtest
@@ -326,16 +354,9 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                     returncode, waited, card = result["returncode"], result["ready_after_s"], result["served_model"]
                     server_state, redacted = result.get("server_state"), result["secrets_redacted_in"]
                 else:
-                    sent = auth_headers(api_key, headers)
-                    waited, card = wait_ready(endpoint["base_url"], sent, spec["model"], settings["ready_timeout_s"])
-                    server_state = None
-                    warm_up(endpoint["base_url"], sent, warmup, settings["request_timeout_s"])
-                    cmd = aiperf_command(local_aiperf(), tok)
-                    write_aiperf_config(run_dir, aiperf_config(
-                        url, spec["model"], level, settings["request_count"], settings["request_timeout_s"],
-                        settings["stream"], endpoint.get("api_key_env") if api_key else None, endpoint.get("headers_env")))
-                    returncode = run_aiperf(run_dir, cmd)
-                    redacted = scrub_secrets(run_dir, [api_key or "", *headers.values()])
+                    result = run_level(run_dir, args, api_key, headers, endpoint.get("api_key_env"), aiperf)
+                    returncode, waited, card = result["returncode"], result["ready_after_s"], result["served_model"]
+                    server_state, redacted = None, result["secrets_redacted_in"]
                 status = "done" if returncode == 0 and (run_dir / EXPORT).is_file() else "failed"
                 manifest.update({"aiperf_returncode": returncode, "ready_after_s": round(waited, 1),
                                  "served_model": {k: card.get(k) for k in ("id", "root", "parent")},

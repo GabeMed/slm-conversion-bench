@@ -347,11 +347,34 @@ def test_a_failure_is_recorded_without_local_paths(served, monkeypatch):
     assert str(paths.ROOT) not in manifest["stopped_by"]
 
 
-def test_without_aiperf_the_load_test_says_so(served, monkeypatch):
-    config_path, _, _ = served
+def test_without_aiperf_the_load_test_says_so_before_anything(served, monkeypatch):
+    config_path, _, server = served
     monkeypatch.setattr(loadtest, "local_aiperf", lambda: None)
     with pytest.raises(LoadtestError, match="AIPerf is not installed"):
-        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1, 4])
+    assert not list(paths.RUNS.glob("loadtest-*")) and not server.seen and not server.posted
+
+
+def test_refused_credentials_fail_at_once_instead_of_waiting_for_a_cold_start():
+    import time as clock
+
+    server = FakeServer([])
+    handler = server.server.RequestHandlerClass
+
+    def refuse(self):
+        server.seen.append((self.path, None))
+        self.send_response(401)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    handler.do_GET = refuse
+    try:
+        t0 = clock.monotonic()
+        with pytest.raises(LoadtestError, match="refused the credentials \\(HTTP 401\\)"):
+            wait_ready(server.base_url, {"Modal-Key": "wrong"}, "c0", timeout_s=60, poll_s=0.01)
+        assert clock.monotonic() - t0 < 5 and len(server.seen) == 1
+    finally:
+        server.close()
 
 
 def test_a_missing_proxy_auth_variable_stops_the_load_test_before_any_request(served, monkeypatch):

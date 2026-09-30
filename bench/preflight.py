@@ -85,10 +85,12 @@ def check_agent_runs(config: Dict[str, Any]) -> Dict[str, Any]:
     """A done B0 run on this configuration that took at most 3 h (one question end to end, SPEC 7.1)."""
     runs, unreadable = _b0_runs(config)
     within = [m["run_id"] for m in runs if (_hours(m) is not None and _hours(m) <= END_TO_END_HOURS)]
+    bad_times = [m["run_id"] for m in runs if _hours(m) is None]  # reported, not silently dropped
     return _check(
         "agent_end_to_end", f"the agent answers one question end to end within {END_TO_END_HOURS} h (SPEC 7.1)",
         PASS if within else FAIL,
-        {"b0_runs_within_3h": within[-3:], "b0_runs_on_this_config": len(runs), "unreadable_manifests": unreadable},
+        {"b0_runs_within_3h": within[-3:], "b0_runs_on_this_config": len(runs), "unreadable_manifests": unreadable,
+         "runs_without_readable_times": bad_times},
         "use an equivalent controller (same call sites, prompts, order, data flow and repair loop), declared in "
         "the report; if not even that runs by the end of the morning, the fallback of SPEC 7.4")
 
@@ -264,15 +266,16 @@ def parity_verdict(served_base: List[Generation], served_adapter: List[Generatio
         status, action = UNDECIDED, undecided
         diagnosis = ("undecided: HF-PEFT's adapter changes nothing" if not peft_changed else
                      "undecided: HF-PEFT's changes are all near-ties, which cannot tell an applied adapter from an ignored one")
+        if adapter_close < n:  # undecided on the adapter's effect, but not silent about what it did see
+            diagnosis += (f"; and the served adapter diverges from HF-PEFT on {n - adapter_close} prompt(s) while the "
+                          "served base matches HF: investigate that before anything else")
     elif ignored:
         status, action = FAIL, switch
         diagnosis = f"vLLM ignores the adapter on {ignored} prompt(s) where HF-PEFT's change is decisive"
     elif adapter_close < n:
         status, diagnosis, action = FAIL, "the served adapter diverges from HF-PEFT while the served base matches HF", switch
-    elif reproduced:
+    else:  # a decisive change, none ignored and all close: every decisive change is reproduced
         status, diagnosis, action = PASS, f"the served adapter reproduces HF-PEFT, with {reproduced} decisive change(s)", ""
-    else:  # not reachable: decisive, none ignored, all close implies a reproduced decisive change
-        raise PreflightError("P-4 verdict: inconsistent counts")
     return {"status": status, "diagnosis": diagnosis, "action": action, "n_prompts": n,
             "adapter_changes_output": changed, "peft_changes_output": peft_changed, "peft_changes_decisive": decisive,
             "ignored_where_peft_is_decisive": ignored, "reproduced_decisive_changes": reproduced,

@@ -9,6 +9,10 @@ trains with TRL/PEFT (`train_lora`: the same code on a local CPU and in the Moda
                                              `facts.sha256_dir` of this directory, and it is served under the
                                              content-addressed name `<cluster>-<sha256[:12]>`, so a server that
                                              was not redeployed answers 404 instead of serving the old adapter
+
+On Modal the run is detached and its result stored on the adapters volume under `modal_key` (the plan, the
+GPU and the code: every file of bench/ and modal_apps/ and the lock), so re-running the same command collects
+it; changing any of that code in between trains again.
     train/adapters/<cluster>/manifest.json   base and revision, hyper-parameters, dataset sha256, the facts it
                                              was trained on, where it ran, GPU-seconds and cost
 
@@ -310,17 +314,17 @@ def served_name(cluster: str, sha256: str) -> str:
 
 
 def write_manifest(config: Dict[str, Any], plan: Dict[str, Any], stats: Dict[str, Any], adapter: Path, where: str,
-                   billing: Dict[str, Any], code: Dict[str, Any], started: datetime) -> Path:
-    """`billing` (GPU, seconds, price, cost) and `code` (commit) are the training's own: for a result
-    collected from an earlier run, that run's, never today's."""
+                   billing: Dict[str, Any], code: Dict[str, Any], times: Dict[str, Any]) -> Path:
+    """`billing` (GPU, seconds, price, cost), `code` (commit) and `times` (started_at, finished_at) are the
+    training's own: for a result collected from an earlier run, that run's, never today's."""
     from bench.contracts.config import config_sha256
 
     sha = sha256_dir(adapter)
     manifest = {
         **{k: plan[k] for k in ("cluster", "slm", "base", "chat_template_kwargs", "facts", "dataset", "hyperparameters")},
         "served_name": served_name(plan["cluster"], sha), "adapter_sha256": sha, "where": where, **billing,
-        "stats": stats, "config_sha256": config_sha256(config), **code,
-        "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
+        "stats": stats, "config_sha256": config_sha256(config), **code, **times,
+        "written_at": datetime.now(timezone.utc).isoformat(),
     }
     path = adapter.parent / "manifest.json"
     _write_json(path, manifest)
@@ -458,12 +462,16 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
             if (run["gpu"], run["code_sha256"]) != (identity["gpu"], identity["code_sha256"]):
                 raise TrainError("the stored result was trained on another GPU or code than this plan asks")
             stats = {**result["stats"], "collected_from_earlier_run": bool(result.get("reused")),
-                     "observed_gpus": run.get("observed_gpus")}
+                     "observed_gpus": run.get("observed_gpus"),
+                     # a collecting call boots a GPU container too: its seconds, apart from the training's
+                     "collection_seconds": result.get("collection_seconds")}
             seconds = result["function_seconds"]
             billing = {"gpu": run["gpu"], "gpu_seconds": round(seconds, 3),
                        "cost_usd": round(seconds * run["price_usd_per_s"], 4),
                        "price_usd_per_s": run["price_usd_per_s"], "price_as_of": run["price_as_of"]}
-            code = {"commit": run["commit"], "dirty": run["dirty"], "code_sha256": run["code_sha256"]}
+            code = {"commit": run["commit"], "dirty": run["dirty"], "code_sha256": run["code_sha256"],
+                    "modal_key": modal_key(plan, identity)}
+            times = {"started_at": run["started_at"], "finished_at": run["finished_at"]}
         else:
             raise TrainError(f"--on must be local or modal, not {on!r}")
         adapter = _install_adapter(cluster, trained)
@@ -471,9 +479,10 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
         from bench.provenance import git_state
 
         billing, code = gpu_cost(config, None, 0), git_state()  # a local run is not billed
-    manifest = write_manifest(config, plan, stats, adapter, on, billing, code, started)
+        times = {"started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat()}
+    manifest = write_manifest(config, plan, stats, adapter, on, billing, code, times)
     fact, missing = register_adapters(config)
-    return {"manifest": manifest, "fact": fact, "missing": missing}
+    return {"manifest": manifest, "fact": fact, "missing": missing, "modal_key": code.get("modal_key")}
 
 
 def cli(args) -> int:
@@ -483,6 +492,9 @@ def cli(args) -> int:
         print(f"bench train: {e}", file=sys.stderr)
         return 2
     print(result["manifest"].relative_to(paths.ROOT))
+    if result["modal_key"]:
+        print(f"stored on the adapters volume under {result['modal_key']}: the same command collects it only with "
+              "the same plan, GPU and code (any change to bench/, modal_apps/ or the lock trains again)")
     if result["fact"]:
         print(f"adapters fact: {result['fact'].relative_to(paths.ROOT)} (point arms.B4.adapters and arms.B5.adapters at it)")
     else:

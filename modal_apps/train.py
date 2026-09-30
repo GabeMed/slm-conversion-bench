@@ -11,9 +11,9 @@ GPU, price and commit; running the same command again collects it instead of tra
 """
 import json
 import shutil
-import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import modal
@@ -54,11 +54,11 @@ def train_adapter(plan: dict, dataset: bytes, identity: dict) -> dict:
     key = modal_key(plan, identity)
     adapters.reload()
     stored = common.stored_training(common.ADAPTERS, key, time.time(), SETTINGS["train"]["timeout_s"])
-    if stored is not None:
-        return stored
-    common.mark_started(common.ADAPTERS, key, time.time())
-    adapters.commit()
-    try:
+    if stored is not None:  # collected: this call's own seconds (a GPU container booted to read it) recorded apart
+        return {**stored, "collection_seconds": round(time.monotonic() - started, 3)}
+    trained_at = datetime.now(timezone.utc).isoformat()
+
+    def train() -> dict:
         with tempfile.TemporaryDirectory() as work:
             out = Path(work) / "adapter"
             stats = train_lora(plan, rows, out, "cuda")
@@ -66,16 +66,16 @@ def train_adapter(plan: dict, dataset: bytes, identity: dict) -> dict:
             destination = Path(common.ADAPTERS) / sha
             if not destination.exists():
                 shutil.copytree(out, destination)
-            smi = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
-            run = {**identity, "observed_gpus": [line.strip() for line in smi.stdout.splitlines() if line.strip()]}
-            result = {"sha256": sha, "stats": stats, "function_seconds": round(time.monotonic() - started, 3), "run": run}
-            common.store_training(common.ADAPTERS, key, result)
             files = {p.relative_to(out).as_posix(): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
-    finally:  # a failed training releases its marker: the next attempt is not refused as "still running"
-        common.release_started(common.ADAPTERS, key)
-        adapters.commit()
-        hf_cache.commit()
-    return {**result, "files": files, "reused": False}
+        run = {**identity, "observed_gpus": common.gpu_names(),
+               "started_at": trained_at, "finished_at": datetime.now(timezone.utc).isoformat()}
+        return {"sha256": sha, "stats": stats, "function_seconds": round(time.monotonic() - started, 3), "run": run,
+                "files": files}
+
+    # common.run_training: marker committed before, result stored, marker released and committed in a finally
+    result = common.run_training(common.ADAPTERS, key, time.time(), train, adapters.commit)
+    hf_cache.commit()
+    return {**result, "reused": False}
 
 
 @app.function(image=image, gpu=SETTINGS["train"]["gpu"], timeout=SETTINGS["train"]["reference_timeout_s"],

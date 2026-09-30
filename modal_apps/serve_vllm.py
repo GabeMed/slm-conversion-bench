@@ -14,15 +14,14 @@ scaledown_window_s) come from modal_apps/deploy.yaml and BENCH_MIN_CONTAINERS / 
     modal run -m modal_apps.serve_vllm::download           (BENCH_CANDIDATE=<name> for both)
     modal deploy -m modal_apps.serve_vllm
 
-then set the candidate's `endpoint.base_url` to the printed URL + `/v1` and its `endpoint.api_key_env` to a
-local variable holding the same key, and export the variables its `endpoint.headers_env` names (a Modal
-proxy auth token: Modal-Key, Modal-Secret). At start the container records the GPUs it got and the command it
+then set the candidate's `endpoint.base_url` to the printed URL + `/v1`, and export the variables its
+endpoint names: `api_key_env` (SLM_VLLM_API_KEY, the key stored as VLLM_API_KEY in the Modal secret) and
+`headers_env` (SLM_MODAL_KEY, SLM_MODAL_SECRET: a Modal proxy auth token). At start the container records the GPUs it got and the command it
 runs on the vLLM-cache volume (`bench-serving/<name>.json`), which the load test reads back. Before any latency measurement the container warms itself up (a
 request to the base and to each adapter) and AIPerf warms up again.
 """
 import json
 import os
-import subprocess
 
 import modal
 
@@ -66,17 +65,8 @@ def download() -> str:
 class Server:
     @modal.enter()
     def start(self):
-        common.check_auth(PLAN, dict(os.environ))  # fail closed: proxy auth, vLLM's key, or both
-        common.check_adapters(PLAN)
-        self.process = subprocess.Popen(common.vllm_command(PLAN))
-        base = f"http://127.0.0.1:{common.PORT}"
-        common.wait_healthy(base, self.process, PLAN["startup_timeout_s"])
-        common.warm_up(base, PLAN, os.environ.get("VLLM_API_KEY"), PLAN["warmup_timeout_s"])
-        smi = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
-        state = common.state_path(common.VLLM_CACHE, PLAN["name"])
-        state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps(common.serving_state(PLAN, smi.stdout), indent=2))
-        vllm_cache.commit()  # the load client reads it: the GPU it measured is observed, not declared
+        # common.start_serving: fail closed on auth first, then adapters, vLLM, health, warm-up, own state
+        self.process = common.start_serving(PLAN, dict(os.environ), commit=vllm_cache.commit)
 
     @modal.exit()
     def stop(self):

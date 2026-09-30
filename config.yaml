@@ -20,19 +20,20 @@ roles:
     # served under `name` (--served-model-name); adapters under their own served names
     # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
     # `chat_template_kwargs`: how the template renders, the same when serving and training (thinking off);
-    # `endpoint.headers_env`: each header sent with the value of its environment variable (Modal proxy auth)
+    # `endpoint.headers_env`: each header sent with the value of its environment variable (Modal proxy auth);
+    # `endpoint.api_key_env`: vLLM's own key, the second layer (the value stored as VLLM_API_KEY in the Modal secret)
     - name: qwen3-8b
       base: Qwen3-8B
       hf: {repo: Qwen/Qwen3-8B, revision: b968826d9c46dd6066d109eabc6255188de91218}
       chat_template_kwargs: {enable_thinking: false}
-      endpoint: {kind: vllm, base_url: null, api_key_env: null,
+      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
                  headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
     - name: granite-4.2-8b
       base: Granite-4.2-8B
       hf: {repo: ibm-granite/granite-4.2-8b, revision: f8de16cdcdbc6c779ca517604e050d82cc119e44}
       chat_template_kwargs: {enable_thinking: false}
-      endpoint: {kind: vllm, base_url: null, api_key_env: null,
+      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
                  headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
   slm_reserve: [Nemotron-3-Nano-4B]
