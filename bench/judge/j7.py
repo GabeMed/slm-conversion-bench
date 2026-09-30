@@ -3,16 +3,14 @@
 Per cluster of the centroids, **the cheapest engine that passes on calib**, else the production LLM:
 - the calls of a cluster that have gold (SQL generation and repair) pass by **non-inferiority with
   margin Δ/2** (J4, F2's: the engine is the candidate, the teacher the reference, the question the
-  unit), when they number at least `allocation.min_calls` and the SPEC's Δ_cluster is testable: J4's
-  lower confidence bound on EX(engine) − EX(teacher), on the calib pairs, is at or above −Δ_cluster/2.
-  **Δ_cluster is SPEC §6.4's**, (z0.95 + z0.80)·√(d_c/n_c) through J4's `margin`: n_c the cluster's
-  questions on the test, expected as its calib questions × (test questions / calib questions), and
-  d_c **from the pilot**
-  (SPEC §6.4, §7.3), measured on calib before any adapter exists, between the SLM and the production
-  LLM: the discordance J4 measures, on this cluster's calib calls, between the zero-shot replay of the
-  candidate S4 chose (J6) and the teacher. It is one margin per cluster, fixed before any engine is
-  judged, never the discordance of the pairs being judged. A cluster with no pilot pairs has no
-  margin, and so no verdict;
+  unit), when they number at least `allocation.min_calls`: J4, given the margin Δ/2, finds the engine
+  non-inferior to the teacher on the calib pairs. **Δ is SPEC §6.4's**, J4's `margin(d, n, cap)` at
+  n = the test's questions (498), and **d is the pilot's** (SPEC §6.4, §7.3): the discordance J4
+  measures, on this cluster's calls of the pre-registered pilot questions (`bench.data.pilot_sample`),
+  between the zero-shot replay of the candidate S4 chose (J6) and the teacher, both before any
+  adapter exists. It is one margin per cluster, fixed before any engine is judged, never the
+  discordance of the pairs being judged. A cluster with no pilot pairs, or whose Δ is above the cap
+  (not testable), gets no verdict and stays with the production LLM;
 - the calls without gold pass by **agreement with the teacher** of at least
   `thresholds.concordance_min`, over at least `allocation.min_calls` calls: a proxy, declared as
   such (D15), which supports no claim per cluster;
@@ -59,20 +57,18 @@ def passes(entry: Optional[Dict[str, Any]], noninferiority: NonInferiority, sett
     if entry["gold"]:
         gold = entry["gold"]
         engine, teacher = gold["by_question"]["replay"], gold["by_question"]["teacher"]
+        spec = plain(margin(d_pilot, settings["n_test"], settings["delta_cap_pp"])) if d_pilot is not None else None
         test = plain(noninferiority(engine, teacher, settings["delta_cap_pp"], settings["seed"], settings["n_boot"],
-                                    d_pilot=d_pilot))
-        n_c = max(1, round(len(teacher) * settings["n_test"] / settings["n_calib"]))
-        spec = plain(margin(d_pilot, n_c, settings["delta_cap_pp"])) if d_pilot is not None else None
-        # at or above −Δ/2: with no pilot discordance (d = 0, so Δ = 0) an engine whose bound is exactly 0,
-        # one that answers every calib question as the teacher does, passes
-        ok = gold["n"] >= settings["min_calls"] and spec is not None and spec["testable"] \
-            and test["ci_low"] >= -spec["delta"] / 2
+                                    margin=spec["delta"] / 2)) if spec and spec["testable"] else None
+        ok = gold["n"] >= settings["min_calls"] and test is not None and bool(test["noninferior"])
         verdict["gold"] = {"n": gold["n"], "ex_engine": gold["ex_replay"], "ex_teacher": gold["ex_teacher"],
-                           "j4": test, "delta_cluster": dict(spec or {}, d_pilot=d_pilot, n_c=n_c), "passes": bool(ok)}
+                           "j4": test, "delta_cluster": dict(spec or {}, d_pilot=d_pilot, n=settings["n_test"]),
+                           "passes": bool(ok)}
         if not ok:
             verdict["why"].append("gold: fewer calls than allocation.min_calls" if gold["n"] < settings["min_calls"] else
                                   "gold: no pilot pairs in this cluster" if d_pilot is None else
-                                  "gold: not testable" if not spec["testable"] else "gold: not non-inferior at Δ/2")
+                                  "gold: not testable (Δ above the cap)" if not spec["testable"] else
+                                  "gold: not non-inferior at Δ/2")
     if entry["agreement"]:
         agreement = entry["agreement"]
         ok = agreement["n"] >= settings["min_calls"] and agreement["rate"] is not None \
@@ -136,21 +132,31 @@ def mean_costs(calls: List[dict], cluster_of: Dict[Identity, str], prices: Dict[
     return out
 
 
-def pilot_discordance(zeroshot: Dict[str, Dict[str, Any]], noninferiority: NonInferiority, settings: Dict[str, Any]
-                      ) -> Dict[str, Optional[float]]:
-    """{cluster: J4's discordance between the zero-shot candidate and the teacher on its gold calls}."""
+def pilot_discordance(zeroshot: Dict[str, Dict[str, Any]], noninferiority: NonInferiority, settings: Dict[str, Any],
+                      pilot_ids: List[str]) -> Dict[str, Optional[float]]:
+    """{cluster: J4's discordance between the zero-shot candidate and the teacher on its gold calls of
+    the pilot questions}; None when the cluster has none."""
     out = {}
     for cluster, entry in zeroshot.items():
         gold = entry["gold"]
-        out[cluster] = plain(noninferiority(gold["by_question"]["replay"], gold["by_question"]["teacher"],
+        ids = sorted(set(pilot_ids) & set(gold["by_question"]["teacher"])) if gold else []
+        out[cluster] = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
+                                            {q: gold["by_question"]["teacher"][q] for q in ids},
                                             settings["delta_cap_pp"], settings["seed"], settings["n_boot"]))["d"] \
-            if gold else None
+            if ids else None
     return out
+
+
+def registered_pilot(config: Dict[str, Any]) -> List[str]:
+    """The pre-registered pilot questions: F2's `bench.data.pilot_sample` over the calib split."""
+    from bench.data import load_splits, pilot_sample  # F2's
+    return pilot_sample(load_splits()["calib"], config["stats"]["pilot_size"], config["seeds"]["calib_split"])
 
 
 def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teacher_eval_run_id: str,
         j8_path: str, j6_path: str, config: Dict[str, Any], noninferiority: Optional[NonInferiority] = None,
-        margin: Optional[Callable[..., Dict[str, Any]]] = None, n_test: Optional[int] = None):
+        margin: Optional[Callable[..., Dict[str, Any]]] = None, n_test: Optional[int] = None,
+        pilot_ids: Optional[List[str]] = None):
     """`replays` is {"cheap_alt": (replay run, per-call eval run), "slm": (B4 replay run, per-call eval run)};
     `j6_path` the J6 result whose chosen candidate's zero-shot replay is the pilot. Returns (result path, fact path)."""
     if set(replays) != set(ENGINES):
@@ -164,6 +170,8 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
     if n_test is None:
         from bench.data import load_splits
         n_test = len(load_splits()["test"])
+    if pilot_ids is None:
+        pilot_ids = registered_pilot(config)
     centroids, centroids_sha = read_fact(centroids_path, "centroids")
     adapters, adapters_sha = read_fact(adapters_path, "adapters")
     if adapters["centroids"] != centroids_sha or set(adapters["adapters"]) != set(centroids["clusters"]):
@@ -210,13 +218,13 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
         pilot_reads["replay"]["run_id"], pilot_reads["replay_eval"]["run_id"], teacher_eval_run_id)
     if teacher[0]["run_id"] != reads["slm"]["teacher"]["run_id"]:
         raise JudgmentError("the pilot (J6's zero-shot) replays another teacher run than the calib replays")
-    pilot = pilot_discordance(j2.compare(teacher, zeroshot, zeroshot_eval, teacher_eval, group), noninferiority, settings)
-    settings["n_calib"] = len({c["question_id"] for c in teacher})
+    pilot = pilot_discordance(j2.compare(teacher, zeroshot, zeroshot_eval, teacher_eval, group), noninferiority,
+                              settings, pilot_ids)
     decided = allocate(clusters, evidence, costs, noninferiority, settings, pilot, margin)
     fact = write_fact(JUDGMENT, "allocation", {"centroids": centroids_sha, "adapters": adapters_sha,
                                                 "allocation": {c: d["engine"] for c, d in decided.items()}})
     result = {"allocation": {c: d["engine"] for c, d in decided.items()}, "clusters": decided,
               "centroids": centroids_sha, "adapters": adapters_sha, "allocation_fact": {"sha256": fact.parent.name},
-              "slm_cost_utilization": lowest, "slm_cost_basis": "extrapolated from per-adapter load tests",
+              "pilot_ids": sorted(pilot_ids, key=int), "slm_cost_utilization": lowest, "slm_cost_basis": "extrapolated from per-adapter load tests",
               "slm_cost_combined": j8.get("combined"), "settings": settings}
     return write_result(JUDGMENT, reads, result), fact

@@ -80,7 +80,7 @@ def per_call_eval(eval_run_id: str, source_run_id: str, calls: List[dict], corre
 
 
 def fake_noninferiority(correct_a: Dict[str, bool], correct_b: Dict[str, bool], delta_cap_pp: float, seed: int,
-                        n_boot: int, *, d_pilot: Optional[float] = None) -> Dict[str, Any]:
+                        n_boot: int, *, d_pilot: Optional[float] = None, margin: Optional[float] = None) -> Dict[str, Any]:
     """A stand-in for F2's J4 with its contract (bench/judge/j4.py on F2's branch): A, the
     candidate, against B, the reference, on the same questions; diff = EX_A − EX_B; Δ from
     `d_pilot` (or from these pairs, with no verdict); non-inferior when the lower bound is above −Δ.
@@ -88,16 +88,23 @@ def fake_noninferiority(correct_a: Dict[str, bool], correct_b: Dict[str, bool], 
     from bench.judge import JudgeError
     if set(correct_a) != set(correct_b) or not correct_a:
         raise JudgeError("the two arms must be scored on the same questions, and on at least one")
+    if d_pilot is not None and margin is not None:
+        raise JudgeError("give the pilot discordance or the margin, not both")
+    if margin is not None and not 0 <= margin <= delta_cap_pp / 100:
+        raise JudgeError(f"margin must be within [0, {delta_cap_pp / 100}]")
     ids = sorted(correct_a)
     diffs = [int(correct_a[q]) - int(correct_b[q]) for q in ids]
     n = len(ids)
     d = sum(x != 0 for x in diffs) / n
-    delta = (1.6449 + 0.8416) * math.sqrt((d if d_pilot is None else d_pilot) / n)
-    testable = delta * 100 <= delta_cap_pp
+    if margin is not None:  # used as given, testable by construction (F2's J4)
+        delta, testable, margin_from = margin, True, "given"
+    else:
+        delta = (1.6449 + 0.8416) * math.sqrt((d if d_pilot is None else d_pilot) / n)
+        testable, margin_from = delta * 100 <= delta_cap_pp, "pairs" if d_pilot is None else "pilot"
     ci_low = sum(diffs) / n - 1.6449 * math.sqrt(d / n)
-    return {"n": n, "d": d, "d_pilot": d_pilot, "margin_from": "pairs" if d_pilot is None else "pilot",
+    return {"n": n, "d": d, "d_pilot": d_pilot, "margin_from": margin_from,
             "delta": delta, "testable": testable, "diff": sum(diffs) / n, "ci_low": ci_low,
-            "noninferior": ci_low > -delta if testable and d_pilot is not None else None, "power": 0.8}
+            "noninferior": ci_low > -delta if testable and margin_from != "pairs" else None, "power": 0.8}
 
 
 def fake_margin(d: float, n: int, delta_cap_pp: float) -> Dict[str, Any]:

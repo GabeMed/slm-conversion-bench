@@ -9,8 +9,7 @@ from bench.judge.base import JudgmentError, read_result, reference, relative, wr
 from fixtures.fake import repo, write_run
 from fixtures.world import GOLD_SITES, fake_margin, fake_noninferiority, gold_correct, per_call_eval, replay, teacher
 
-SETTINGS = {"delta_cap_pp": 5, "seed": 1, "n_boot": 100, "min_calls": 5, "concordance_min": 0.95,
-            "n_test": 400, "n_calib": 400}  # as many test questions as calib ones: n_c = the calib questions
+SETTINGS = {"delta_cap_pp": 5, "seed": 1, "n_boot": 100, "min_calls": 5, "concordance_min": 0.95, "n_test": 400}
 
 
 def agreement(rate, n=100):
@@ -47,8 +46,7 @@ def test_gold_clusters_need_non_inferiority_at_half_the_margin():
     ev = {"slm": {"c0": gold(teacher_ok, worse)}, "cheap_alt": {"c0": gold(teacher_ok, same)}}
     out = j7.allocate(["c0"], ev, {"c0": {"slm": 1.0, "cheap_alt": 2.0}}, fake_noninferiority, SETTINGS, {"c0": 0.13}, fake_margin)
     assert out["c0"]["engine"] == "cheap_alt"
-    test = out["c0"]["evidence"]["slm"]["gold"]["j4"]
-    assert test["ci_low"] < -test["delta"] / 2 or not test["testable"]
+    assert out["c0"]["evidence"]["slm"]["gold"]["j4"]["noninferior"] is False
     few = {"slm": {"c0": gold({"1": True}, {"1": True})}, "cheap_alt": {}}
     assert j7.allocate(["c0"], few, {"c0": {"slm": 1.0}}, fake_noninferiority, SETTINGS, {"c0": 0.1}, fake_margin)["c0"]["engine"] == "production_llm"
 
@@ -62,19 +60,20 @@ def test_half_the_margin_is_stricter_than_the_margin():
     for q in range(1, 100, 10):   # 10 only the teacher does
         engine_ok[str(q)] = False
     verdict = j7.passes(gold(teacher_ok, engine_ok), fake_noninferiority, SETTINGS, d_pilot=0.05, margin=fake_margin)
-    test = verdict["gold"]["j4"]
-    assert test["testable"] and test["d_pilot"] == test["d"] == 0.05 and test["margin_from"] == "pilot"
-    assert -test["delta"] < test["ci_low"] < -test["delta"] / 2 and test["noninferior"]
+    test, delta = verdict["gold"]["j4"], verdict["gold"]["delta_cluster"]
+    assert delta["testable"] and delta["d_pilot"] == 0.05 and delta["n"] == 400
+    assert test["margin_from"] == "given" and test["delta"] == pytest.approx(delta["delta"] / 2)  # J4 given Δ/2
+    assert -delta["delta"] < test["ci_low"] < -delta["delta"] / 2  # within Δ, not within Δ/2
     assert not verdict["passes"] and verdict["why"] == "gold: not non-inferior at Δ/2"
 
 
 def test_a_comparison_j4_cannot_test_never_passes():
     teacher_ok = {str(q): q < 16 for q in range(20)}
-    engine_ok = {**teacher_ok, "18": True, "19": True}  # better, but on 20 questions Δ is above the cap
-    verdict = j7.passes(gold(teacher_ok, engine_ok), fake_noninferiority, SETTINGS, d_pilot=0.1, margin=fake_margin)
-    test = verdict["gold"]["j4"]
-    assert not test["testable"] and test["ci_low"] > -test["delta"] / 2
-    assert not verdict["passes"] and verdict["why"] == "gold: not testable"
+    engine_ok = {**teacher_ok, "18": True, "19": True}  # better, but the pilot's d puts Δ above the cap
+    verdict = j7.passes(gold(teacher_ok, engine_ok), fake_noninferiority, SETTINGS, d_pilot=0.3, margin=fake_margin)
+    assert not verdict["gold"]["delta_cluster"]["testable"] and verdict["gold"]["j4"] is None
+    assert fake_noninferiority(engine_ok, teacher_ok, 5, 1, 100, margin=0.034)["noninferior"]  # it would pass at Δ/2
+    assert not verdict["passes"] and verdict["why"] == "gold: not testable (Δ above the cap)"
 
 
 def test_the_margin_is_the_pilots_never_the_judged_pairs():
@@ -82,24 +81,34 @@ def test_the_margin_is_the_pilots_never_the_judged_pairs():
     engine_ok = {**teacher_ok, "1": False, "11": False}  # d = 0.005 on the judged pairs
     judged = gold(teacher_ok, engine_ok)
     with_pilot = j7.passes(judged, fake_noninferiority, SETTINGS, d_pilot=0.05, margin=fake_margin)
-    assert with_pilot["gold"]["j4"]["d_pilot"] == 0.05 and with_pilot["gold"]["j4"]["d"] == 0.005
+    assert with_pilot["gold"]["delta_cluster"]["d_pilot"] == 0.05 and with_pilot["gold"]["j4"]["d"] == 0.005
     assert with_pilot["passes"]  # the pilot's wider Δ, fixed beforehand, not this pair's own
     assert not j7.passes(judged, fake_noninferiority, SETTINGS, d_pilot=0.005, margin=fake_margin)["passes"]
     no_pilot = j7.passes(judged, fake_noninferiority, SETTINGS, margin=fake_margin)
     assert not no_pilot["passes"] and no_pilot["why"] == "gold: no pilot pairs in this cluster"
 
 
-def test_the_margin_is_the_specs_delta_cluster_with_the_tests_calls():
-    """SPEC §6.4: Δ_cluster = z·√(d_c/n_c), n_c the cluster's questions on the test. With 2.5× more
-    test questions than calib ones, Δ narrows, and an engine within J4's calib-pair margin fails."""
+def test_delta_is_taken_at_the_tests_n():
+    """SPEC §6.4: Δ = z·√(d/n) with n the test's questions (498), not the calib pairs: a larger n
+    narrows Δ, and an engine within the calib-sized margin fails."""
     teacher_ok = {str(q): q % 10 != 0 for q in range(400)}
     engine_ok = {**teacher_ok, "1": False, "11": False}
     judged = gold(teacher_ok, engine_ok)
     assert j7.passes(judged, fake_noninferiority, SETTINGS, d_pilot=0.05, margin=fake_margin)["passes"]
     spec = {**SETTINGS, "n_test": 1000}
     verdict = j7.passes(judged, fake_noninferiority, spec, d_pilot=0.05, margin=fake_margin)
-    assert verdict["gold"]["delta_cluster"]["n_c"] == 1000 and not verdict["passes"]
-    assert verdict["gold"]["delta_cluster"]["delta"] < verdict["gold"]["j4"]["delta"]
+    wide = j7.passes(judged, fake_noninferiority, SETTINGS, d_pilot=0.05, margin=fake_margin)["gold"]["delta_cluster"]
+    assert verdict["gold"]["delta_cluster"]["n"] == 1000 and not verdict["passes"]
+    assert verdict["gold"]["delta_cluster"]["delta"] < wide["delta"]
+
+
+def test_the_pilot_is_the_registered_questions_only():
+    teacher_ok = {str(q): True for q in range(100)}
+    zeroshot = {**teacher_ok, **{str(q): False for q in range(50, 60)}}  # disagrees only outside the pilot
+    entry = gold(teacher_ok, zeroshot)
+    assert j7.pilot_discordance({"c0": entry}, fake_noninferiority, SETTINGS, [str(q) for q in range(50)]) == {"c0": 0.0}
+    assert j7.pilot_discordance({"c0": entry}, fake_noninferiority, SETTINGS, [str(q) for q in range(100)]) == {"c0": 0.1}
+    assert j7.pilot_discordance({"c0": entry}, fake_noninferiority, SETTINGS, ["999"]) == {"c0": None}
 
 
 def test_a_choice_that_rests_on_the_cost_order_alone_is_flagged():
@@ -168,7 +177,7 @@ def allocation_world(tmp_path, monkeypatch):
 
 def test_run_writes_an_allocation_the_router_accepts(tmp_path, monkeypatch):
     config, centroids, choice, adapters, replays, j8, j6 = allocation_world(tmp_path, monkeypatch)
-    path, fact = j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500)
+    path, fact = j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500, QUESTIONS[:50])
     result = read_result(path, "J7")["result"]
     assert result["clusters"]["c0"]["d_pilot"] > 0 and result["clusters"]["c1"]["d_pilot"] is None  # c1 has no gold
     # gold cluster: the SLM loses EX, cheap_alt matches the teacher; the rest: the SLM agrees always
@@ -189,17 +198,17 @@ def test_run_refuses_mismatched_facts_and_missing_settings(tmp_path, monkeypatch
     other = facts.write_fact("J5", "centroids", {"embedding": facts.read_fact(str(centroids), "centroids")[0]["embedding"],
                                                   "clusters": {"c0": [1.0, 0.0]}})
     with pytest.raises(JudgmentError, match="not trained on these centroids"):
-        j7.run(str(other), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500)
+        j7.run(str(other), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500, QUESTIONS[:50])
     manifest_path = paths.RUNS / "replay-b4" / "manifest.json"
     routed = __import__("json").loads(manifest_path.read_text())
     manifest_path.write_text(__import__("json").dumps({**routed, "facts": {}}))
     with pytest.raises(JudgmentError, match="does not record"):
-        j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500)
+        j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500, QUESTIONS[:50])
     manifest_path.write_text(__import__("json").dumps(routed))
     other_j8 = write_result("J8", {}, {"engine": "slm:granite-4.2-8b", "cost_per_request": {"20%": 0.1}})
     with pytest.raises(JudgmentError, match="not the base of these adapters"):
-        j7.run(str(centroids), str(adapters), replays, "eval-t", str(other_j8), str(j6), config, fake_noninferiority, fake_margin, 500)
+        j7.run(str(centroids), str(adapters), replays, "eval-t", str(other_j8), str(j6), config, fake_noninferiority, fake_margin, 500, QUESTIONS[:50])
     config["allocation"]["min_calls"] = None
     with pytest.raises(JudgmentError, match="min_calls"):
-        j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500)
+        j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500, QUESTIONS[:50])
     assert not (paths.ROOT / "judgments" / "J7").exists()

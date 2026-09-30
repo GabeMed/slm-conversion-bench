@@ -141,6 +141,7 @@ def test_registry_reads_f1s_committed_intents_and_manifests(tmp_path):
 
 TEST_IDS = [str(q) for q in range(5000, 5400)]
 CALIB_IDS = [str(q) for q in range(2000, 2060)]
+PILOT = CALIB_IDS[:50]  # stands in for bench.data.pilot_sample
 QUALITY = {"B0": 1.0, "B1": 0.7, "B2-production": 0.6, "B2-cheap": 0.5, "B3": 0.5, "B4": 0.99, "B5": 0.995}
 
 
@@ -223,7 +224,7 @@ def pipeline(tmp_path, monkeypatch):
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap-calib", "eval-cheap-calib"),
                                                                 "slm": ("replay-B4-calib", "eval-B4-calib")},
                                  "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, fake_noninferiority,
-                                 fake_margin, len(TEST_IDS))
+                                 fake_margin, len(TEST_IDS), PILOT)
     allocated = facts.read_fact(str(allocation), "allocation")[0]["allocation"]
 
     # the arms on test
@@ -290,7 +291,7 @@ def pipeline(tmp_path, monkeypatch):
 
 
 def test_report_end_to_end_on_a_fake_execution(pipeline):
-    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority)
+    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)
     data = json.loads((out / "report.json").read_text())
     markdown = (out / "report.md").read_text()
     for heading in ("## EX and cost per correct query", "## The SPEC §5 map", "## S1–S6", "## S4 desk triage",
@@ -309,6 +310,9 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     assert all(t["margin_from"] == "pilot" for t in data["tests"].values()) and data["repair_test"]["d_pilot"] is not None
     assert "no verdict" not in markdown
     assert data["d_pilot"] == data["tests"]["B0|B4"]["d_pilot"] == data["tests"]["B0|B1"]["d_pilot"]  # one pilot
+    pilot_rows = {arm: {r["question_id"]: r["correct"] for r in read_jsonl(paths.RUNS / f"eval-{arm}-pilot" / "results.jsonl")}
+                  for arm in ("B0", "B3")}
+    assert data["d_pilot"] == sum(pilot_rows["B0"][q] != pilot_rows["B3"][q] for q in PILOT) / len(PILOT)  # the pilot ids only
     assert [r["run_id"] for r in data["registry"]["runs"]] == sorted(f"agent-{arm}-test" for arm in QUALITY)
     assert data["arms"]["B5"]["replaceable_fraction"] is not None
     assert [data["arms"][a]["slm_cost_basis"] for a in ("B3", "B4", "B5")] == [
@@ -324,14 +328,14 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     manifest = json.loads((pipeline["datasets"] / "manifest.json").read_text())
     assert set(manifest["clusters"]) == set(j5["clusters"])
     # re-running gives the same report
-    assert report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority) == out
+    assert report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT) == out
 
 
 def test_a_test_report_needs_the_registry(pipeline):
     import shutil
     shutil.rmtree(paths.ROOT / ".git")
     with pytest.raises(JudgmentError, match="registry"):
-        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority)
+        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)
 
 
 def test_without_a_pilot_no_comparison_gets_a_verdict(pipeline):
@@ -339,7 +343,7 @@ def test_without_a_pilot_no_comparison_gets_a_verdict(pipeline):
     del plan["pilot"]
     pipeline["plan"].write_text(yaml.safe_dump(plan))
     data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary,
-                                  fake_noninferiority) / "report.json").read_text())
+                                  fake_noninferiority, pilot_ids=PILOT) / "report.json").read_text())
     assert all(t["noninferior"] is None for t in data["tests"].values())
     assert report.v1_verdict(data["tests"]["B0|B4"], data["tests"]["B0|B5"]) == "no verdict (no pilot d)"
 
@@ -349,4 +353,4 @@ def test_report_refuses_an_eval_of_another_arm(pipeline):
     plan["arms"]["B1"]["eval"], plan["arms"]["B3"]["eval"] = plan["arms"]["B3"]["eval"], plan["arms"]["B1"]["eval"]
     pipeline["plan"].write_text(yaml.safe_dump(plan))
     with pytest.raises(JudgmentError, match="is not B1 on test"):
-        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority)
+        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)

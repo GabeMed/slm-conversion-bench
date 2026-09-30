@@ -15,11 +15,11 @@ Every figure is read from a judgment or computed by one: J1's per-question table
 (`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
 second), run here through F2's functions. **Every J4 margin comes from the pilot** (SPEC §6.4,
 §7.3), measured on calib before training, between the SLM and the production LLM: `d_pilot` is the
-discordance J4 measures between B3 (the zero-shot SLM) and B0 on the pilot's questions, one number
-for every end-to-end comparison; for repair, between the zero-shot candidate S4 chose and the
-teacher on calib's repair calls (J6's result). A comparison with no pilot gets no verdict (J4
-returns `noninferior: None`), never a pass. The plan names the pilot's executions; that their
-questions are the pre-registered pilot sample is not checked here. The test
+discordance J4 measures between B3 (the zero-shot SLM) and B0 on the pre-registered pilot questions
+(`bench.data.pilot_sample`), one number for every end-to-end comparison; for repair, between the
+zero-shot candidate S4 chose and the teacher on the pilot questions' repair calls (J6's result).
+J4 then takes Δ at n = the test's pairs. A comparison with no pilot gets no verdict (J4 returns
+`noninferior: None`), never a pass. The test
 registry is read from git as F1 records it: `registry/test/<run_id>.intent.json` before a test
 execution starts and `<run_id>.manifest.json` when it ends, as committed at HEAD; an intent with no
 manifest is an interrupted execution.
@@ -112,21 +112,23 @@ def correct_of(rows: List[Dict[str, Any]]) -> Dict[str, bool]:
     return {str(r["question_id"]): bool(r["correct"]) for r in rows}
 
 
-def pilot_d(pilot_evals: Dict[str, str], ex_table: Callable, noninferiority: Callable, settings: tuple) -> Optional[float]:
-    """The pilot's discordance: J4's d between B3 (the zero-shot SLM) and B0 on the same calib questions."""
+def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callable, noninferiority: Callable,
+            settings: tuple) -> Optional[float]:
+    """The pilot's discordance: J4's d between B3 (the zero-shot SLM) and B0 on the pilot questions."""
     if not pilot_evals:
         return None
     if set(pilot_evals) != {"B0", "B3"}:
         raise JudgmentError("the pilot is the zero-shot SLM (B3) against the production LLM (B0) on calib: name those two")
     rows = per_arm(pilot_evals, "calib", ex_table)
     b0, b3 = correct_of(rows["B0"]), correct_of(rows["B3"])
-    if set(b0) != set(b3):
-        raise JudgmentError("the pilot's B0 and B3 executions did not answer the same questions")
-    return plain(noninferiority(b3, b0, *settings))["d"]
+    missing = sorted(set(pilot_ids) - (set(b0) & set(b3)), key=int)
+    if missing:
+        raise JudgmentError(f"the pilot's B0 and B3 executions did not answer every pilot question: {missing[:5]}")
+    return plain(noninferiority({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids}, *settings))["d"]
 
 
 def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_summary: Callable,
-           noninferiority: Callable) -> Dict[str, Any]:
+           noninferiority: Callable, pilot_ids: List[str]) -> Dict[str, Any]:
     """Every number of the report, each from a judgment."""
     split = plan["split"]
     specs = plan.get("arms") or {}
@@ -149,7 +151,7 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
                      "calls": j3["result"]["calls"], "replaceable_fraction": j3["result"]["replaceable_fraction"]}
         sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
     settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
-    d_pilot = pilot_d(pilot_plan, ex_table, noninferiority, settings)
+    d_pilot = pilot_d(pilot_plan, pilot_ids, ex_table, noninferiority, settings)
     tests = {}
     for candidate, reference_arm in PAIRS:
         if candidate in correct and reference_arm in correct:
@@ -178,14 +180,16 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         d = None  # the repair pilot: J6's chosen candidate, zero-shot, against the teacher on calib's repair calls
         zeroshot = ((judged["j6"] or {}).get("per_call_site") or {}).get((judged["j6"] or {}).get("choice"), {})
         gold = (zeroshot.get("revise") or {}).get("gold")
-        if gold:
-            d = plain(noninferiority(gold["by_question"]["replay"], gold["by_question"]["teacher"], *settings))["d"]
+        ids = sorted(set(pilot_ids) & set(gold["by_question"]["teacher"])) if gold else []
+        if ids:
+            d = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
+                                     {q: gold["by_question"]["teacher"][q] for q in ids}, *settings))["d"]
         repair = plain(noninferiority(revise["gold"]["by_question"]["replay"], revise["gold"]["by_question"]["teacher"],
                                       *settings, d_pilot=d))
     registry = test_registry()
     if split == "test" and not registry["available"]:
         raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
-    return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "repair_test": repair, "formats": formats,
+    return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int), "repair_test": repair, "formats": formats,
             "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
             "v3_min_ratio": config["claims"]["v3_min_ratio"], "registry": registry, "sources": sources}
 
@@ -585,7 +589,8 @@ def render(data: Dict[str, Any]) -> str:
 
 
 def run(plan_path: str, config: Dict[str, Any], ex_table: Optional[Callable] = None, ex_summary: Optional[Callable] = None,
-        noninferiority: Optional[Callable] = None, out_root: Optional[Path] = None) -> Path:
+        noninferiority: Optional[Callable] = None, out_root: Optional[Path] = None,
+        pilot_ids: Optional[List[str]] = None) -> Path:
     import yaml
     plan = yaml.safe_load(Path(plan_path).read_text())
     if ex_table is None or ex_summary is None:
@@ -593,7 +598,10 @@ def run(plan_path: str, config: Dict[str, Any], ex_table: Optional[Callable] = N
         ex_table, ex_summary = ex_table or j1.ex_table, ex_summary or j1.ex_summary
     if noninferiority is None:
         from bench.judge.j4 import noninferiority  # F2's J4
-    data = gather(plan, config, ex_table, ex_summary, noninferiority)
+    if pilot_ids is None:
+        from bench.judge.j7 import registered_pilot
+        pilot_ids = registered_pilot(config)
+    data = gather(plan, config, ex_table, ex_summary, noninferiority, pilot_ids)
     data["map"], data["steps"] = claims_map(data), steps(data)
     raw = canonical(data)
     out = (out_root or paths.ROOT / "reports") / hashlib.sha256(raw).hexdigest()
