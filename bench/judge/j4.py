@@ -7,22 +7,24 @@
   A `margin` given explicitly (J7 passes Δ(498)/2 from `margin`) is used as is. Without either, Δ
   is computed from the pairs being judged, reported as such (`margin_from: "pairs"`), and gives no
   verdict: a margin chosen after seeing the data is not the pre-registered one;
-- diff = EX_A − EX_B, and its one-sided 95% lower bound by a paired bootstrap with the question as
-  the unit (resample questions, keep both arms' answers together);
+- diff = EX_A − EX_B, and its one-sided 95% lower bound (`ci_low`) and upper bound (`ci_high`) from
+  one paired bootstrap with the question as the unit (resample questions, keep both arms' answers
+  together), so confirming and refuting read one standard;
 - non-inferior when that bound is above −Δ (a pilot or given margin within the cap, else None);
 - power: of this test at a true difference of 0, with the discordance observed here,
   Φ(Δ/√(d/n) − z0.95). Without a pilot it is 0.80 by construction.
 
 All of Δ, diff and ci_low are in EX units (fractions of questions); `delta_cap_pp` is in percentage
 points. The bootstrap uses `random.Random(seed).random()`, whose sequence is fixed across Python
-versions, and the inverted-CDF quantile (the smallest resampled value with at least 5% of the
-resamples at or below it: the 500th smallest of 10000, its index computed in integers).
+versions. `ci_low` is the inverted-CDF quantile (the smallest resampled value with at least 5% of
+the resamples at or below it: the 500th smallest of 10000) and `ci_high` its mirror (the 500th
+largest), both indices computed in integers.
 """
 import math
 import random
 from fractions import Fraction
 from statistics import NormalDist
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from bench.judge import JudgeError
 
@@ -48,10 +50,19 @@ def lower_quantile(values: list) -> float:
     return ordered[k - 1]
 
 
-def _lower_bound(diffs: list, seed: int, n_boot: int) -> float:
+def upper_quantile(values: list) -> float:
+    """The mirror of `lower_quantile`: the k-th largest value, k = ⌈len·α⌉ in integers."""
+    ordered = sorted(values)
+    k = -(-len(ordered) * _ALPHA.numerator // _ALPHA.denominator)
+    return ordered[len(ordered) - k]
+
+
+def _bounds(diffs: list, seed: int, n_boot: int) -> Tuple[float, float]:
+    """The one-sided lower and upper bounds of the mean difference, from the same resamples."""
     rng = random.Random(seed)
     n = len(diffs)
-    return lower_quantile([sum(diffs[int(rng.random() * n)] for _ in range(n)) / n for _ in range(n_boot)])
+    means = [sum(diffs[int(rng.random() * n)] for _ in range(n)) / n for _ in range(n_boot)]
+    return lower_quantile(means), upper_quantile(means)
 
 
 def noninferiority(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool], delta_cap_pp: float,
@@ -84,13 +95,13 @@ def noninferiority(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool],
         rule = _margin(d if d_pilot is None else d_pilot, n, delta_cap_pp)
         margin_from = "pairs" if d_pilot is None else "pilot"
     delta = rule["delta"]
-    ci_low = _lower_bound(diffs, seed, n_boot)
+    ci_low, ci_high = _bounds(diffs, seed, n_boot)
     if d > 0:
         power = _Z.cdf(delta / math.sqrt(d / n) - _Z.inv_cdf(CONFIDENCE))
     else:  # the arms never disagree: the bound is 0, above -Δ exactly when Δ > 0
         power = 1.0 if delta > 0 else 0.0
     verdict = rule["testable"] and margin_from != "pairs"
     return {"n": n, "a_only": a_only, "b_only": b_only, "d": d, "d_pilot": d_pilot, "margin_from": margin_from,
-            "delta": delta, "testable": rule["testable"], "diff": sum(diffs) / n, "ci_low": ci_low,
+            "delta": delta, "testable": rule["testable"], "diff": sum(diffs) / n, "ci_low": ci_low, "ci_high": ci_high,
             "noninferior": ci_low > -delta if verdict else None, "power": power}
 

@@ -6,7 +6,7 @@ Constants: z0.95 = 1.6448536, z0.80 = 0.8416212, so z0.95 + z0.80 = 2.4864749.""
 import pytest
 
 from bench.judge import JudgeError
-from bench.judge.j4 import lower_quantile, margin, noninferiority
+from bench.judge.j4 import lower_quantile, margin, noninferiority, upper_quantile
 
 
 def arms(both_right, a_only, b_only, both_wrong):
@@ -38,6 +38,8 @@ def test_discordance_difference_margin_and_power_from_the_paired_table():
     assert result["power"] == pytest.approx(0.5451, abs=1e-4)
     # the bootstrap lower bound is near the normal one: -0.04 - 1.6448536 * sqrt((0.20 - 0.04^2) / 500) = -0.0728
     assert result["ci_low"] == pytest.approx(-0.0728, abs=0.005)
+    # and the upper one: -0.04 + 1.6448536 * sqrt((0.20 - 0.04^2) / 500) = -0.0072
+    assert result["ci_high"] == pytest.approx(-0.0072, abs=0.005)
     assert result["testable"] is True and result["noninferior"] is False
 
 
@@ -66,6 +68,8 @@ def test_the_bootstrap_quantile_against_the_exact_binomial():
     a, b = arms(19, 0, 1, 0)
     result = noninferiority(a, b, 5, seed=7, n_boot=20000, d_pilot=0.10)
     assert result["ci_low"] == pytest.approx(-0.15)
+    # P(K = 0) = 0.3585 > 0.05: the top 5% of resamples are all 0
+    assert result["ci_high"] == 0.0
     assert noninferiority(a, b, 5, seed=7, n_boot=20000, d_pilot=0.10) == result  # seeded
 
 
@@ -73,7 +77,7 @@ def test_identical_arms_resample_to_zero_only_when_paired():
     # were the arms resampled independently, the bound would fall below 0
     a, b = arms(300, 0, 0, 200)  # n = 500: delta = 3.52 p.p. with d_pilot = 0.10, testable
     result = noninferiority(a, b, 5, seed=3, n_boot=500, d_pilot=0.10)
-    assert (result["d"], result["diff"], result["ci_low"]) == (0.0, 0.0, 0.0)
+    assert (result["d"], result["diff"], result["ci_low"], result["ci_high"]) == (0.0, 0.0, 0.0, 0.0)
     assert result["noninferior"] is True and result["power"] == 1.0
 
 
@@ -104,11 +108,22 @@ def test_the_lower_bound_is_the_500th_smallest_of_10000():
     assert lower_quantile(list(range(30))) == 1                         # ceil(1.5) = 2: the 2nd, not the 1st
 
 
-def test_the_bootstrap_bound_is_that_quantile(monkeypatch):
+def test_the_upper_bound_is_the_mirror_the_500th_largest_of_10000():
+    values = [i / 10000 for i in range(10000)]  # 500th largest 0.95; the 9500th smallest would be 0.9499
+    assert upper_quantile(list(reversed(values))) == 0.95
+    assert upper_quantile(list(range(30))) == 28                        # ceil(1.5) = 2: the 2nd largest
+    assert upper_quantile([3.0, 1.0, 2.0]) == 3.0                       # ceil(0.15) = 1: the largest
+
+
+def test_the_bootstrap_bounds_are_those_quantiles_of_one_resampling(monkeypatch):
     from bench.judge import j4
-    monkeypatch.setattr(j4, "lower_quantile", lambda values: -0.123)
+    seen = []
+    monkeypatch.setattr(j4, "lower_quantile", lambda values: seen.append(values) or -0.123)
+    monkeypatch.setattr(j4, "upper_quantile", lambda values: seen.append(values) or 0.456)
     a, b = arms(30, 6, 4, 10)
-    assert noninferiority(a, b, 5, seed=1, n_boot=40, d_pilot=0.1)["ci_low"] == -0.123
+    result = noninferiority(a, b, 5, seed=1, n_boot=40, d_pilot=0.1)
+    assert (result["ci_low"], result["ci_high"]) == (-0.123, 0.456)
+    assert len(seen) == 2 and seen[0] == seen[1] and len(seen[0]) == 40  # the same 40 resamples
 
 
 def test_a_given_margin_is_used_as_is():
