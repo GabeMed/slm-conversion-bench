@@ -29,7 +29,11 @@ class PythonListOutputParser(BaseOutputParser):
         if "```python" in output:
             output = output.split("```python")[1].split("```")[0]
         output = re.sub(r"^\s+", "", output)
-        return eval(output)  # Note: Using eval is potentially unsafe, consider using ast.literal_eval if possible.
+        # PATCH 7 (slm-conversion-bench): a literal, never code; a malformed list is a parse failure (retried)
+        try:
+            return literal_eval(output)
+        except Exception as e:
+            raise OutputParserException(f"not a Python list literal: {type(e).__name__}: {e}")
 
 class FilterColumnOutput(BaseModel):
     """Model for filter column output."""

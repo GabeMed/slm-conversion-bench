@@ -8,9 +8,8 @@ from workflow.system_state import SystemState
 from workflow.agents.tool import Tool
 
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+# PATCH 14 (slm-conversion-bench): no .env is loaded; the harness alone sets the environment
 
 class RetrieveContext(Tool):
     """

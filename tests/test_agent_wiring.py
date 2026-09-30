@@ -6,6 +6,8 @@ import json
 import re
 import shutil
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -15,7 +17,7 @@ from langchain_core.messages import AIMessage  # noqa: E402
 from bench import paths  # noqa: E402
 from bench.agent import hooks, runner  # noqa: E402
 from bench.contracts.calls import read_calls, validate_calls  # noqa: E402
-from bench.contracts.config import config_sha256  # noqa: E402
+from bench.contracts.config import config_sha256, load_config  # noqa: E402
 from bench.contracts.facts import FactError  # noqa: E402
 from bench.data import DataError  # noqa: E402
 from bench.evaluate import evaluate  # noqa: E402
@@ -63,11 +65,24 @@ class ScriptedChess:
         raise AssertionError(f"unexpected prompt: {text[:200]}")
 
 
+WORKERS = 4  # the calls of one step in flight together, as in a real run
+
+
+def make_concurrent_repo(root, monkeypatch):
+    """`make_repo`, preprocessed, with the calls of one step concurrent (the smoke configuration
+    it copies runs one at a time, for the local server's sake). Returns (config path, config)."""
+    import yaml
+    _, config_path, _ = make_repo(root, monkeypatch)
+    config = yaml.safe_load(config_path.read_text())
+    config["agent"]["max_workers"] = WORKERS
+    config_path.write_text(yaml.safe_dump(config))
+    runner.preprocess(str(config_path), ["tiny"])
+    return config_path, load_config(config_path)
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    root, config_path, config = make_repo(tmp_path, monkeypatch)
-    runner.preprocess(str(config_path), ["tiny"])
-    return config_path, config
+    return make_concurrent_repo(tmp_path, monkeypatch)
 
 
 def run(monkeypatch, repo, model=None, ids=("1", "2"), arm="B0"):
@@ -107,6 +122,29 @@ def test_agent_actions_are_read_with_the_agents_rules(monkeypatch, repo):
     assert [(c["invocation_key"], c["parsed_output"]) for c in ss] == [
         ("ss:0", {"tool": "filter_column"}), ("ss:1", {"tool": "select_tables"}),
         ("ss:2", {"tool": "select_columns"}), ("ss:3", {"done": True})]
+
+
+def test_the_calls_of_one_step_run_concurrently_and_stay_valid_c1(monkeypatch, repo):
+    active, peak, lock = [0], [0], threading.Lock()
+
+    class Slow(ScriptedChess):
+        def invoke(self, messages):
+            if "is_column_information_relevant" not in messages[-1].content:
+                return super().invoke(messages)
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.05)
+            try:
+                return super().invoke(messages)
+            finally:
+                with lock:
+                    active[0] -= 1
+    _, manifest, calls = run(monkeypatch, repo, model=Slow())
+    assert manifest["status"] == "done" and peak[0] > 1 and validate_calls(calls) == []
+    for question_id in ("1", "2"):
+        keys = [c["invocation_key"] for c in calls if c["question_id"] == question_id and c["call_site"] == "filter_column"]
+        assert len(keys) == len(set(keys)) == 5
 
 
 def test_invocation_keys_identify_each_invocation(monkeypatch, repo):

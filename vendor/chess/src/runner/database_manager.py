@@ -3,7 +3,6 @@ import socket
 import pickle
 from threading import Lock
 from pathlib import Path
-from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from typing import Callable, Dict, List, Any
 import time
@@ -18,7 +17,7 @@ from database_utils.db_catalog.search import query_vector_db
 from bench.agent import hooks  # PATCH 10 (slm-conversion-bench): embeddings from the configuration
 from database_utils.db_catalog.csv_utils import load_tables_description
 
-load_dotenv(override=True)
+# PATCH 14 (slm-conversion-bench): no .env is loaded; the harness alone sets the environment
 DB_ROOT_PATH = Path(os.getenv("DB_ROOT_PATH"))
 
 INDEX_SERVER_HOST = os.getenv("INDEX_SERVER_HOST")
@@ -95,7 +94,8 @@ class DatabaseManager:
                 vector_db_path = self.db_directory_path / hooks.vector_db_dirname()  # PATCH 10
                 if not vector_db_path.is_dir():
                     raise hooks.HarnessError(f"{vector_db_path} does not exist: run `bench preprocess`")
-                self.vector_db = Chroma(persist_directory=str(vector_db_path), embedding_function=hooks.embeddings("context"))
+                self.vector_db = Chroma(persist_directory=str(vector_db_path), embedding_function=hooks.embeddings("context"),
+                                       client_settings=hooks.chroma_settings(vector_db_path))  # PATCH 14: no .env
                 return "success"
             except Exception as e:
                 self.vector_db = "error"

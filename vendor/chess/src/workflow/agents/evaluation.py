@@ -75,6 +75,8 @@ class ExecutionAccuracy(Tool):
             Dict[str, Any]: A dictionary containing the evaluation results.
         """
         
+        if state.task.SQL is None:  # PATCH 13 (slm-conversion-bench): no gold in the agent's state, nothing to compare
+            return {"exec_res": "no gold", "exec_err": "the gold SQL is not in the agent's state (PATCH 13)"}
         response = DatabaseManager().compare_sqls(
             predicted_sql=SQL,
             ground_truth_sql=state.task.SQL,
