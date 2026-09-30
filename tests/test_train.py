@@ -291,21 +291,29 @@ def test_the_modal_key_holds_the_gpu_and_the_code_but_not_the_price_or_commit(tm
 def test_the_code_identity_follows_the_training_code_only(tmp_path):
     """A change to what a training runs trains again; a change elsewhere (a merge of the load test or the
     report) must not make a detached training's result uncollectable and bill a second training."""
-    from bench.train import code_sha256
+    from bench.train import TRAINING_CODE, TrainError, code_sha256
 
-    for rel_path in ("bench/train.py", "bench/contracts/facts.py", "modal_apps/train.py", "modal_apps/common.py",
-                     "env/train/requirements.lock", "bench/loadtest.py", "bench/report.py", "modal_apps/serve_vllm.py"):
+    training = [pattern.replace("*.py", "facts.py") for pattern in TRAINING_CODE]  # one file per entry
+    unrelated = ("bench/loadtest.py", "bench/report.py", "modal_apps/serve_vllm.py")
+    for rel_path in (*training, *unrelated):
         (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel_path).write_text("x")
     before = code_sha256(tmp_path)
-    for unrelated in ("bench/loadtest.py", "bench/report.py", "modal_apps/serve_vllm.py"):
-        (tmp_path / unrelated).write_text("y")
+    for rel_path in unrelated:
+        (tmp_path / rel_path).write_text("y")
     assert code_sha256(tmp_path) == before
-    for training in ("bench/train.py", "bench/contracts/facts.py", "modal_apps/train.py", "modal_apps/common.py",
-                     "env/train/requirements.lock"):
-        (tmp_path / training).write_text("changed")
-        assert code_sha256(tmp_path) != before
+    for rel_path in training:
+        (tmp_path / rel_path).write_text("changed")
+        assert code_sha256(tmp_path) != before, rel_path
         before = code_sha256(tmp_path)
+    (tmp_path / "bench" / "paths.py").unlink()
+    with pytest.raises(TrainError, match="nothing at bench/paths.py"):
+        code_sha256(tmp_path)
+
+
+def test_the_repository_holds_every_entry_of_the_training_code():
+    from bench.train import code_sha256
+    assert len(code_sha256()) == 64
 
 
 def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monkeypatch):

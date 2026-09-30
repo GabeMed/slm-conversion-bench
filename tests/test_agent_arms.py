@@ -13,6 +13,7 @@ from bench import paths  # noqa: E402
 from bench.agent import hooks, runner  # noqa: E402
 from bench.contracts import clusters  # noqa: E402
 from bench.contracts.calls import CALL_SITES, read_calls, validate_calls  # noqa: E402
+from bench.contracts.config import load_config  # noqa: E402
 from bench.contracts.facts import write_fact  # noqa: E402
 from bench.evaluate import evaluate  # noqa: E402
 from synthetic import GOLD  # noqa: E402
@@ -186,9 +187,13 @@ def facts(repo_root, served=("c0", "c1"), embedding=None):
     return choice, centroids
 
 
+QWEN = next(c for c in load_config(paths.ROOT / "config.yaml")["roles"]["slm_candidates"] if c["name"] == "qwen3-8b")
+
+
 def adapters_for(choice, centroids, clusters_):
     return write_fact("S5", "adapters", {
         "slm": "qwen3-8b", "choice": choice.parent.name, "centroids": centroids.parent.name,
+        "base_revision": QWEN["hf"]["revision"], "chat_template_kwargs": QWEN["chat_template_kwargs"],
         "adapters": {c: {"served_name": f"qwen3-8b-{c}", "sha256": f"{i}" * 64} for i, c in enumerate(clusters_)}})
 
 

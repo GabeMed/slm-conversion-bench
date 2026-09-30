@@ -248,6 +248,7 @@ def test_content_that_is_not_text_is_a_harness_failure_with_its_line(run):
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     (line,) = read_calls(calls_path)
     assert line["response_text"] is None and "not text" in line["error"] and validate_calls([line]) == []
+    assert line["usage"]["source"] == "api" and line["usage"]["input"] == 12  # answered and billed
 
 
 def test_the_agent_package_switches_tracing_off_and_runs_drop_chroma_servers(monkeypatch, tmp_path):
@@ -257,6 +258,10 @@ def test_the_agent_package_switches_tracing_off_and_runs_drop_chroma_servers(mon
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
     importlib.reload(bench.agent)
     assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
+    for name in ("DB_ROOT_PATH", "INDEX_SERVER_PORT", "ANONYMIZED_TELEMETRY", *runner.TRACING_OFF):
+        monkeypatch.setenv(name, os.environ.get(name, ""))  # restored after the test, whatever _prepare_chess sets
+    monkeypatch.setattr(hooks, "_config", hooks._config)
     monkeypatch.setenv("CHROMA_SERVER_HOST", "vectors.example.com")
+    monkeypatch.setenv("chroma_server_ssl_enabled", "true")  # Chroma reads its variables in any case
     runner._prepare_chess(load_config(SMOKE), tmp_path)
-    assert "CHROMA_SERVER_HOST" not in os.environ
+    assert "CHROMA_SERVER_HOST" not in os.environ and "chroma_server_ssl_enabled" not in os.environ

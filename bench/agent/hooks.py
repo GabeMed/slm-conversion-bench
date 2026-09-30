@@ -24,7 +24,6 @@ call the model from several threads; the writer and the counters are shared unde
 import json
 import os
 import random
-import re
 import threading
 import time
 import uuid
@@ -87,9 +86,6 @@ class RoutedEngine:
 
     def __init__(self, engine_name: str):
         self.engine_name = engine_name
-
-
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def check_settings(config: Dict[str, Any]) -> None:
@@ -298,7 +294,7 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
         "cluster": chosen.cluster, "engine": chosen.engine, "model_role": spec["model_role"],
         "model": spec["model"], "endpoint": spec["endpoint"]["kind"],
         "prompt_messages": messages,
-        "response_text": output.content if output is not None else None,
+        "response_text": output.content if output is not None and isinstance(output.content, str) else None,
         "parsed_output": _jsonable(parsed) if parsed_ok else None, "parsed_ok": parsed_ok,
         "usage": _usage(output) if output is not None else
         {"input": None, "cached_input": None, "output": None, "source": "missing"},
@@ -378,8 +374,8 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
             error = f"{type(exception).__name__}: {exception}"
             outcome = {"transport": "transport", "model": "failed", "harness": "harness"}[classify(exception)]
         elif not isinstance(output.content, str):  # content parts, not text: nothing here can read them
-            parsed, parsed_ok, outcome, exception = None, False, "harness", None
-            error, output = f"the engine answered {type(output.content).__name__} content, not text", None
+            parsed, parsed_ok, outcome, exception = None, False, "harness", None  # its usage is still recorded
+            error = f"the engine answered {type(output.content).__name__} content, not text"
         else:
             parsed, parsed_ok, error, outcome, exception = interpret(output)
         _harness(call_site, lambda: _record(

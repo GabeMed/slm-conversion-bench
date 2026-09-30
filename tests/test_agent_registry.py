@@ -203,6 +203,23 @@ def test_what_is_committed_never_carries_a_key(monkeypatch):
     assert registry.redact('{"question_ids": ["1", "12"]}', config) == '{"question_ids": ["1", "12"]}'  # intact
 
 
+def test_what_is_committed_never_carries_a_header_credential(monkeypatch):
+    """`headers_env` values (the Modal proxy token of config.yaml's candidates) are credentials like any key:
+    redacted from the public record, and checked for length before a test execution."""
+    config = json.loads(json.dumps(runner.load_config(paths.ROOT / "config.yaml")))
+    headers = config["roles"]["slm_candidates"][0]["endpoint"]["headers_env"]
+    assert set(headers.values()) == {"SLM_MODAL_KEY", "SLM_MODAL_SECRET"}
+    monkeypatch.setenv("SLM_MODAL_KEY", "wk-modal-key-0001")
+    monkeypatch.setenv("SLM_MODAL_SECRET", "ws-modal-secret-0002")
+    assert registry.redact("proxy refused wk-modal-key-0001 / ws-modal-secret-0002", config) == \
+        "proxy refused <redacted> / <redacted>"
+    used = runner.used_key_envs(config, ["slm:qwen3-8b+lora:c0-aa"], retrieval=False)
+    assert set(used) == {"SLM_VLLM_API_KEY", "SLM_MODAL_KEY", "SLM_MODAL_SECRET"}
+    monkeypatch.setenv("SLM_MODAL_SECRET", "short")
+    with pytest.raises(barrier.TestSplitLocked, match="SLM_MODAL_SECRET"):
+        registry.check_keys(used)
+
+
 def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):
     import httpx
     import openai

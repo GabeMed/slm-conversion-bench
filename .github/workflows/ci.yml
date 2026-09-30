@@ -58,4 +58,6 @@ jobs:
         with: {python-version: "3.12"}
       - run: grep -vE '^(nvidia-(cu|nccl|nvjitlink|nvshmem|nvtx)|triton)' env/train/requirements.lock > "$RUNNER_TEMP/train-cpu.lock"
       - run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -r "$RUNNER_TEMP/train-cpu.lock" -e ".[test]"
+      # without the +cpu build pip would take the CUDA one and its libraries, unpinned: fail instead
+      - run: python -c "import torch, sys; sys.exit(f'CUDA torch {torch.__version__}' if torch.version.cuda else 0)"
       - run: pytest -q

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import barrier, data, paths
-from bench.agent import registry
+from bench.agent import TRACING_OFF, registry
 from bench.contracts.calls import read_calls, validate_calls
 from bench.contracts.config import chess_team_config, config_sha256, load_config
 from bench.provenance import git_state, scrub
@@ -46,9 +46,6 @@ def _now() -> datetime:
 # redirects the retrieval embeddings (the chat models get theirs from C2 explicitly), and LangChain
 # tracing ships every prompt to LangSmith. Unset or off, whatever the shell or a .env had.
 REDIRECTING_ENV = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
-# LangSmith takes the first of these it finds (langsmith.utils.get_env_var), so all four are set
-TRACING_OFF = {name: "false" for name in ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2", "LANGSMITH_TRACING",
-                                          "LANGCHAIN_TRACING")}
 
 
 def _prepare_chess(config: Dict[str, Any], db_root: Path):
@@ -59,8 +56,8 @@ def _prepare_chess(config: Dict[str, Any], db_root: Path):
     os.environ.update(TRACING_OFF)
     for name in REDIRECTING_ENV:
         os.environ.pop(name, None)
-    for name in [n for n in os.environ if n.startswith("CHROMA_")]:  # e.g. CHROMA_SERVER_HOST: a remote vector DB
-        os.environ.pop(name)
+    for name in [n for n in os.environ if n.upper().startswith("CHROMA_")]:  # e.g. CHROMA_SERVER_HOST: a remote
+        os.environ.pop(name)  # vector DB; Chroma's settings read their variables in any case
     src = str(paths.VENDOR_CHESS / "src")
     if src not in sys.path:
         sys.path.insert(0, src)
@@ -281,10 +278,11 @@ def select_questions(config: Dict[str, Any], split: str, ids: Optional[List[str]
 
 
 def used_key_envs(config: Dict[str, Any], engines: List[str], retrieval: bool) -> List[str]:
-    """The environment variables holding the keys an execution uses: those of its engines, and
-    OPENAI_API_KEY when it retrieves with OpenAI embeddings."""
-    from bench.contracts.config import engine_spec
-    names = [engine_spec(config, engine)["endpoint"].get("api_key_env") for engine in engines]
+    """The environment variables holding the credentials an execution uses: those of its engines'
+    endpoints (API keys and `headers_env` values), and OPENAI_API_KEY when it retrieves with OpenAI
+    embeddings."""
+    from bench.contracts.config import endpoint_credential_envs, engine_spec
+    names = [name for engine in engines for name in endpoint_credential_envs(engine_spec(config, engine)["endpoint"])]
     if retrieval and config["embeddings"]["provider"] == "openai":
         names.append("OPENAI_API_KEY")
     return [name for name in names if name]

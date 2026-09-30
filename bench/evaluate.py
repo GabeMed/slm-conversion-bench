@@ -283,12 +283,8 @@ def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[st
         raise data.DataError(f"run {source_run_id} is {run_manifest['status']!r}, not 'done': "
                              f"an incomplete or failed run is never scored")
     if split == "test":  # the run is scored by the analysis code that was registered, not by today's
-        from bench.prereg import analysis_code
-        registered = json.loads((paths.ROOT / barrier.PREREG_MANIFEST).read_text()).get("analysis_code") or {}
-        now = analysis_code(paths.ROOT)
-        changed = sorted(rel for rel in set(registered) | set(now) if registered.get(rel) != now.get(rel))
-        if changed:
-            raise data.DataError(f"the analysis code differs from the pre-registered one: {', '.join(changed[:10])}")
+        from bench.prereg import check_registered_analysis_code
+        check_registered_analysis_code(paths.ROOT)
     return run_manifest, config, data.questions_for(config, split)
 
 

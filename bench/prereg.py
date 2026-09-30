@@ -22,9 +22,10 @@ from bench.data import DataError, pilot_sample
 from bench.judge import j4
 
 # The analysis code the registration hashes, so no reading of the results changes without changing
-# prereg/HASH: every tracked file under these paths (bench/report.py once it exists).
-# every file whose code can change a score, a judgment or a verdict: the contracts too (agreement,
-# the C1 reader, the facts, the configuration) and the paths they resolve
+# prereg/HASH: every tracked file under these paths, which is every file whose code can change a score,
+# a judgment or a verdict: the contracts too (agreement, the C1 reader, the facts, the configuration)
+# and the paths they resolve. The contracts include the router, so a routing change after the
+# registration needs a new one too.
 ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py", "bench/contracts",
                  "bench/paths.py")
 REQUIRED_ANALYSIS = ("bench/judge/j4.py", "bench/evaluate.py", "bench/data.py")
@@ -76,12 +77,17 @@ def _sha256(path: Path) -> str:
 
 
 def analysis_code(root: Path) -> Dict[str, str]:
-    """The sha256 of every tracked file of the analysis code, by path."""
-    ignored = [rel for rel in _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--",
-                                   *ANALYSIS_CODE).splitlines()
-               if "__pycache__/" not in rel and not rel.endswith(".pyc")]
-    if ignored:  # code that would run here but that the registered commit does not hold
-        raise PreregError(f"analysis code ignored by git: {', '.join(sorted(ignored))}")
+    """The sha256 of every tracked file of the analysis code, by path. Python code under it that git does
+    not track would run here while no commit holds it: refused (bytecode, .DS_Store and the like are not)."""
+    def untracked(*flags: str) -> List[str]:
+        return sorted(rel for rel in _git(root, "ls-files", "--others", *flags, "--", *ANALYSIS_CODE).splitlines()
+                      if rel.endswith(".py"))
+    ignored = untracked("--ignored", "--exclude-standard")
+    if ignored:
+        raise PreregError(f"analysis code ignored by git: {', '.join(ignored)}")
+    uncommitted = untracked("--exclude-standard")
+    if uncommitted:
+        raise PreregError(f"analysis code not committed: {', '.join(uncommitted)}")
     files = sorted(_git(root, "ls-files", "--", *ANALYSIS_CODE).splitlines())
     missing = [rel for rel in REQUIRED_ANALYSIS if rel not in files]
     if missing:
@@ -116,6 +122,18 @@ def unset(node: Any, where: str = "") -> List[str]:
         return [where]
     items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else []
     return [path for key, value in items for path in unset(value, f"{where}.{key}" if where else str(key))]
+
+
+def check_registered_analysis_code(root: Path) -> None:
+    """A test result is produced only by the analysis code that was registered (prereg/manifest.json),
+    file by file; a registration that recorded none matches no code. For whatever scores or reads the
+    test: bench eval, and the report."""
+    registered = json.loads((root / barrier.PREREG_MANIFEST).read_text()).get("analysis_code") or {}
+    now = analysis_code(root)
+    changed = sorted(rel for rel in set(registered) | set(now) if registered.get(rel) != now.get(rel))
+    if changed:
+        raise PreregError(f"the analysis code differs from the pre-registered one: {', '.join(changed[:10])}"
+                          + (f" and {len(changed) - 10} more" if len(changed) > 10 else ""))
 
 
 def register(config_path: str, root: Optional[Path] = None, replace: bool = False) -> Dict[str, Any]:

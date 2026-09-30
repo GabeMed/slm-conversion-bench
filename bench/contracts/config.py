@@ -171,7 +171,8 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     for name, pin in config["data"].items():
         if not isinstance(pin, dict) or not pin.get("url") or not pin.get("sha256"):
             errors.append(f"data.{name} needs url and sha256")
-    errors += agent_settings_errors(config)
+    if not errors:  # the agent's settings read the keys checked above
+        errors += agent_settings_errors(config)
     return errors
 
 
@@ -198,3 +199,20 @@ def engine_spec(config: Dict[str, Any], engine: str) -> Dict[str, Any]:
                         "endpoint": candidate["endpoint"], "params": candidate.get("params") or {}}
         raise ConfigError(f"engine {engine!r}: no slm candidate named {name!r}")
     raise ConfigError(f"unknown engine {engine!r}")
+
+
+def endpoint_credential_envs(endpoint: Dict[str, Any]) -> List[str]:
+    """The environment variables whose values an endpoint sends as credentials: its API key and the value
+    of every header in `headers_env`."""
+    names = [endpoint.get("api_key_env"), *(endpoint.get("headers_env") or {}).values()]
+    return [name for name in names if name]
+
+
+def credential_envs(config: Dict[str, Any]) -> List[str]:
+    """Every credential variable of the configuration: those of each engine's endpoint, and OPENAI_API_KEY
+    (the retrieval embeddings'). The one list whatever must know the credentials reads (the redaction of
+    the public record, the key-length check), so a credential field added to C2 is added here."""
+    roles = config["roles"]
+    specs = [roles.get(role) for role in SINGLE_MODEL_ROLES] + list(roles.get("slm_candidates") or [])
+    names = {name for spec in specs for name in endpoint_credential_envs((spec or {}).get("endpoint") or {})}
+    return sorted(names | {"OPENAI_API_KEY"})

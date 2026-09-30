@@ -6,5 +6,7 @@ switching it off later would be too late. The same switch is applied again when 
 """
 import os
 
-for _name in ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2", "LANGSMITH_TRACING", "LANGCHAIN_TRACING"):
-    os.environ[_name] = "false"
+# LangSmith takes the first of these it finds (langsmith.utils.get_env_var), so all four are set
+TRACING_OFF = {name: "false" for name in ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2", "LANGSMITH_TRACING",
+                                          "LANGCHAIN_TRACING")}
+os.environ.update(TRACING_OFF)
