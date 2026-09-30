@@ -93,7 +93,7 @@ def test_pairing_is_by_id_not_by_position(db):
     gold = {q: {"question_id": q, "db_id": "t", "SQL": f"SELECT v FROM t WHERE id = {q}"} for q in ("9", "1", "10")}
     predictions = {"10": "SELECT v FROM t WHERE id = 10", "1": "SELECT v FROM t WHERE id = 1",
                    "9": "SELECT v FROM t WHERE id = 8"}
-    results = {r["question_id"]: r for r in score(predictions, gold, lambda _: db, 5)}
+    results = {r["question_id"]: r for r in score(predictions, gold, lambda _: db, 5, "2026-09-30")}
     assert {q: r["correct"] for q, r in results.items()} == {"1": True, "9": False, "10": True}
     assert all(r["gold_sql"] == gold[q]["SQL"] for q, r in results.items())
 
@@ -101,7 +101,7 @@ def test_pairing_is_by_id_not_by_position(db):
 def test_rows_compare_as_sets_and_missing_prediction_is_wrong(db):
     gold = {"1": {"db_id": "t", "SQL": "SELECT v FROM t WHERE id < 3 ORDER BY id"},
             "2": {"db_id": "t", "SQL": "SELECT 1"}}
-    results = score({"1": "SELECT v FROM t WHERE id < 3 ORDER BY id DESC", "2": None}, gold, lambda _: db, 5)
+    results = score({"1": "SELECT v FROM t WHERE id < 3 ORDER BY id DESC", "2": None}, gold, lambda _: db, 5, "2026-09-30")
     assert [r["correct"] for r in results] == [True, False]
     assert results[1]["pred_error"] == "no prediction"
 

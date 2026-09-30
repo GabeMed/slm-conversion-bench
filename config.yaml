@@ -133,7 +133,7 @@ data:
 
 eval:
   timeout_s: 60
-  fixed_date: null             # F2: pre-registered date substituted for 'now' in pred and gold
+  fixed_date: "2026-09-30"     # F2: 'now' in pred and gold is this date at 00:00 UTC (quoted: a YAML date breaks the hash)
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B3: {choice: null}           # J6 (S4)
