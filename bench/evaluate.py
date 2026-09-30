@@ -169,3 +169,18 @@ def evaluate(source_run_id: str) -> Path:
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return out
+
+
+def check_golds(questions: Dict[str, List[dict]], db_path: Callable[[str], Path], timeout_s: float,
+                day: str) -> Dict[str, Any]:
+    """Execute every gold of every split as the evaluator will (fixed date, read-only, timeout);
+    the ones that fail are a fact of the data, recorded by `bench data` in data/MANIFEST.json."""
+    failures = []
+    for split, items in questions.items():
+        for question in items:
+            _, error = execute(db_path(question["db_id"]), fix_date(question["SQL"], day)[0], timeout_s)
+            if error is not None:
+                failures.append({"split": split, "question_id": question["question_id"],
+                                 "db_id": question["db_id"], "error": error})
+    return {"fixed_date": day, "timeout_s": timeout_s, "sqlite_version": sqlite3.sqlite_version,
+            "checked": {split: len(items) for split, items in questions.items()}, "failures": failures}

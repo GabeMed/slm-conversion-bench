@@ -130,6 +130,9 @@ data:
   plat_sql_test:               # Arcwise-Plat-SQL, 498 questions, used as in the file (D14)
     url: https://raw.githubusercontent.com/uiuc-kang-lab/text_to_sql_benchmarks/fe766045c55b6875a43b30e9ac7683df5582f8cf/data/arcwise_plat_sql_only_with_diff.json
     sha256: e7bf76408f99266506ea558d84982c69422e5db3dfecab5f08a3a8d3900e8395
+  mini_dev:                    # BIRD Mini-Dev (SQLite), 500 questions: only the difficulty of the test ids (F2)
+    url: https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/f65faf4ae3b638c1fa6df1d3370c8d92c8366301/data/mini_dev_sqlite-00000-of-00001.json
+    sha256: 88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2
 
 eval:
   timeout_s: 60

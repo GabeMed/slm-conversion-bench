@@ -131,6 +131,30 @@
       "sqlite": "f5fa7f21af1ad878ff8fef1b0582b8cb2d7ed63dbac65ff16d2ba05667650c5b"
     }
   },
+  "gold_check": {
+    "checked": {
+      "calib": 200,
+      "test": 498,
+      "train": 834
+    },
+    "failures": [
+      {
+        "db_id": "european_football_2",
+        "error": "timeout",
+        "question_id": "1131",
+        "split": "train"
+      },
+      {
+        "db_id": "codebase_community",
+        "error": "timeout",
+        "question_id": "701",
+        "split": "test"
+      }
+    ],
+    "fixed_date": "2026-09-30",
+    "sqlite_version": "3.53.1",
+    "timeout_s": 60
+  },
   "inputs": {
     "bird_dev_databases": {
       "sha256": "cdd6d19faeb45a23970b98d3ef6c40a87987c95459c2cf12076897a60cf5a630",
@@ -139,6 +163,10 @@
     "bird_dev_questions": {
       "sha256": "ffd8018378ddb1a8794753e0a31cfc81862ff7318a5184c22f3dc4ce03a03feb",
       "url": "https://huggingface.co/datasets/birdsql/bird_sql_dev_20251106/resolve/3c11fb193e5439b338e23677fa0aae11e8b85db9/data/dev_20251106-00000-of-00001.json"
+    },
+    "mini_dev": {
+      "sha256": "88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2",
+      "url": "https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/f65faf4ae3b638c1fa6df1d3370c8d92c8366301/data/mini_dev_sqlite-00000-of-00001.json"
     },
     "plat_sql_test": {
       "sha256": "e7bf76408f99266506ea558d84982c69422e5db3dfecab5f08a3a8d3900e8395",
