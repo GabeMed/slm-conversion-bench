@@ -25,8 +25,39 @@ from bench import barrier, data, paths
 from bench.agent import hooks
 from bench.agent.runner import _prepare_chess, check_engines, few_shot_for, finish, open_run
 from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES, read_calls, validate_calls
-from bench.contracts.config import engine_spec, load_config
+from bench.contracts.config import config_sha256, engine_spec, load_config
 from bench.provenance import scrub
+
+POLICY_BLOCKS = ("call_sites", "retries", "agent")  # temperatures, retry budgets, parsers and templates
+
+
+def differences(source: Any, replay: Any, path: str) -> List[str]:
+    """Where two configuration blocks differ, as dotted paths with both values."""
+    if isinstance(source, dict) and isinstance(replay, dict):
+        found = []
+        for key in sorted(set(source) | set(replay), key=str):
+            where = f"{path}.{key}"
+            if key not in source:
+                found.append(f"{where}: absent in the source, {json.dumps(replay[key])} here")
+            elif key not in replay:
+                found.append(f"{where}: {json.dumps(source[key])} in the source, absent here")
+            else:
+                found += differences(source[key], replay[key], where)
+        return found
+    return [] if source == replay else [f"{path}: {json.dumps(source)} in the source, {json.dumps(replay)} here"]
+
+
+def _same_policy(source_run_id: str, source: Dict[str, Any], config: Dict[str, Any]) -> None:
+    """A replay answers the source's invocations under the source's policy: the same temperatures,
+    parsers and templates, and the same retry budgets, or the pairing J2 makes compares two policies."""
+    source_config = json.loads((paths.RUNS / source_run_id / "config.json").read_text())
+    if config_sha256(source_config) != source["config_sha256"]:
+        raise data.DataError(f"the configuration snapshot of {source_run_id} does not match its manifest")
+    found = [d for block in POLICY_BLOCKS for d in differences(source_config.get(block), config.get(block), block)]
+    if found:
+        raise data.DataError(f"the replay's configuration differs from {source_run_id}'s in "
+                             f"{', '.join(POLICY_BLOCKS)}: " + "; ".join(found[:10]))
+
 
 TOOL_PARSERS = {"extract_keywords": ("information_retriever", "extract_keywords"),
                 "filter_column": ("schema_selector", "filter_column"),
@@ -88,6 +119,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
     source = _source(source_run_id)
     split = source["split"]
     barrier.ensure_split_allowed(split, config)  # the source run's split
+    _same_policy(source_run_id, source, config)
     unknown = set(call_sites or ()) - set(CALL_SITES)
     if unknown:
         raise data.DataError(f"unknown call sites: {sorted(unknown)}")
@@ -107,7 +139,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
         facts = {name: sha for name, (_, sha) in arm_facts(arm, config).items()}
     check_engines(config, engines, embeddings=False)  # nothing is retrieved: the prompts are the source's
     # (building CHESS's agents below, to read their answers, touches no embedding: patch 10 builds them at first use)
-    few_shot, provenance = few_shot_for(config, engines)
+    few_shot, recorded = few_shot_for(config, engines)
     _prepare_chess(config, paths.bird_root(config))
     reader = readers(config)
     resend = [(record, reader(record)) for record in records]  # every record readable before anything runs
@@ -116,7 +148,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
     fields = {"source_run_id": source_run_id, "source_config_sha256": source["config_sha256"],
               "source_calls_sha256": hashlib.sha256(calls_path.read_bytes()).hexdigest(),
               "engine": engine, "arm": arm, "call_sites": sorted(call_sites) if call_sites else None,
-              "question_ids": question_ids, "n_invocations": len(records), "facts": facts, "few_shot": provenance}
+              "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded}
     label = arm or re.sub(r"[^A-Za-z0-9_.-]+", "_", engine)
     run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields)
     outcome = {"harness_errors": {}, "model_failures": {}, "replayed": set()}
@@ -127,12 +159,16 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
         stopped_by = scrub(f"{type(e).__name__}: {e}")
         raise
     finally:
+        empty = [] if records else [f"no invocation to replay: {source_run_id} has none"
+                                    + (f" at the call sites {sorted(call_sites)}" if call_sites else "")]
+
         def status(c1_errors, changed):
-            if outcome["harness_errors"] or c1_errors:
+            if outcome["harness_errors"] or c1_errors or empty:
                 return "failed"
             return "done" if outcome["replayed"] == set(question_ids) else "interrupted"
         finish(manifest, run_dir, config, [], outcome, stopped_by, status,
-               {"n_questions_replayed": len(outcome["replayed"]), "model_failures": outcome["model_failures"]})
+               {"n_questions_replayed": len(outcome["replayed"]), "model_failures": outcome["model_failures"]},
+               problems=empty)
     return run_dir
 
 

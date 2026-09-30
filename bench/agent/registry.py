@@ -2,6 +2,7 @@
 observed on train and calib (REQ-001; SPEC 7.1).
 
 Test executions, in git (the history is the record, no ledger file):
+- an execution on `test` starts only when every earlier commit of `registry/` is on origin/main;
 - before an execution on `test` starts, `registry/test/<run_id>.intent.json` is committed (run id,
   type, arm, the `prereg/HASH` it runs under, time, code commit);
 - when it ends, whatever its status, its `manifest.json` is committed as
@@ -40,12 +41,12 @@ _KEY_LIKE = re.compile(r"\b(sk|hf)[-_][A-Za-z0-9_\-*.]{6,}")
 
 def redact(text: str, config: Dict[str, Any]) -> str:
     """What is committed to a public repository never carries a key: the values of every
-    `api_key_env` of the configuration, and anything shaped like a key (provider error bodies
-    sometimes echo a masked one)."""
+    `api_key_env` of the configuration and of OPENAI_API_KEY, and anything shaped like a key
+    (provider error bodies sometimes echo a masked one)."""
     roles = config["roles"]
     specs = [roles["production_llm"], roles["cheap_alt"], *(roles.get("slm_candidates") or [])]
-    for spec in specs:
-        name = ((spec or {}).get("endpoint") or {}).get("api_key_env")
+    names = [((spec or {}).get("endpoint") or {}).get("api_key_env") for spec in specs]
+    for name in [*names, "OPENAI_API_KEY"]:  # the retrieval embeddings' key too
         value = os.environ.get(name) if name else None
         if value:
             text = text.replace(value, "<redacted>")
@@ -95,6 +96,19 @@ def update_call_sites(run_ids: List[str]) -> Path:
     return path
 
 
+def registry_pushed() -> None:
+    """Every earlier registry commit is on origin/main (checked after the barrier's fetch): a record
+    that lives only in a local clone is no record."""
+    result = _git("log", "--oneline", "origin/main..HEAD", "--", "registry/")
+    if result.returncode != 0:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot compare registry/ with origin/main "
+                                      f"({result.stderr.strip()})")
+    unpushed = result.stdout.strip().splitlines()
+    if unpushed:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: {len(unpushed)} commit(s) of registry/ are "
+                                      f"not on origin/main: push the registry first")
+
+
 def registered_call_sites() -> Dict[str, Any]:
     """The committed set, for an execution on test: {"call_sites": [...], "sha256": ...}."""
     path = paths.ROOT / CALL_SITES_FILE
@@ -105,6 +119,7 @@ def registered_call_sites() -> Dict[str, Any]:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} is not committed")
     if _git("diff", "--quiet", "HEAD", "--", CALL_SITES_FILE).returncode != 0:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} has uncommitted changes")
+    registry_pushed()
     call_sites = json.loads(path.read_text()).get("call_sites") or []
     if not call_sites:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} registers no call site")

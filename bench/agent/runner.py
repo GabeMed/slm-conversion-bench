@@ -42,11 +42,21 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Variables that would change where a request goes, or send it elsewhere too: an OpenAI base URL
+# redirects the retrieval embeddings (the chat models get theirs from C2 explicitly), and LangChain
+# tracing ships every prompt to LangSmith. Unset or off, whatever the shell or a .env had.
+REDIRECTING_ENV = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
+TRACING_OFF = {"LANGCHAIN_TRACING_V2": "false", "LANGSMITH_TRACING": "false"}
+
+
 def _prepare_chess(config: Dict[str, Any], db_root: Path):
     """Point CHESS at the databases and templates, and hand it the configuration."""
     os.environ["DB_ROOT_PATH"] = str(db_root)
     os.environ.setdefault("INDEX_SERVER_PORT", "0")  # read at import by CHESS; unused by IR -> SS -> CG
     os.environ["ANONYMIZED_TELEMETRY"] = "False"  # Chroma would otherwise send usage telemetry
+    os.environ.update(TRACING_OFF)
+    for name in REDIRECTING_ENV:
+        os.environ.pop(name, None)
     src = str(paths.VENDOR_CHESS / "src")
     if src not in sys.path:
         sys.path.insert(0, src)
@@ -216,12 +226,14 @@ def _check_arm(config: Dict[str, Any], arm: str) -> Dict[str, str]:
     return {name: sha for name, (_, sha) in arm_facts(arm, config).items()}
 
 
-def few_shot_for(config: Dict[str, Any], engines: List[str]) -> Tuple[Optional[Dict], Optional[Dict]]:
-    """B1's prefix, when `cheap_alt` can be reached: (prefix, provenance), else (None, None)."""
+def few_shot_for(config: Dict[str, Any], engines: List[str]) -> Tuple[Optional[Dict], Dict[str, Any]]:
+    """B1's prefix when `cheap_alt` can be reached, else None; and the manifest fields that record
+    it (`few_shot`, `few_shot_k`, `few_shot_sha256`, all null when there is no prefix)."""
     if "cheap_alt" not in engines:
-        return None, None
+        return None, {"few_shot": None, "few_shot_k": None, "few_shot_sha256": None}
     from bench.agent import few_shot
-    return few_shot.build(config)
+    prefix, provenance = few_shot.build(config)
+    return prefix, {"few_shot": provenance, "few_shot_k": provenance["k"], "few_shot_sha256": few_shot.digests(prefix)}
 
 
 def _preprocess_stamps(config: Dict[str, Any], db_dir: Path) -> Dict[Path, Dict[str, Any]]:
@@ -306,17 +318,18 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         check_engines(config, [engine], embeddings=False)  # no retrieval: no embeddings, no preprocessing
         _prepare_chess(config, paths.bird_root(config))
         single_call_prompt(config)
-        facts, few_shot, provenance = {}, {}, None
+        facts, few_shot = {}, {}
+        recorded = {"few_shot": None, "few_shot_k": None, "few_shot_sha256": None}  # B2 gets no prefix
     else:
         from bench.contracts.router import possible_engines
         facts = _check_arm(config, arm)
-        few_shot, provenance = few_shot_for(config, possible_engines(arm, config))
+        few_shot, recorded = few_shot_for(config, possible_engines(arm, config))
     for db_id in databases:
         data.check_database(config, db_id)
     if arm != "B2":
         _check_preprocessed(config, databases)
 
-    fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, "few_shot": provenance}
+    fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded}
     if arm == "B2":
         fields.update({"mode": "single_call", "engine": engine})
     run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
@@ -344,10 +357,10 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
 
 def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], databases: List[str],
            outcome: Dict[str, Any], stopped_by: Optional[str], status: Callable[[int, List[str]], str],
-           fields: Dict[str, Any]) -> None:
+           fields: Dict[str, Any], problems: Optional[List[str]] = None) -> None:
     """Close the manifest whatever happened; a failure to read the evidence is itself recorded.
     On the test split, the manifest is then committed to the registry."""
-    problems = []
+    problems = list(problems or [])
     try:
         calls = read_calls(run_dir / "calls.jsonl") if (run_dir / "calls.jsonl").exists() else []
         c1_errors = len(validate_calls(calls))

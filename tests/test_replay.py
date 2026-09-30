@@ -18,6 +18,7 @@ from bench.contracts import clusters  # noqa: E402
 from bench.contracts.calls import CALL_SITES, read_calls, validate_calls  # noqa: E402
 from bench.contracts.facts import write_fact  # noqa: E402
 from test_agent_arms import Revising, adapters_for, by_column_filter, facts, rel, repo, set_config  # noqa: E402,F401
+from test_agent_wiring import ScriptedChess  # noqa: E402
 
 
 @pytest.fixture
@@ -148,3 +149,37 @@ def test_a_replay_needs_no_retrieval_embeddings(monkeypatch, repo, source):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _, manifest, calls = replayed(monkeypatch, repo, source, engine="slm:qwen3-8b")
     assert manifest["status"] == "done" and calls
+
+
+@pytest.mark.parametrize("block,path,value", [
+    ("call_sites", ("select_tables", "temperature"), 0.7),
+    ("retries", ("parse_max_attempts",), 5),
+    ("agent", ("team_agents", "schema_selector", "tools", "select_tables", "parser_name"), "select_columns"),
+])
+def test_a_replay_runs_under_the_sources_policy(monkeypatch, repo, source, block, path, value):
+    config = yaml.safe_load(repo.read_text())
+    node = config[block]
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    repo.write_text(yaml.safe_dump(config))
+    runs = set(paths.RUNS.iterdir())
+    with pytest.raises(runner.data.DataError, match=".".join((block, *path))):  # the difference, named
+        replay(str(repo), source, engine="production_llm")
+    assert set(paths.RUNS.iterdir()) == runs
+
+
+def test_an_empty_replay_fails_with_its_reason(monkeypatch, repo):
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    plain = runner.run_agent(str(repo), "B0", "train", ids=["1"])  # no SQL to repair: no revise call
+    _, manifest, calls = replayed(monkeypatch, repo, plain.name, engine="production_llm", call_sites=["revise"])
+    assert (manifest["status"], manifest["n_invocations"], calls) == ("failed", 0, [])
+    assert "no invocation to replay" in manifest["problems"][0] and "revise" in manifest["problems"][0]
+
+
+def test_an_api_error_in_a_replay_fails_it(monkeypatch, repo, source):
+    class Unpaid(Revising):
+        def invoke(self, messages):
+            raise openai.APIStatusError("402", response=httpx.Response(402, request=httpx.Request("POST", "http://x")), body=None)
+    _, manifest, _ = replayed(monkeypatch, repo, source, model=Unpaid(), engine="production_llm")
+    assert manifest["status"] == "failed" and manifest["model_failures"] == {} and manifest["harness_errors"]

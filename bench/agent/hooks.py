@@ -9,11 +9,13 @@ counter for both (patch 5b). When the engine is `cheap_alt`, B1's few-shot prefi
 what is sent; the router sees the prompt without it, and C1 records the messages as sent.
 
 Two kinds of failure, kept apart:
-- the **model's** (an invocation error, an empty or unparseable output) is a C1 line, and the
-  exception goes on to CHESS, which handles it as it always did;
-- the **harness's** (no run or question set, routing, configuration, a missing API key, an engine
-  that stays unreachable after every transport retry, a rejected key or an unknown model, a call
-  site outside the registered set on `test`) is recorded here as well, because CHESS swallows every exception, and the runner reads it with
+- the **model's**, a closed set: the engine rejecting this request (HTTP 400, 413) and an empty or
+  unparseable output. It is a C1 line, and the exception goes on to CHESS, which handles it as it
+  always did;
+- the **harness's**, everything else: no run or question set, routing, configuration, a missing API
+  key, an engine that stays unreachable after every transport retry, any other API or client error
+  (401, 402, 403, 404, 409, 422, any other status, a response that does not validate, anything
+  unrecognised), a call site outside the registered set on `test`. It is recorded here as well, because CHESS swallows every exception, and the runner reads it with
   `take_harness_errors()` to fail the run instead of recording it as done.
 
 State is process-global: one run and one question at a time per process. The tools of a question
@@ -327,20 +329,24 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
 
 # ---------------------------------------------------------------- calls
 
-def _transient(exception: BaseException) -> bool:
-    """A transport failure, worth another attempt: 408, 429, 5xx, a timeout, no connection
-    (the OpenAI client wraps every transport error of the HTTP layer in one of these)."""
+MODEL_REJECTIONS = (400, 413)  # the request this engine rejects (a prompt longer than its context)
+
+
+def classify(exception: BaseException) -> str:
+    """What an exception of the model call is: `transport` (retried: 408, 429, >= 500, a timeout, no
+    connection, which the OpenAI client wraps its HTTP layer's errors in), `model` (the closed set of
+    the model's failures: the engine rejects this request, 400 or 413), or `harness` (everything
+    else: another status, a response that does not validate, anything unrecognised)."""
     import openai
     if isinstance(exception, openai.APIConnectionError):  # APITimeoutError included
-        return True
-    return isinstance(exception, openai.APIStatusError) and (
-        exception.status_code in (408, 429) or exception.status_code >= 500)
-
-
-def _misconfigured(exception: BaseException) -> bool:
-    """The endpoint refused the harness itself (a rejected key, no such model): not the model's doing."""
-    import openai
-    return isinstance(exception, (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError))
+        return "transport"
+    if isinstance(exception, openai.APIStatusError):
+        code = exception.status_code
+        if code in (408, 429) or code >= 500:
+            return "transport"
+        if code in MODEL_REJECTIONS:
+            return "model"
+    return "harness"
 
 
 def backoff_s(transport_failures: int) -> float:
@@ -369,9 +375,7 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
     from langchain_core.exceptions import OutputParserException
 
     run = _require_run()
-    with run.lock:
-        if run.harness_errors:
-            raise RunAborted(f"{call_site}: the run has failed ({run.harness_errors[0][:200]}): no further model call")
+    _refuse_if_failed(run, call_site)
     messages = _message_dicts(lc_messages)
     key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
     sent = _harness(call_site, lambda: _prefixed(call_site, chosen.engine, lc_messages))
@@ -380,13 +384,15 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
     failures = {"transport": 0, "parse": 0}
     retry_of, attempt = None, 0
     while True:
+        if attempt:  # every retry, too: another thread may have failed the run (an unreachable engine)
+            _refuse_if_failed(run, call_site)
         attempt += 1
         call_id = str(uuid.uuid4())
         output, exception, started_at, latency_ms = _invoke(model, sent)
         if exception is not None:
             parsed, parsed_ok = None, False
             error = f"{type(exception).__name__}: {exception}"
-            outcome = "transport" if _transient(exception) else "failed"
+            outcome = {"transport": "transport", "model": "failed", "harness": "harness"}[classify(exception)]
         else:
             parsed, parsed_ok, error, outcome, exception = interpret(output)
         _harness(call_site, lambda: _record(
@@ -405,11 +411,17 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
             failures["parse"] += 1
             if failures["parse"] >= parse_max_attempts:
                 raise OutputParserException(error)
-        elif _misconfigured(exception):
-            raise HarnessError(f"{call_site}: engine {chosen.engine} refused the request: {error}") from exception
+        elif outcome == "harness":
+            raise HarnessError(f"{call_site}: engine {chosen.engine}: {error}") from exception
         else:
             raise exception
         retry_of = call_id
+
+
+def _refuse_if_failed(run: _RunState, call_site: str) -> None:
+    with run.lock:
+        if run.harness_errors:
+            raise RunAborted(f"{call_site}: the run has failed ({run.harness_errors[0][:200]}): no further model call")
 
 
 def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any], parser: Any) -> Any:

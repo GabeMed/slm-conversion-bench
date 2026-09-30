@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import logging
-from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain.schema.document import Document
 from langchain_google_vertexai import VertexAIEmbeddings
@@ -11,7 +10,7 @@ import vertexai
 
 from database_utils.db_catalog.csv_utils import load_tables_description
 
-load_dotenv(override=False)  # PATCH 14 (slm-conversion-bench): a .env never overrides the harness's environment
+# PATCH 14 (slm-conversion-bench): no .env is loaded; the harness alone sets the environment
 
 GCP_PROJECT = os.getenv("GCP_PROJECT")
 GCP_REGION = os.getenv("GCP_REGION")

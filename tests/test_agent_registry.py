@@ -9,6 +9,8 @@ import subprocess
 import pytest
 
 pytest.importorskip("langchain_core")
+import httpx  # noqa: E402
+import openai  # noqa: E402
 
 from bench import barrier, paths  # noqa: E402
 from bench.agent import hooks, registry, runner  # noqa: E402
@@ -59,6 +61,7 @@ def register(root, config_path, call_sites=None, commit=True):
     if commit:
         git(root, "add", registry.CALL_SITES_FILE)
         git(root, "commit", "-q", "-m", "register the call sites")
+        git(root, "push", "-q", "origin", "main")
     return train
 
 
@@ -72,6 +75,8 @@ def test_the_intent_is_committed_before_anything_runs_and_the_manifest_after(rep
         def invoke(self, messages):
             if not seen_while_running:
                 seen_while_running.append(git(root, "ls-files", "registry/test").split())
+            if "relevant keywords" in messages[-1].content:  # an error whose text carries a local path
+                raise OSError(f"cannot read {root}/secret/prompt.txt")  # unrecognised: fails the run
             return super().invoke(messages)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
@@ -80,13 +85,15 @@ def test_the_intent_is_committed_before_anything_runs_and_the_manifest_after(rep
     assert sorted(git(root, "ls-files", "registry/test").split()) == [intent, manifest_rel]
     assert git(root, "diff", "--name-only", before, "HEAD").split() == [intent, manifest_rel]  # nothing else, ever
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    assert manifest["status"] == "done" and json.loads(git(root, "show", f"HEAD:{manifest_rel}")) == manifest
+    assert manifest["status"] == "failed" and json.loads(git(root, "show", f"HEAD:{manifest_rel}")) == manifest
     assert manifest["prereg_hash"] == (root / "prereg" / "HASH").read_text().strip()
     assert manifest["call_sites_registry_sha256"] == sha(root / registry.CALL_SITES_FILE)
     assert manifest["unregistered_call_sites"] == [] and manifest["commit"] == before
     recorded = json.loads(git(root, "show", f"HEAD~1:{intent}"))
     assert (recorded["run_id"], recorded["arm"], recorded["prereg_hash"]) == (run_dir.name, "B0", manifest["prereg_hash"])
-    assert str(root) not in git(root, "show", "HEAD") + git(root, "show", "HEAD~1")  # no local path in the record
+    committed = git(root, "show", f"HEAD:{manifest_rel}")
+    assert "<repo>/secret/prompt.txt" in committed  # the error reached the committed record, scrubbed
+    assert str(root) not in committed + git(root, "show", f"HEAD~1:{intent}")
 
 
 def test_a_single_call_execution_on_test_is_registered_too(repo):
@@ -187,8 +194,11 @@ def test_what_is_committed_never_carries_a_key(monkeypatch):
     config = json.loads(json.dumps(runner.load_config(paths.ROOT / "config.yaml")))
     config["roles"]["cheap_alt"]["endpoint"]["api_key_env"] = "BENCH_TEST_KEY"
     monkeypatch.setenv("BENCH_TEST_KEY", "plain-secret-value-123")
-    text = "refused: plain-secret-value-123; Incorrect API key provided: sk-proj-abc1***wxyz; hf_AbCdEf123456"
-    assert registry.redact(text, config) == "refused: <redacted>; Incorrect API key provided: <redacted>; <redacted>"
+    monkeypatch.setenv("OPENAI_API_KEY", "embeddings-secret-456")  # the retrieval embeddings' key, not in any role
+    text = ("refused: plain-secret-value-123; embeddings: embeddings-secret-456; "
+            "Incorrect API key provided: sk-proj-abc1***wxyz; hf_AbCdEf123456")
+    assert registry.redact(text, config) == ("refused: <redacted>; embeddings: <redacted>; "
+                                             "Incorrect API key provided: <redacted>; <redacted>")
 
 
 def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):
@@ -206,3 +216,34 @@ def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):
     assert "sk-proj-abc1" in (run_dir / "manifest.json").read_text()  # the local record keeps the provider's words
     committed = git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json")
     assert "sk-proj" not in committed and "<redacted>" in committed
+
+
+def test_a_test_run_waits_until_the_registry_is_pushed(repo):
+    root, config_path = repo
+    register(root, config_path)
+    (root / "registry" / "note.txt").write_text("a registry commit only this clone has\n")
+    git(root, "add", "registry/note.txt")
+    git(root, "commit", "-q", "-m", "unpushed registry commit")
+    with pytest.raises(barrier.TestSplitLocked, match="push the registry first"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert not any(p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())
+    git(root, "push", "-q", "origin", "main")
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+
+
+def test_a_ctrl_c_commits_the_manifest_as_interrupted(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+
+    class Interrupting(ScriptedChess):
+        def invoke(self, messages):
+            if messages[-1].content.startswith("<system>"):
+                raise KeyboardInterrupt  # on the agent's own call, in the main thread, as a Ctrl-C would
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Interrupting())
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
+    committed = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))
+    assert (committed["status"], committed["stopped_by"]) == ("interrupted", "KeyboardInterrupt: ")

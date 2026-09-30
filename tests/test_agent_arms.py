@@ -135,6 +135,7 @@ def test_k_zero_is_an_explicit_empty_prefix(monkeypatch, repo):
     set_config(repo, B1={"few_shot": {"k": 0, "source_run": None}})
     _, manifest, calls = run(monkeypatch, repo, "B1", ("1",))
     assert manifest["status"] == "done" and manifest["few_shot"] == {"k": 0, "source_run": None}
+    assert manifest["few_shot_k"] == 0 and set(manifest["few_shot_sha256"]) == set(CALL_SITES)
     assert all(len(c["prompt_messages"]) == 1 for c in calls)
 
 
@@ -306,3 +307,46 @@ def test_b2_checks_its_template_before_a_run_exists(monkeypatch, repo):
     with pytest.raises(runner.data.DataError, match="generate_candidate_one"):
         runner.run_agent(str(repo), "B2", "train", ids=["1"], engine="production_llm")
     assert not paths.RUNS.exists() or not any(paths.RUNS.iterdir())
+
+
+def test_the_manifest_records_k_and_the_sha256_of_each_prefix_as_sent(monkeypatch, repo):
+    import hashlib
+    from bench.contracts.facts import canonical
+    source = teacher_run(monkeypatch, repo)
+    set_config(repo, B1={"few_shot": {"k": 2, "source_run": source}})
+    _, manifest, calls = run(monkeypatch, repo, "B1", ("3",))
+    assert manifest["few_shot_k"] == 2 and set(manifest["few_shot_sha256"]) == set(CALL_SITES)
+    for call in calls:
+        sent = hashlib.sha256(canonical(call["prompt_messages"][:4])).hexdigest()
+        assert manifest["few_shot_sha256"][call["call_site"]] == sent
+
+
+def test_the_examples_are_questions_of_todays_train_split(monkeypatch, repo):
+    from bench.agent import few_shot
+    source = teacher_run(monkeypatch, repo)
+    config = yaml.safe_load(repo.read_text())
+    config["arms"]["B1"]["few_shot"] = {"k": 2, "source_run": source}
+    manifest_path = paths.RUNS / source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest_path.write_text(json.dumps({**manifest, "splits_sha256": "0" * 64}))
+    with pytest.raises(hooks.HarnessError, match="other splits"):
+        few_shot.build(config)
+    manifest_path.write_text(json.dumps(manifest))
+    splits = json.loads(paths.SPLITS.read_text())  # question 2 leaves train (the source's splits sha follows)
+    paths.SPLITS.write_text(json.dumps({**splits, "train": ["1", "3"], "calib": ["2"]}))
+    manifest_path.write_text(json.dumps({**manifest, "splits_sha256": runner.data.sha256_file(paths.SPLITS)}))
+    with pytest.raises(hooks.HarnessError, match=r"not in the current train split: \['2'\]"):
+        few_shot.build(config)
+
+
+def test_an_api_error_in_b2_fails_the_run(monkeypatch, repo):
+    import httpx
+    import openai
+
+    class Gone(ScriptedChess):
+        def invoke(self, messages):
+            raise openai.NotFoundError("no such model", response=httpx.Response(404, request=httpx.Request("POST", "http://x")), body=None)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Gone())
+    run_dir = runner.run_agent(str(repo), "B2", "train", ids=["1", "2"], engine="production_llm")
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "failed" and list(manifest["harness_errors"]) == ["1"]  # stopped at the first

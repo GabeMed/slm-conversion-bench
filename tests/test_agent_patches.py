@@ -117,19 +117,59 @@ def test_the_agents_calls_retry_transport_errors_too(calls):
     assert (first["parsed_ok"], second["parsed_ok"], second["retry_of"]) == (False, True, first["call_id"])
 
 
-def test_a_rejected_request_is_the_harnesss_failure_not_the_models(calls):
-    calls["model"] = ScriptedModel([status_error(openai.AuthenticationError, 401)])
-    with pytest.raises(hooks.HarnessError, match="refused"):
+def validation_error():
+    return openai.APIResponseValidationError(response=httpx.Response(200, request=REQUEST), body={"x": 1},
+                                             message="the response does not validate")
+
+
+@pytest.mark.parametrize("make", [
+    lambda: status_error(openai.AuthenticationError, 401),
+    lambda: status_error(openai.APIStatusError, 402),
+    lambda: status_error(openai.PermissionDeniedError, 403),
+    lambda: status_error(openai.NotFoundError, 404),
+    lambda: status_error(openai.ConflictError, 409),
+    lambda: status_error(openai.UnprocessableEntityError, 422),
+    lambda: status_error(openai.APIStatusError, 418),
+    validation_error,
+    lambda: ValueError("nothing the classification knows"),
+], ids=["401", "402", "403", "404", "409", "422", "other-status", "validation", "unrecognised"])
+def test_every_other_api_or_client_error_is_the_harnesss_failure(calls, make):
+    calls["model"] = ScriptedModel([make()])
+    with pytest.raises(hooks.HarnessError):
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
-    assert calls["model"].calls == 1 and len(read_calls(calls["path"])) == 1
+    assert calls["model"].calls == 1 and len(read_calls(calls["path"])) == 1 and calls["sleeps"] == []
     assert len(hooks.take_harness_errors()) == 1
 
 
-def test_a_bad_request_is_the_models_failure_and_is_not_retried(calls):
-    calls["model"] = ScriptedModel([status_error(openai.BadRequestError, 400)])  # e.g. the prompt exceeds the context
-    with pytest.raises(openai.BadRequestError):
+@pytest.mark.parametrize("code,cls", [(400, openai.BadRequestError), (413, openai.APIStatusError)])
+def test_only_a_rejected_request_is_the_models_failure_and_is_not_retried(calls, code, cls):
+    calls["model"] = ScriptedModel([status_error(cls, code)])  # e.g. the prompt exceeds this engine's context
+    with pytest.raises(openai.APIStatusError):
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     assert calls["model"].calls == 1 and calls["sleeps"] == [] and hooks.take_harness_errors() == []
+    (line,) = read_calls(calls["path"])
+    assert line["error"].startswith(cls.__name__) and validate_calls([line]) == []
+
+
+def test_a_request_timeout_is_retried(calls):
+    calls["model"] = ScriptedModel([status_error(openai.APIStatusError, 408), '{"table_names": ["t"]}'])
+    assert hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser()) == {"table_names": ["t"]}
+    assert [line["attempt"] for line in read_calls(calls["path"])] == [1, 2] and len(calls["sleeps"]) == 1
+
+
+def test_every_attempt_checks_whether_another_thread_failed_the_run(calls):
+    calls["model"] = ScriptedModel([openai.APIConnectionError(request=REQUEST), '{"table_names": ["t"]}'])
+
+    def meanwhile(seconds):  # while this call backs off, another thread declares its engine unreachable
+        try:
+            raise hooks.HarnessError("filter_column: engine production_llm unreachable after 6 transport failures")
+        except hooks.HarnessError:
+            pass
+    hooks._sleep = meanwhile
+    with pytest.raises(hooks.RunAborted):
+        hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+    assert calls["model"].calls == 1  # no retry once the run has failed
+    assert len(read_calls(calls["path"])) == 1 and len(hooks.take_harness_errors()) == 1
 
 
 def test_the_new_configuration_keys_are_checked():
@@ -239,19 +279,34 @@ def test_concurrency_is_bounded_and_an_empty_call_list_is_no_error(chess):
 
 # ---------------------------------------------------------------- 14 · .env
 
-def test_a_dotenv_never_overrides_the_harness_environment(tmp_path):
-    (tmp_path / ".env").write_text("DB_ROOT_PATH=/from/dotenv\nINDEX_SERVER_PORT=9\nBENCH_ONLY_IN_DOTENV=yes\n")
+def test_no_dotenv_is_loaded_and_nothing_can_redirect_or_trace(tmp_path):
+    """A .env in a parent directory of where the harness runs, found by python-dotenv the moment
+    anything asks it to load one; and a shell that sets an OpenAI base URL and LangChain tracing."""
+    (tmp_path / ".env").write_text("DB_ROOT_PATH=/from/dotenv\nBENCH_ONLY_IN_DOTENV=yes\n"
+                                   "OPENAI_API_BASE=http://dotenv.example/v1\n")
+    child = tmp_path / "work" / "here"
+    child.mkdir(parents=True)
     script = f"""
-import sys, dotenv.main
-dotenv.main.find_dotenv = lambda *a, **k: {str(tmp_path / '.env')!r}
-sys.path.insert(0, {str(paths.VENDOR_CHESS / 'src')!r})
-import runner.database_manager, database_utils.db_catalog.preprocess, preprocess, os
-print(os.environ["DB_ROOT_PATH"], os.environ["INDEX_SERVER_PORT"], os.environ.get("BENCH_ONLY_IN_DOTENV"))
+import os, sys, dotenv.main
+found = dotenv.main.find_dotenv
+dotenv.main.find_dotenv = lambda *a, **k: found(usecwd=True)  # any load_dotenv() would now find the parent .env
+sys.path.insert(0, {str(paths.ROOT)!r})
+from bench import paths as bench_paths
+from bench.agent import runner as bench_runner
+from bench.contracts.config import load_config
+config = load_config({str(SMOKE)!r})
+bench_runner._prepare_chess(config, bench_paths.bird_root(config))
+import runner.database_manager, database_utils.db_catalog.preprocess, preprocess
+import workflow.agents.information_retriever.tool_kit.retrieve_context
+e = os.environ
+print(e["DB_ROOT_PATH"] == str(bench_paths.bird_root(config)), e.get("BENCH_ONLY_IN_DOTENV"),
+      e.get("OPENAI_API_BASE"), e.get("OPENAI_BASE_URL"), e["LANGCHAIN_TRACING_V2"], e["LANGSMITH_TRACING"])
 """
-    env = {**os.environ, "DB_ROOT_PATH": "/from/harness", "INDEX_SERVER_PORT": "0", "ANONYMIZED_TELEMETRY": "False"}
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=paths.ROOT)
+    env = {**os.environ, "OPENAI_BASE_URL": "http://shell.example/v1", "OPENAI_API_BASE": "http://shell.example/v1",
+           "LANGCHAIN_TRACING_V2": "true", "LANGSMITH_TRACING": "true"}
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=child)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.split() == ["/from/harness", "0", "yes"]  # the harness wins; a .env only fills gaps
+    assert result.stdout.split()[-6:] == ["True", "None", "None", "None", "false", "false"]
 
 
 # ---------------------------------------------------------------- 13 and 10b, end to end
@@ -280,10 +335,9 @@ def test_the_gold_never_enters_the_agents_state(monkeypatch, repo):
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["tool_errors"] == {}  # the selector tools tolerate its absence
     assert seen == [None, None]
-    for call in read_calls(run_dir / "calls.jsonl"):
-        assert all(GOLD not in m["content"] for m in call["prompt_messages"])
     leaked = [p for p in run_dir.rglob("*") if p.is_file() and GOLD in p.read_text(errors="ignore")]
-    assert leaked == []  # not in questions.json, not in CHESS's own logs
+    assert leaked == []  # not in questions.json, CHESS's own logs or calls.jsonl (the prompts are in the
+    # equivalence test below: the same with the gold in the state as without it)
     (history,) = run_dir.glob("chess/**/1_tiny.json")  # the selector tools still log their runs (CHESS drops
     logged = {step.get("tool_name") for step in json.loads(history.read_text())}  # the entry if its update raises)
     assert {"filter_column", "select_tables", "select_columns"} <= logged

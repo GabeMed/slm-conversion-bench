@@ -3,7 +3,6 @@ import socket
 import pickle
 from threading import Lock
 from pathlib import Path
-from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from typing import Callable, Dict, List, Any
 import time
@@ -18,7 +17,7 @@ from database_utils.db_catalog.search import query_vector_db
 from bench.agent import hooks  # PATCH 10 (slm-conversion-bench): embeddings from the configuration
 from database_utils.db_catalog.csv_utils import load_tables_description
 
-load_dotenv(override=False)  # PATCH 14 (slm-conversion-bench): a .env never overrides the harness's environment
+# PATCH 14 (slm-conversion-bench): no .env is loaded; the harness alone sets the environment
 DB_ROOT_PATH = Path(os.getenv("DB_ROOT_PATH"))
 
 INDEX_SERVER_HOST = os.getenv("INDEX_SERVER_HOST")
