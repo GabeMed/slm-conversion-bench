@@ -23,21 +23,42 @@ from bench.contracts.calls import read_calls, validate_calls
 from bench.contracts.config import config_sha256
 from bench.provenance import git_state
 
-# Comments, string literals and quoted identifiers come first, so nothing inside them is rewritten
-# (and an apostrophe in a comment opens no literal).
-_STRING = r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\""
-_QUOTED = r"--[^\n]*|/\*.*?(?:\*/|$)|" + _STRING + r"|`[^`]*`|\[[^\]]*\]"
-_DATE_FUNCTION = r"\b(?:date|time|datetime|julianday|unixepoch)\s*\(\s*"
-_STRFTIME = r"\bstrftime\s*\(\s*(?:" + _STRING + r")\s*"
-_NOW_LITERAL = r"(?:'now'|\"now\")"
-_NOW = re.compile(_QUOTED + r"|\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b"
-                  r"|" + _DATE_FUNCTION + _NOW_LITERAL +          # 'now' as the time value ...
-                  r"|" + _STRFTIME + r",\s*" + _NOW_LITERAL +      # ... also after strftime's format
-                  r"|" + _DATE_FUNCTION + r"\)"                    # no argument: SQLite reads 'now'
-                  r"|" + _STRFTIME + r"\)",                        # a format only: 'now' as well
-                  re.IGNORECASE | re.DOTALL)
-_LIMIT = re.compile(_QUOTED + r"|\bLIMIT\b", re.IGNORECASE | re.DOTALL)
-_SKIPPED = ("'", '"', "`", "[", "--", "/*")
+# SQL as SQLite reads it: comments, string literals and quoted identifiers are whole tokens, so
+# nothing inside them is rewritten (and an apostrophe in a comment opens no literal).
+_TOKEN = re.compile(r"""(?P<comment>--[^\n]*|/\*.*?(?:\*/|$))
+                      |(?P<string>'(?:[^']|'')*'|"(?:[^"]|"")*")
+                      |(?P<ident>`[^`]*`|\[[^\]]*\])
+                      |(?P<space>\s+)
+                      |(?P<word>[A-Za-z_][A-Za-z_0-9$]*)
+                      |(?P<other>.)""", re.DOTALL | re.VERBOSE)
+# The date functions and the position of their time value (strftime's comes after the format).
+_TIME_VALUE = {"date": 0, "time": 0, "datetime": 0, "julianday": 0, "unixepoch": 0, "strftime": 1}
+
+
+def _tokens(sql: str) -> List[Tuple[str, str]]:
+    return [(m.lastgroup, m.group()) for m in _TOKEN.finditer(sql)]
+
+
+def _arguments(tokens: List[Tuple[str, str]], significant: List[int], open_at: int) -> Optional[Tuple[List[List[int]], int]]:
+    """The arguments of the call whose "(" is significant[open_at], each as the indices of its
+    significant tokens, and the index of the closing ")"; None when it never closes."""
+    arguments: List[List[int]] = [[]]
+    depth = 0
+    for i in significant[open_at:]:
+        text = tokens[i][1]
+        if text == "(":
+            depth += 1
+            if depth == 1:
+                continue
+        elif text == ")":
+            depth -= 1
+            if depth == 0:
+                return ([] if arguments == [[]] else arguments), i
+        elif text == "," and depth == 1:
+            arguments.append([])
+            continue
+        arguments[-1].append(i)
+    return None
 
 
 def fixed_date(config: Dict[str, Any]) -> str:
@@ -54,31 +75,45 @@ def fixed_date(config: Dict[str, Any]) -> str:
 
 def fix_date(sql: str, day: str) -> Tuple[str, bool]:
     """`sql` with every reading of the current moment replaced by `day` at midnight, and whether
-    anything was replaced: 'now' (any case, either quote) where it is the time value of date(),
-    time(), datetime(), julianday(), unixepoch() or strftime() (after the format), CURRENT_TIMESTAMP
-    / CURRENT_DATE / CURRENT_TIME, and those functions given no time value, which SQLite evaluates
-    at 'now'. A 'now' anywhere else is text (`end_date < 'now'` compares strings) and stays text."""
+    anything was replaced: CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME, and the time value of
+    date(), time(), datetime(), julianday(), unixepoch() and strftime() (after the format), by
+    position: an argument that is exactly the literal 'now' (any case, either quote), or no time
+    value at all, which SQLite reads as 'now'. A 'now' anywhere else is text (`end_date < 'now'`
+    compares strings) and stays text."""
     stamp = f"'{day} 00:00:00'"
     keywords = {"current_timestamp": stamp, "current_date": f"'{day}'", "current_time": "'00:00:00'"}
+    tokens = _tokens(sql)
+    out = [text for _, text in tokens]
+    significant = [i for i, (kind, _) in enumerate(tokens) if kind not in ("space", "comment")]
     replaced = False
-
-    def replace(match: "re.Match[str]") -> str:
-        nonlocal replaced
-        token = match.group(0)
-        if token.startswith(_SKIPPED):
-            return token
-        replaced = True
-        if token.lower() in keywords:
-            return keywords[token.lower()]
-        if token[-1] in "'\"":  # ends with the 'now' literal
-            return token[:-len("'now'")] + stamp
-        return f"{token[:-1].rstrip()}, {stamp})" if token.lower().startswith("strftime") else f"{token.split('(')[0]}({stamp})"
-    return _NOW.sub(replace, sql), replaced
+    for at, i in enumerate(significant):
+        kind, text = tokens[i]
+        if kind != "word":
+            continue
+        name = text.lower()
+        if name in keywords:
+            out[i], replaced = keywords[name], True
+            continue
+        if name not in _TIME_VALUE or at + 1 >= len(significant) or tokens[significant[at + 1]][1] != "(":
+            continue
+        call = _arguments(tokens, significant, at + 1)
+        if call is None:
+            continue
+        arguments, close = call
+        position = _TIME_VALUE[name]
+        if len(arguments) == position:  # no time value: SQLite takes 'now'
+            out[close] = (", " if position else "") + stamp + ")"
+            replaced = True
+        elif len(arguments) > position and len(arguments[position]) == 1:
+            value = tokens[arguments[position][0]]
+            if value[0] == "string" and value[1][1:-1].lower() == "now":
+                out[arguments[position][0]], replaced = stamp, True
+    return "".join(out), replaced
 
 
 def gold_has_limit(sql: str) -> bool:
-    """LIMIT outside string literals: ties at the cut can make a right answer look wrong, for every arm."""
-    return any(not m.group(0).startswith(_SKIPPED) for m in _LIMIT.finditer(sql))
+    """LIMIT outside comments and literals: ties at the cut can make a right answer look wrong, for every arm."""
+    return any(kind == "word" and text.lower() == "limit" for kind, text in _tokens(sql))
 
 
 @contextmanager
