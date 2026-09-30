@@ -389,7 +389,10 @@ def steps(data: Dict[str, Any]) -> List[Dict[str, str]]:
         "changed": f"base {j6['choice']} (by {j6['decided_by']})" if j6 else "—"})
     rows.append({"step": "S5 · specialization", "did": f"one adapter per cluster (adapters fact {j7['adapters'][:12]})" if j7 else "—",
                  "cost": "S5 training manifests (not a J1–J8 output)", "changed": _test_line(data, "B3|B4")})
+    rested = sorted(c for c, d in (j7 or {}).get("clusters", {}).items() if d.get("cost_dependent"))
     rows.append({"step": "S6 · router", "did": ("allocation: " + ", ".join(f"{c} → {e}" for c, e in sorted(j7["allocation"].items()))
+                                                 + (f"; {len(rested)} chosen on the SLM cost extrapolated from per-adapter "
+                                                    f"load tests alone ({', '.join(rested)})" if rested else "")
                                                  if j7 else "—"),
                  "cost": unmeasured, "changed": _test_line(data, "B4|B5")})
     return rows

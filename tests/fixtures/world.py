@@ -100,6 +100,12 @@ def fake_noninferiority(correct_a: Dict[str, bool], correct_b: Dict[str, bool], 
             "noninferior": ci_low > -delta if testable and d_pilot is not None else None, "power": 0.8}
 
 
+def fake_margin(d: float, n: int, delta_cap_pp: float) -> Dict[str, Any]:
+    """A stand-in for F2's J4 `margin`: Δ for a discordance d over n paired questions."""
+    delta = (1.6449 + 0.8416) * math.sqrt(d / n)
+    return {"delta": delta, "testable": delta * 100 <= delta_cap_pp}
+
+
 def fake_ex_table(eval_run_dirs) -> List[Dict[str, Any]]:
     """A stand-in for F2's J1 `ex_table`: one row per question of each end-to-end eval execution."""
     import json

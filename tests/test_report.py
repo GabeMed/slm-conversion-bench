@@ -10,7 +10,7 @@ import yaml
 from bench import paths, report
 from bench.contracts import clusters, facts
 from bench.judge.base import JudgmentError, read_jsonl, read_result, relative, write_result
-from fixtures.world import fake_ex_summary, fake_ex_table, fake_noninferiority, unit
+from fixtures.world import fake_ex_summary, fake_ex_table, fake_margin, fake_noninferiority, unit
 
 VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute",
               "no verdict")
@@ -107,6 +107,11 @@ def test_the_steps_table_reads_the_judgments():
             "2 exact and 3 near duplicates removed; 4 sensitive-data detections masked") in rows["S2"]["did"]
     assert rows["S2"]["changed"] == "2 training examples" and "75.0% on calib" in rows["S3"]["changed"]
     assert rows["S5"]["changed"] == "B4 − B3: +10.0 pp (CI low +0.0 pp), non-inferior"
+    data["judgments"]["j7"] = {"adapters": "a" * 64, "allocation": {"c0": "slm", "c1": "production_llm"},
+                               "clusters": {"c0": {"cost_dependent": True}, "c1": {"cost_dependent": False}}}
+    s6 = {r["step"].split(" ")[0]: r for r in report.steps(data)}["S6"]["did"]
+    assert s6 == ("allocation: c0 → slm, c1 → production_llm; 1 chosen on the SLM cost extrapolated from "
+                  "per-adapter load tests alone (c0)")
 
 
 def test_registry_reads_f1s_committed_intents_and_manifests(tmp_path):
@@ -217,7 +222,8 @@ def pipeline(tmp_path, monkeypatch):
     per_call_eval("eval-cheap-calib", "replay-cheap-calib", cheap_calib, lambda c: teacher_ok(c) and unit("cheap", c["question_id"]) < 0.8)
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap-calib", "eval-cheap-calib"),
                                                                 "slm": ("replay-B4-calib", "eval-B4-calib")},
-                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, fake_noninferiority)
+                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, fake_noninferiority,
+                                 fake_margin, len(TEST_IDS))
     allocated = facts.read_fact(str(allocation), "allocation")[0]["allocation"]
 
     # the arms on test
