@@ -124,9 +124,12 @@ def test_j5_records_its_parameters(tmp_path, monkeypatch):
                                     "row_order": "sha256 of the embedded text"}
 
 
-# relabelling call sites among the ones the success filter does not execute: the same texts,
-# a different order in curate's output (it writes call site by call site)
-RELABEL = {"extract_keywords": "select_tables", "select_tables": "extract_keywords", "filter_column": "select_columns"}
+# three call sites whose outputs are free-form (no SQL to execute, no tool to parse), three questions
+# each: three clusters of equal size. Relabelling the keywords' texts as column selection and back
+# reverses their order in curate's output (it writes call site by call site), so a clustering that
+# followed row order would name those two clusters the other way round
+SITES_3 = ("extract_keywords", "select_tables", "select_columns")
+RELABEL = {"extract_keywords": "select_columns", "select_columns": "extract_keywords"}
 
 
 def curated_and_clustered(tmp_path, monkeypatch, relabel):
@@ -136,14 +139,14 @@ def curated_and_clustered(tmp_path, monkeypatch, relabel):
     import yaml
     from bench.curate import run_curate
     from bench.contracts.config import config_sha256
-    from fixtures.world import teacher
     from synthetic import make_repo
     from test_curate import teacher_config
     _, config_path, config = make_repo(tmp_path, monkeypatch)
     config = teacher_config(config)
     config["clustering"].update(SETTINGS)
     config_path.write_text(yaml.safe_dump(config))
-    calls = [{**c, "call_site": relabel.get(c["call_site"], c["call_site"])} for c in teacher("agent-tr", "train", ["1", "2", "3"])]
+    calls = [call("agent-tr", q, relabel.get(site, site), messages=prompt(site, f"question {q}", ""),
+                  response=f"{site} answer {q}", parsed={"answer": q}) for q in ("1", "2", "3") for site in SITES_3]
     write_run("agent-tr", {"type": "agent", "arm": "B0", "split": "train", "question_ids": ["1", "2", "3"],
                            "config_sha256": config_sha256(config)}, calls, config)
     curated = run_curate(["agent-tr"], str(config_path)).name
@@ -152,14 +155,15 @@ def curated_and_clustered(tmp_path, monkeypatch, relabel):
     index = {r["call_id"]: r["action_sha256"] for r in __import__("bench.judge.base", fromlist=["read_jsonl"]).read_jsonl(
         paths.RUNS / embedded / "index.jsonl")}
     by_text = {index[call_id]: cluster for call_id, cluster in result["members"].items()}
-    order = [json.loads(line)["call_site"] for line in (paths.RUNS / curated / "examples.jsonl").read_text().splitlines()]
+    order = [hashlib.sha256(json.dumps(json.loads(line)["prompt"]).encode()).hexdigest()  # the texts, in curate's order
+             for line in (paths.RUNS / curated / "examples.jsonl").read_text().splitlines()]
     return result, by_text, order, hashlib
 
 
 def test_clusters_do_not_depend_on_the_order_curate_writes(tmp_path, monkeypatch):
     honest, honest_labels, honest_order, _ = curated_and_clustered(tmp_path / "a", monkeypatch, {})
     relabelled, labels, order, _ = curated_and_clustered(tmp_path / "b", monkeypatch, RELABEL)
-    assert order != honest_order  # curate did write them in another order
+    assert order != honest_order and sorted(order) == sorted(honest_order)  # the same texts, in another order
     assert relabelled["k"] == honest["k"] and relabelled["centroids"]["sha256"] == honest["centroids"]["sha256"]
     assert labels == honest_labels  # every text in the same cluster, under the same name
-    assert sorted(honest["sizes"].values()).count(3) >= 2  # equal sizes: naming would follow row order
+    assert sorted(honest["sizes"].values()) == [3, 3, 3]  # equal sizes: naming would follow row order

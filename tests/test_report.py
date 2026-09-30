@@ -245,6 +245,13 @@ def test_a_test_report_is_bound_to_the_registry(tmp_path, monkeypatch):
         bind(reads=late_zeroshot)
 
 
+def test_the_s3_row_reports_what_the_router_embeds_the_prompts():
+    data = data_with({}, {})
+    data["judgments"]["j5"] = {"ari_call_sites": 0.9, "k": 4, "truncation": {"prompt": {"truncated_fraction": 0.25},
+                                                                            "prompt_action": {"truncated_fraction": 0.75}}}
+    assert row(report.claims_map(data), "S3")["result"] == "ARI 0.900 over 4 clusters; 25.0% of prompts cut (what the router embeds)"
+
+
 def test_the_chart_legend_reads_the_configured_utilizations():
     data = {"arms": {"B4": {"ex": 0.8, "cost_per_correct": {"30%": 0.2, "90%": 0.1}}}, "utilizations": ["30%", "90%"]}
     assert "one point per utilization, 30% (right) to 90% (left)" in report.chart_svg(data)
