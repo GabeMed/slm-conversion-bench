@@ -10,7 +10,8 @@ pytest.importorskip("trl")
 
 from bench import cli, paths  # noqa: E402
 from bench.contracts import facts, router  # noqa: E402
-from bench.train import TrainError, check_rows, check_target_modules, train_lora  # noqa: E402
+from bench.train import (TrainError, check_loss_tokens, check_rows, check_target_modules, precheck,  # noqa: E402
+                         training_plan, train_lora)
 from test_train_fixtures import TINY, TINY_NAME, make_s5_repo, rel, rows, save  # noqa: E402
 
 
@@ -69,13 +70,13 @@ def test_training_renders_what_serving_asks_and_learns_only_the_answer(tokenizer
     tokens under loss are the answer and the end of turn, never a think block."""
     row = rows("c0", 1)[0]
     kwargs = {"enable_thinking": False}
-    stats = check_rows(tokenizer, [row], kwargs, max_length=512)
+    stats, completions = check_rows(tokenizer, [row], kwargs, max_length=512)
     prompt = tokenizer.apply_chat_template(row["prompt"], add_generation_prompt=True, tokenize=True, return_dict=True, **kwargs)["input_ids"]
     full = tokenizer.apply_chat_template(row["prompt"] + row["completion"], tokenize=True, return_dict=True, **kwargs)["input_ids"]
     completion = tokenizer.decode(full[len(prompt):])
     assert completion.strip() == row["completion"][0]["content"] + "<|im_end|>"
     assert "<think>" not in completion and tokenizer.decode(prompt).endswith("<think>\n\n</think>\n\n")
-    assert stats["completion_tokens"] == len(full) - len(prompt)
+    assert stats["completion_tokens"] == len(full) - len(prompt) and completions == [full[len(prompt):]]
 
 
 def test_rows_serving_would_not_render_the_same_way_or_too_long_are_refused(tokenizer):
@@ -113,3 +114,29 @@ def test_train_lora_is_seeded(tmp_path):
     train_lora(plan, data, tmp_path / "a", "cpu")
     train_lora(plan, data, tmp_path / "b", "cpu")
     assert (tmp_path / "a" / "adapter_model.safetensors").read_bytes() == (tmp_path / "b" / "adapter_model.safetensors").read_bytes()
+
+
+def test_the_loss_must_fall_exactly_on_the_completion_tokens():
+    completions = [[7, 8, 2]]
+    check_loss_tokens([{"input_ids": [1, 2, 7, 8, 2], "labels": [-100, -100, 7, 8, 2]}], completions)
+    with pytest.raises(TrainError, match="not the 3 completion tokens"):  # loss on the prompt too
+        check_loss_tokens([{"input_ids": [1, 2, 7, 8, 2], "labels": [1, 2, 7, 8, 2]}], completions)
+    with pytest.raises(TrainError, match="not the 3 completion tokens"):  # a think block under the loss
+        check_loss_tokens([{"input_ids": [1, 9, 7, 8, 2], "labels": [-100, 9, 7, 8, 2]}], completions)
+    with pytest.raises(TrainError, match="kept 0 of 1 rows"):
+        check_loss_tokens([], completions)
+    check_loss_tokens([{"input_ids": [1, 7, 8, 2], "completion_mask": [0, 1, 1, 1]}], completions)
+
+
+def test_a_kwarg_the_template_never_reads_is_refused(tokenizer):
+    row = rows("c0", 1)[0]
+    with pytest.raises(TrainError, match=r"does not read \['reasoning_mode'\]"):
+        check_rows(tokenizer, [row], {"enable_thinking": False, "reasoning_mode": "off"}, max_length=512)
+
+
+def test_precheck_runs_the_template_checks_with_the_candidates_tokenizer(tmp_path, monkeypatch):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    plan, _ = training_plan(config, "c0")
+    assert precheck(plan, rows("c0", 2))["completion_tokens"] > 0
+    with pytest.raises(TrainError, match="over train.sft.max_length"):
+        precheck({**plan, "hyperparameters": {**plan["hyperparameters"], "sft": {"max_length": 5}}}, rows("c0", 1))

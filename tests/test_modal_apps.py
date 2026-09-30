@@ -153,7 +153,7 @@ def test_wait_healthy_then_warm_up_the_base_and_every_adapter(serving):
     try:
         common.wait_healthy(server.base, None, timeout_s=5, poll_s=0.01)
         assert server.gets == 3
-        assert common.warm_up(server.base, plan, "k") == [TINY_NAME, "c0"]
+        assert common.warm_up(server.base, plan, "k", plan["warmup_timeout_s"]) == [TINY_NAME, "c0"]
         assert [(auth, body["model"], body["temperature"]) for auth, body in server.posts] == [
             ("Bearer k", TINY_NAME, 0.0), ("Bearer k", "c0", 0.0)]
     finally:
@@ -249,3 +249,42 @@ def test_the_images_install_the_locks_and_carry_the_plan(apps):
     train_commands = _dockerfile(train.image)
     assert any(f"--requirements /.uv/0/{common.TRAIN_LOCK.name}" in c for c in train_commands)
     assert json.loads(next(c for c in train_commands if c.startswith(f"ENV {common.ENV}=")).split("=", 1)[1].strip("'")) == train.SETTINGS
+
+
+def test_serving_refuses_an_adapter_trained_on_other_weights_than_the_candidates(serving):
+    config_path, config = serving
+    config["roles"]["slm_candidates"][-1]["hf"]["revision"] = "b" * 40
+    with pytest.raises(common.SettingsError, match="trained on other weights or template kwargs"):
+        common.adapters_to_serve(save(config, config_path), TINY_NAME)
+
+
+def test_a_finished_training_is_collected_and_a_running_one_is_never_started_twice(tmp_path):
+    volume = tmp_path / "adapters"
+    assert common.stored_training(str(volume), "p1", now=100.0, stale_after_s=50) is None
+    common.mark_started(str(volume), "p1", now=100.0)
+    with pytest.raises(common.SettingsError, match="still running"):
+        common.stored_training(str(volume), "p1", now=120.0, stale_after_s=50)
+    assert common.stored_training(str(volume), "p1", now=151.0, stale_after_s=50) is None  # a stale marker: it died
+    adapter = volume / "tmp"
+    adapter.mkdir()
+    (adapter / "adapter_model.safetensors").write_bytes(b"w")
+    sha = facts.sha256_dir(adapter)
+    adapter.rename(volume / sha)
+    common.store_training(str(volume), "p1", {"sha256": sha, "stats": {"global_step": 3}, "function_seconds": 9.0})
+    assert not (volume / common.RESULTS / "p1.started").exists()
+    stored = common.stored_training(str(volume), "p1", now=999.0, stale_after_s=50)
+    assert stored == {"sha256": sha, "stats": {"global_step": 3}, "function_seconds": 9.0, "reused": True,
+                      "files": {"adapter_model.safetensors": b"w"}}
+    (volume / sha / "adapter_model.safetensors").write_bytes(b"x")
+    with pytest.raises(common.SettingsError, match="not on the volume intact"):
+        common.stored_training(str(volume), "p1", now=999.0, stale_after_s=50)
+
+
+def test_the_plan_id_changes_with_anything_the_training_depends_on(tmp_path, monkeypatch):
+    from bench.train import plan_id, training_plan
+
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    plan, _ = training_plan(config, "c0")
+    assert plan_id(plan) == plan_id(json.loads(json.dumps(plan)))
+    assert plan_id(plan) != plan_id({**plan, "dataset": {**plan["dataset"], "sha256": "0" * 64}})
+    assert plan_id(plan) != plan_id({**plan, "base": {**plan["base"], "revision": "b" * 40}})

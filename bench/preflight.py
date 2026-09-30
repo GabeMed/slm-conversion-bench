@@ -5,9 +5,11 @@ A check is `pass`, `fail`, or `pending` (this command cannot decide it yet: the 
 the check says which). The command writes `runs/preflight-<timestamp>/report.json` and exits 0 only when
 every check passes.
 
-**P-4 (`--parity <cluster>`).** With greedy decoding on the first N prompts of the cluster's training
-set, the adapter served by vLLM must (a) change the base's output on at least one prompt and (b) match
-HF-PEFT's output on every prompt. "Match" is the rule vLLM's own tests use for greedy parity
+**P-4 (`--parity <cluster>`).** The server must first list the adapter at the path of the adapter trained
+(`/adapters/<sha256>`, vLLM's `root` in /v1/models) and the base at its pinned repository. Then, with
+greedy decoding on the first N prompts of the cluster's training set, the adapter served by vLLM must
+(a) change the base's output wherever HF-PEFT's change is decisive (not a near-tie), and on at least one
+prompt, and (b) match HF-PEFT's output on every prompt. "Match" is the rule vLLM's own tests use for greedy parity
 (`check_logprobs_close`): the token ids agree one by one, and at the first disagreement each side's token
 is among the other side's top-k (a numerical near-tie, after which the sequences are compared no further).
 The served base is compared with HF too, so a failure says whether the adapter or the serving itself
@@ -84,6 +86,8 @@ def check_call_sites() -> Dict[str, Any]:
 
 def check_data(config: Dict[str, Any]) -> Dict[str, Any]:
     from bench import data
+    from bench.barrier import TestSplitLocked
+    from bench.data import DataError
 
     evidence: Dict[str, Any] = {}
     try:
@@ -101,7 +105,7 @@ def check_data(config: Dict[str, Any]) -> Dict[str, Any]:
         ok = (all(not evidence[s]["without_gold"] for s in ("train", "calib")) and test and not overlap
               and not (test & excluded))
         status = PASS if ok else FAIL
-    except Exception as e:  # the data layer's own errors are the evidence
+    except (DataError, TestSplitLocked, OSError, ValueError, KeyError) as e:  # the data layer's errors are the evidence
         status, evidence["error"] = FAIL, f"{type(e).__name__}: {e}"
     return _check("data_ids_and_gold", "the Mini-Dev ids match the dev set and the corrected gold is reachable "
                   "(SPEC 7.1)", status, evidence, "fix the mapping; without gold there is no test")
@@ -131,18 +135,16 @@ def _loadtest_manifests() -> List[Dict[str, Any]]:
     return [json.loads(p.read_text()) for p in sorted(paths.RUNS.glob("loadtest-*/manifest.json"))] if paths.RUNS.is_dir() else []
 
 
-def check_schedule(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Training: GPU seconds per example seen, measured on Modal, times the examples every cluster's dataset
-    will show (rows x epochs), against the overnight budget. Throughput: the measured load runs, for J8."""
+def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
+    """GPU seconds per example seen, measured on Modal, times the examples every cluster's dataset will
+    show (rows x epochs), against the overnight budget."""
     budget_h = config["preflight"]["schedule"]["train_hours_max"]
+    precondition = "the measured training time confirms the schedule: every adapter trains overnight (SPEC 7.1, 7.3)"
     gpu_runs = [m for m in _train_manifests() if m.get("where") == "modal" and m["stats"].get("examples_seen")]
-    loads = [{"run_id": m["run_id"], "concurrency": m["concurrency"], "status": m["status"]}
-             for m in _loadtest_manifests()]
-    evidence: Dict[str, Any] = {"loadtest_runs": loads, "train_hours_max": budget_h}
+    evidence: Dict[str, Any] = {"train_hours_max": budget_h}
     if not gpu_runs:
         evidence["needs"] = "one adapter trained on Modal (bench train --on modal) to measure seconds per example"
-        return _check("schedule", "the measured throughput and training time confirm the schedule (SPEC 7.1)",
-                      PENDING, evidence, "apply the cuts of SPEC 7.3")
+        return _check("training_time", precondition, PENDING, evidence, "apply the cuts of SPEC 7.3")
     seconds_per_example = (sum(m["stats"]["train_seconds"] for m in gpu_runs)
                            / sum(m["stats"]["examples_seen"] for m in gpu_runs))
     epochs = config["train"]["sft"]["num_train_epochs"]
@@ -151,11 +153,18 @@ def check_schedule(config: Dict[str, Any]) -> Dict[str, Any]:
     projected_h = seconds_per_example * rows * epochs / 3600
     evidence.update({"seconds_per_example": round(seconds_per_example, 3), "dataset_rows": rows, "epochs": epochs,
                      "projected_train_hours": round(projected_h, 2)})
-    status = FAIL if projected_h > budget_h else (PASS if loads else PENDING)
-    if status == PENDING:
-        evidence["needs"] = "a load test run (bench loadtest)"
-    return _check("schedule", "the measured throughput and training time confirm the schedule (SPEC 7.1)",
-                  status, evidence, "apply the cuts of SPEC 7.3")
+    return _check("training_time", precondition, FAIL if projected_h > budget_h else PASS, evidence,
+                  "apply the cuts of SPEC 7.3")
+
+
+def check_throughput() -> Dict[str, Any]:
+    """The load runs that finished are the evidence; whether their throughput within the p95 confirms the
+    schedule is J8's judgment, which this command does not make."""
+    done = [{"run_id": m["run_id"], "engine": m.get("engine"), "concurrency": m["concurrency"]}
+            for m in _loadtest_manifests() if m.get("status") == "done"]
+    needs = "J8 over these runs" if done else "a finished load test (bench loadtest), then J8 over it"
+    return _check("throughput", "the measured throughput confirms the schedule (SPEC 7.1)", PENDING,
+                  {"done_loadtest_runs": done, "needs": needs}, "apply the cuts of SPEC 7.3")
 
 
 # ---------------------------------------------------------------- P-4: LoRA parity
@@ -202,19 +211,24 @@ def parity_verdict(served_base: List[Generation], served_adapter: List[Generatio
         raise PreflightError("P-4 needs the four generations of every prompt")
     per_prompt = []
     for i in range(n):
+        changes = _upto_stop(served_adapter[i]["tokens"], stop_ids) != _upto_stop(served_base[i]["tokens"], stop_ids)
+        peft_change = compare(ref_adapter[i], ref_base[i], stop_ids)
         per_prompt.append({
-            "adapter_changes_output": _upto_stop(served_adapter[i]["tokens"], stop_ids) != _upto_stop(served_base[i]["tokens"], stop_ids),
-            "peft_changes_output": _upto_stop(ref_adapter[i]["tokens"], stop_ids) != _upto_stop(ref_base[i]["tokens"], stop_ids),
+            "adapter_changes_output": changes,
+            "peft_changes_output": not peft_change["exact"],
+            # HF-PEFT's change is decisive when it is not a near-tie: there the served adapter must change too
+            "ignored_where_peft_is_decisive": not peft_change["close"] and not changes,
             "adapter_vs_peft": compare(served_adapter[i], ref_adapter[i], stop_ids),
             "base_vs_hf": compare(served_base[i], ref_base[i], stop_ids),
         })
     changed = sum(p["adapter_changes_output"] for p in per_prompt)
+    ignored = sum(p["ignored_where_peft_is_decisive"] for p in per_prompt)
     peft_changed = sum(p["peft_changes_output"] for p in per_prompt)
     adapter_close = sum(p["adapter_vs_peft"]["close"] for p in per_prompt)
     base_close = sum(p["base_vs_hf"]["close"] for p in per_prompt)
     switch = ("switch the base to the reserve (roles.slm_reserve) and train again; if no base passes, B4 and B5 "
               "with an SLM are invalid and B0-B3 stay valid, declared (design P-4)")
-    if adapter_close == n and changed:
+    if adapter_close == n and changed and not ignored:
         status, diagnosis, action = PASS, "the served adapter changes the base's output and reproduces HF-PEFT", ""
     elif not changed and not peft_changed:
         status, diagnosis = FAIL, "uninformative: the adapter changes nothing even in HF-PEFT (untrained, or prompts outside its cluster)"
@@ -222,12 +236,14 @@ def parity_verdict(served_base: List[Generation], served_adapter: List[Generatio
     elif adapter_close < n and base_close < n:
         status, diagnosis = FAIL, "vLLM and HF disagree even without the adapter: the serving differs (template, revision, dtype)"
         action = "fix the serving (the chat template kwargs, the pinned revision) and run P-4 again; P-4 is not decided"
-    elif not changed:
-        status, diagnosis, action = FAIL, "vLLM ignores the adapter: its output is the base's, while HF-PEFT's differs", switch
+    elif not changed or ignored:
+        status, diagnosis = FAIL, (f"vLLM ignores the adapter on {ignored or n} prompt(s): its output is the base's, "
+                                   "while HF-PEFT's differs")
+        action = switch
     else:
         status, diagnosis, action = FAIL, "the served adapter diverges from HF-PEFT while the served base matches HF", switch
     return {"status": status, "diagnosis": diagnosis, "action": action, "n_prompts": n,
-            "adapter_changes_output": changed, "peft_changes_output": peft_changed,
+            "adapter_changes_output": changed, "peft_changes_output": peft_changed, "ignored_where_peft_is_decisive": ignored,
             "adapter_matches_peft": adapter_close, "base_matches_hf": base_close, "per_prompt": per_prompt}
 
 
@@ -240,6 +256,26 @@ def _token_id(token: str) -> int:
         raise PreflightError(f"the server returned token {token!r}, not a token id: is it vLLM "
                              "(return_tokens_as_token_ids)?")
     return int(match.group(1))
+
+
+def served_models(base_url: str, api_key: str, timeout_s: float) -> Dict[str, Dict[str, Any]]:
+    """/v1/models of an OpenAI-compatible server, by id (vLLM gives each adapter's path as `root`)."""
+    request = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        return {card["id"]: card for card in json.loads(response.read()).get("data") or []}
+
+
+def check_served(cards: Dict[str, Dict[str, Any]], base_name: str, repo: str, served_name: str, sha256: str) -> None:
+    """The server serves the base from its pinned repository and the adapter from the directory of the
+    adapter trained (named by its sha256): otherwise P-4 would judge another adapter than the one it records."""
+    base, adapter = cards.get(base_name), cards.get(served_name)
+    if base is None or adapter is None:
+        raise PreflightError(f"the server lists {sorted(cards)}, not {base_name} and {served_name}: deploy them")
+    if base.get("root") != repo:
+        raise PreflightError(f"the server serves {base_name} from {base.get('root')!r}, not {repo!r}: redeploy")
+    if Path(str(adapter.get("root"))).name != sha256 or adapter.get("parent") != base_name:
+        raise PreflightError(f"the server serves {served_name} from {adapter.get('root')!r} over {adapter.get('parent')!r}, "
+                             f"not the adapter trained (/adapters/{sha256}) over {base_name}: redeploy")
 
 
 def served_generate(base_url: str, api_key: str, model: str, messages: List[dict], max_tokens: int,
@@ -310,6 +346,9 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
     if not api_key:
         raise PreflightError(f"environment variable {endpoint['api_key_env']} is not set")
 
+    check_served(served_models(endpoint["base_url"], api_key, settings["timeout_s"]), entry["name"], manifest["base"]["repo"],
+                 manifest["served_name"], manifest["adapter_sha256"])
+
     def served(model):
         return [served_generate(endpoint["base_url"], api_key, model, p, settings["max_new_tokens"],
                                 settings["top_logprobs"], settings["timeout_s"]) for p in prompts]
@@ -332,8 +371,24 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
         raise PreflightError(f"--on must be local or modal, not {on!r}")
     verdict = parity_verdict(served_base, served_adapter, ref["base"], ref["adapter"], ref["stop_ids"])
     verdict.update({"cluster": cluster, "slm": manifest["slm"], "adapter_sha256": manifest["adapter_sha256"],
-                    "served": {"base": entry["name"], "adapter": manifest["served_name"]}, "reference_on": on})
+                    "served": {"base": entry["name"], "adapter": manifest["served_name"]}, "reference_on": on,
+                    "reference_gpu_seconds": ref.get("function_seconds")})
     return verdict
+
+
+def _unreachable() -> tuple:
+    """What makes P-4 undecidable rather than a bug of this code: a missing input, a server or the Modal
+    reference that cannot be reached or refuses."""
+    from bench.train import TrainError
+
+    errors = (PreflightError, TrainError, urllib.error.URLError, OSError)
+    try:
+        import modal.exception
+
+        errors += (modal.exception.Error,)
+    except ImportError:
+        pass
+    return errors
 
 
 def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -> Dict[str, Any]:
@@ -345,7 +400,7 @@ def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -
                       "run it before the full training and the load test")
     try:
         verdict = lora_parity(config, cluster, on)
-    except Exception as e:  # an unreachable server or reference is a failed check, with its reason
+    except _unreachable() as e:  # a missing adapter, server or reference is a failed check, with its reason
         return _check("lora_parity", precondition, FAIL, {"error": f"{type(e).__name__}: {e}"},
                       "serve the base and the adapter, then run P-4 again; P-4 is not decided")
     return _check("lora_parity", precondition, verdict["status"], verdict, verdict["action"])
@@ -355,7 +410,8 @@ def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -
 
 def run_checks(config: Dict[str, Any], parity_cluster: Optional[str] = None, on: str = "modal") -> List[Dict[str, Any]]:
     return [check_agent_runs(), check_call_sites(), check_data(config), check_teacher_terms(config),
-            check_pilot_spend(config), check_schedule(config), check_lora_parity(config, parity_cluster, on)]
+            check_pilot_spend(config), check_training_time(config), check_throughput(),
+            check_lora_parity(config, parity_cluster, on)]
 
 
 def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = "modal") -> int:

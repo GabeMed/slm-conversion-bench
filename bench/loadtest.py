@@ -1,11 +1,13 @@
 """`bench loadtest --engine <engine> --source <run_id>`: the execution `loadtest` (SPEC 6.6; J8's input).
 
 Replays the real calls of an execution: every line of the source run's `calls.jsonl` (every invocation and
-attempt the agent sent, retries included, in file order) becomes one AIPerf `raw_payload` line, the request
-body the agent's client sends (`bench/agent/hooks.py:chat_model`: model, messages, temperature, max_tokens
-and the engine's other params, no streaming), with `model` set to the engine's served name. AIPerf v0.13.0
-cycles over the lines at a fixed concurrency after a warm-up, once per concurrency level, and every level is
-its own run:
+attempt the agent sent, retries included, in file order) becomes one request body, the one the agent's
+client sends (`bench/agent/hooks.py:chat_model`: model, messages, temperature, max_tokens and the engine's
+other params, no streaming), with `model` set to the engine's served name. The first
+`warmup_request_count` calls warm the server up; then each concurrency level replays its own next
+`request_count` calls, once each, as AIPerf v0.13.0 `raw_payload` lines: no prompt is sent twice, so the
+prefix cache holds only what real traffic shares, never an exact repeat carried over from a previous level
+(a source too small for that wraps around, and the manifest says so). Every level is its own run:
 
     runs/loadtest-<engine>-c<concurrency>-<timestamp>/
         payloads.jsonl                 the lines replayed
@@ -15,7 +17,9 @@ its own run:
 `--on local` runs AIPerf here against the engine's endpoint (the llama.cpp smoke server);
 `--on modal` runs it in a Modal CPU container (`modal_apps/loadtest.py`) against the deployed vLLM server,
 so the client sits in the same cloud as the server. Either way it first waits for the server to list the
-model (a cold vLLM loads its weights first) and warms it up before measuring.
+model (a cold vLLM loads its weights first), records the model card the server lists (for an adapter, the
+path it was loaded from), and warms it up before measuring. The GPU and the prefix cache in the manifest
+are the configuration's (`serving`), which the OpenAI API cannot confirm.
 """
 import hashlib
 import json
@@ -28,7 +32,7 @@ import urllib.request
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from bench import paths
 
@@ -65,13 +69,35 @@ def server_root(base_url: str) -> str:
     return base[:-len("/v1")]
 
 
-def aiperf_command(aiperf: str, url: str, model: str, concurrency: int, request_count: int, warmup: int,
+def level_slice(payloads: List[dict], warmup: int, level: int, count: int) -> Dict[str, Any]:
+    """The calls of one concurrency level: the `count` after the warm-up and the previous levels, wrapping
+    around (and saying so) only when the source is too small."""
+    n = len(payloads)
+    start = warmup + level * count
+    indices = [(start + i) % n for i in range(count)]
+    return {"payloads": [payloads[i] for i in indices], "offset": start % n,
+            "repeats": start + count > n or count > n}
+
+
+def warm_up(base_url: str, api_key: Optional[str], payloads: List[dict], timeout_s: float) -> int:
+    """Send the warm-up calls one by one (outside every measured slice); returns how many."""
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
+    for body in payloads:
+        request = urllib.request.Request(f"{base_url.rstrip('/')}/chat/completions", data=json.dumps(body).encode(),
+                                         headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            response.read()
+    return len(payloads)
+
+
+def aiperf_command(aiperf: str, url: str, model: str, concurrency: int, request_count: int,
                    tokenizer: Dict[str, str], timeout_s: float, stream: bool, api_key: Optional[str]) -> List[str]:
-    """The AIPerf v0.13.0 invocation, run from inside the run directory (relative paths)."""
+    """The AIPerf v0.13.0 invocation, run from inside the run directory (relative paths): each line once, in
+    order; the warm-up is done before, on other calls."""
     cmd = [aiperf, "profile", "--model", model, "--url", url, "--endpoint-type", "chat",
-           "--input-file", PAYLOADS, "--custom-dataset-type", "raw_payload",
+           "--input-file", PAYLOADS, "--custom-dataset-type", "raw_payload", "--dataset-sampling-strategy", "sequential",
            "--concurrency", str(concurrency), "--request-count", str(request_count),
-           "--warmup-request-count", str(warmup), "--request-timeout-seconds", str(timeout_s),
+           "--request-timeout-seconds", str(timeout_s),  # no --warmup-*: AIPerf then runs no warm-up phase
            "--tokenizer", tokenizer["repo"], "--tokenizer-revision", tokenizer["revision"],
            "--use-server-token-count", "--output-artifact-dir", ".", "--ui-type", "none"]
     if stream:
@@ -81,8 +107,9 @@ def aiperf_command(aiperf: str, url: str, model: str, concurrency: int, request_
     return cmd
 
 
-def wait_ready(base_url: str, api_key: Optional[str], model: str, timeout_s: float, poll_s: float = 5.0) -> float:
-    """Wait until the server lists `model` (vLLM lists every adapter too); seconds waited."""
+def wait_ready(base_url: str, api_key: Optional[str], model: str, timeout_s: float,
+               poll_s: float = 5.0) -> Tuple[float, Dict[str, Any]]:
+    """Wait until the server lists `model` (vLLM lists every adapter too); seconds waited and its card."""
     started = time.monotonic()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     last = "no answer"
@@ -90,9 +117,10 @@ def wait_ready(base_url: str, api_key: Optional[str], model: str, timeout_s: flo
         try:
             request = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers=headers)
             with urllib.request.urlopen(request, timeout=30) as response:
-                listed = {m.get("id") for m in json.loads(response.read()).get("data") or []}
-            if model in listed:
-                return time.monotonic() - started
+                cards = {m.get("id"): m for m in json.loads(response.read()).get("data") or []}
+            listed = set(cards)
+            if model in cards:
+                return time.monotonic() - started, cards[model]
             last = f"listed {sorted(listed)}"
         except (urllib.error.URLError, OSError, ValueError) as e:
             last = f"{type(e).__name__}: {e}"
@@ -164,7 +192,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
             raise LoadtestError(f"environment variable {endpoint['api_key_env']} is not set")
     source_run = _source_calls(config, source)
     payloads = build_payloads(source_run["calls"], spec["model"], spec.get("params") or {}, settings["stream"])
-    raw = "".join(json.dumps(p, ensure_ascii=False) + "\n" for p in payloads).encode()
+    warmup = payloads[:min(settings["warmup_request_count"], len(payloads))]
     tok = _tokenizer(config, engine, tokenizer)
     vllm = endpoint["kind"] == "vllm"
     levels = concurrency or settings["concurrency"]
@@ -181,7 +209,9 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     run_dirs = []
     context = remote.app.run() if remote else nullcontext()
     with context:
-        for level in levels:
+        for index, level in enumerate(levels):
+            chosen = level_slice(payloads, len(warmup), index, settings["request_count"])
+            raw = "".join(json.dumps(p, ensure_ascii=False) + "\n" for p in chosen["payloads"]).encode()
             started = datetime.now(timezone.utc)
             run_id = f"loadtest-{_slug(engine)}-c{level}-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
             run_dir = paths.RUNS / run_id
@@ -194,18 +224,19 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 "prefix_cache": config["serving"]["prefix_caching"] if vllm else None,
                 "server": f"vllm {config['serving']['vllm_version']}" if vllm else endpoint["kind"],
                 "source_run_id": source, "source_split": source_run["split"], "source_status": source_run["status"],
-                "n_payloads": len(payloads), "n_questions": len({c["question_id"] for c in source_run["calls"]}),
+                "source_calls": len(payloads), "n_questions": len({c["question_id"] for c in source_run["calls"]}),
+                "payload_offset": chosen["offset"], "payloads_repeat": chosen["repeats"],
                 "payloads_sha256": hashlib.sha256(raw).hexdigest(), "concurrency": level,
-                "request_count": settings["request_count"], "warmup_request_count": settings["warmup_request_count"],
+                "request_count": settings["request_count"], "warmup_request_count": len(warmup),
                 "stream": settings["stream"], "tokenizer": tok, "aiperf_version": settings["aiperf_version"],
                 "config_sha256": config_sha256(config), **git_state(),
                 "started_at": started.isoformat(), "finished_at": None, "status": "running",
             }
             (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
             args = {"url": url, "model": spec["model"], "concurrency": level, "request_count": settings["request_count"],
-                    "warmup": settings["warmup_request_count"], "tokenizer": tok,
-                    "timeout_s": settings["request_timeout_s"], "stream": settings["stream"],
-                    "base_url": endpoint["base_url"], "ready_timeout_s": settings["ready_timeout_s"]}
+                    "warmup": warmup, "tokenizer": tok, "timeout_s": settings["request_timeout_s"],
+                    "stream": settings["stream"], "base_url": endpoint["base_url"],
+                    "ready_timeout_s": settings["ready_timeout_s"]}
             status = "failed"
             try:
                 if remote:
@@ -213,15 +244,17 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                     for rel, content in result["files"].items():
                         (run_dir / rel).parent.mkdir(parents=True, exist_ok=True)
                         (run_dir / rel).write_bytes(content)
-                    returncode, waited = result["returncode"], result["ready_after_s"]
+                    returncode, waited, card = result["returncode"], result["ready_after_s"], result["served_model"]
                 else:
-                    waited = wait_ready(endpoint["base_url"], api_key, spec["model"], settings["ready_timeout_s"])
+                    waited, card = wait_ready(endpoint["base_url"], api_key, spec["model"], settings["ready_timeout_s"])
+                    warm_up(endpoint["base_url"], api_key, warmup, settings["request_timeout_s"])
                     cmd = aiperf_command(str(Path(sys.executable).parent / "aiperf"), url, spec["model"], level,
-                                         settings["request_count"], settings["warmup_request_count"], tok,
-                                         settings["request_timeout_s"], settings["stream"], api_key)
+                                         settings["request_count"], tok, settings["request_timeout_s"],
+                                         settings["stream"], api_key)
                     returncode = run_aiperf(run_dir, cmd)
                 status = "done" if returncode == 0 and (run_dir / EXPORT).is_file() else "failed"
-                manifest.update({"aiperf_returncode": returncode, "ready_after_s": round(waited, 1)})
+                manifest.update({"aiperf_returncode": returncode, "ready_after_s": round(waited, 1),
+                                 "served_model": {k: card.get(k) for k in ("id", "root", "parent")}})
             except Exception as e:
                 manifest["stopped_by"] = f"{type(e).__name__}: {e}"
                 raise

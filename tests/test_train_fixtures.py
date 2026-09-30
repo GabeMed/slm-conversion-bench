@@ -62,7 +62,7 @@ def make_s5_repo(tmp_path, monkeypatch, clusters=("c0", "c1"), terms=True):
     centroids = facts.write_fact("J5", "centroids", {"embedding": EMBEDDING, "clusters": vectors})
     config["arms"]["B4"] = {"choice": rel(choice), "centroids": rel(centroids), "adapters": None}
     config["train"]["sft"].update({"max_steps": 2, "per_device_train_batch_size": 2, "gradient_accumulation_steps": 1,
-                                   "max_length": 512, "logging_steps": 1, "gradient_checkpointing": False})
+                                   "max_length": 512, "logging_steps": 1, "gradient_checkpointing": True})
     config["train"]["lora"].update({"r": 8, "alpha": 16})
     for cluster in clusters:
         write_dataset(cluster, rows(cluster))
@@ -95,6 +95,7 @@ def fake_modal_app(monkeypatch, module: str, **functions):
     import modal_apps
 
     calls = {name: [] for name in functions}
+    calls["app.run"] = []
 
     def remote(name, fn):
         def call(*args):
@@ -102,7 +103,11 @@ def fake_modal_app(monkeypatch, module: str, **functions):
             return fn(*args)
         return types.SimpleNamespace(remote=call)
 
-    fake = types.SimpleNamespace(app=types.SimpleNamespace(run=contextlib.nullcontext),
+    def run(**options):
+        calls["app.run"].append(options)
+        return contextlib.nullcontext()
+
+    fake = types.SimpleNamespace(app=types.SimpleNamespace(run=run),
                                  **{name: remote(name, fn) for name, fn in functions.items()})
     monkeypatch.setitem(sys.modules, f"modal_apps.{module}", fake)
     monkeypatch.setattr(modal_apps, module, fake, raising=False)

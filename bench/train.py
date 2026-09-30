@@ -168,10 +168,21 @@ def _token_ids(tokenizer: Any, messages: List[dict], template_kwargs: dict, gene
                                               add_generation_prompt=generation_prompt, **template_kwargs)["input_ids"])
 
 
-def check_rows(tokenizer: Any, rows: List[dict], template_kwargs: dict, max_length: int) -> Dict[str, int]:
+def check_template_reads(tokenizer: Any, template_kwargs: dict) -> None:
+    """A kwarg the chat template never reads is silently ignored (thinking would stay on)."""
+    template = tokenizer.chat_template or ""
+    unread = [k for k in template_kwargs if k not in template]
+    if unread:
+        raise TrainError(f"the chat template does not read {unread}: the candidate's chat_template_kwargs would do nothing")
+
+
+def check_rows(tokenizer: Any, rows: List[dict], template_kwargs: dict,
+               max_length: int) -> Tuple[Dict[str, int], List[List[int]]]:
     """Every row trains on what serving will ask: its prompt, rendered with the generation prompt and the
-    serving template kwargs, is a prefix of prompt + completion; and the row fits in max_length."""
-    longest, completion_tokens = 0, 0
+    serving template kwargs, is a prefix of prompt + completion; and the row fits in max_length. Returns
+    the token counts and, per row, the completion tokens (what the loss must fall on)."""
+    check_template_reads(tokenizer, template_kwargs)
+    longest, completions = 0, []
     for i, row in enumerate(rows):
         prompt = _token_ids(tokenizer, row["prompt"], template_kwargs, generation_prompt=True)
         full = _token_ids(tokenizer, row["prompt"] + row["completion"], template_kwargs, generation_prompt=False)
@@ -182,8 +193,26 @@ def check_rows(tokenizer: Any, rows: List[dict], template_kwargs: dict, max_leng
             raise TrainError(f"row {i + 1} has {len(full)} tokens, over train.sft.max_length = {max_length}")
         if len(full) == len(prompt):
             raise TrainError(f"row {i + 1}: the completion renders to no tokens")
-        longest, completion_tokens = max(longest, len(full)), completion_tokens + len(full) - len(prompt)
-    return {"longest_row_tokens": longest, "completion_tokens": completion_tokens}
+        longest = max(longest, len(full))
+        completions.append(full[len(prompt):])
+    return {"longest_row_tokens": longest, "completion_tokens": sum(map(len, completions))}, completions
+
+
+def check_loss_tokens(dataset: Any, completions: List[List[int]]) -> None:
+    """What TRL will train on, row by row, is exactly the completion tokens serving would produce: the loss
+    on the completion only, rendered with the serving kwargs (thinking off), nothing dropped or cut."""
+    if len(dataset) != len(completions):
+        raise TrainError(f"TRL kept {len(dataset)} of {len(completions)} rows")
+    for i, example in enumerate(dataset):
+        if "labels" in example:
+            under_loss = [t for t, label in zip(example["input_ids"], example["labels"]) if label != -100]
+        elif "completion_mask" in example:
+            under_loss = [t for t, m in zip(example["input_ids"], example["completion_mask"]) if m]
+        else:
+            raise TrainError("TRL's dataset has neither labels nor a completion mask: the loss cannot be checked")
+        if under_loss != completions[i]:
+            raise TrainError(f"row {i + 1}: TRL would train on {len(under_loss)} tokens that are not the "
+                             f"{len(completions[i])} completion tokens serving produces")
 
 
 def check_target_modules(model: Any, target_modules: List[str]) -> None:
@@ -216,7 +245,7 @@ def _train_lora(plan: Dict[str, Any], rows: List[dict], out_dir: Path, device: s
     # SFTTrainer wraps the model in PEFT before the Trainer seeds: without this the LoRA init is unseeded
     transformers.set_seed(hp["seed"])
     tokenizer = AutoTokenizer.from_pretrained(base["repo"], revision=base["revision"])
-    token_stats = check_rows(tokenizer, rows, kwargs, sft["max_length"])
+    token_stats, completions = check_rows(tokenizer, rows, kwargs, sft["max_length"])
     bf16 = device == "cuda" and hp["precision"] == "bf16"
     model = AutoModelForCausalLM.from_pretrained(base["repo"], revision=base["revision"],
                                                  dtype=torch.bfloat16 if bf16 else torch.float32)
@@ -239,6 +268,7 @@ def _train_lora(plan: Dict[str, Any], rows: List[dict], out_dir: Path, device: s
                              revision=base["revision"])
     trainer = SFTTrainer(model=model, args=args, train_dataset=dataset, processing_class=tokenizer,
                          peft_config=peft_config)
+    check_loss_tokens(trainer.train_dataset, completions)
     started = time.perf_counter()
     result = trainer.train()
     train_seconds = time.perf_counter() - started
@@ -301,9 +331,13 @@ def _install_adapter(cluster: str, trained: Path) -> Path:
 
 
 def register_adapters(config: Dict[str, Any]) -> Tuple[Optional[Path], List[str]]:
-    """The `adapters` fact once every centroid cluster has an adapter trained on B4's choice and
-    centroids; otherwise None and the clusters still missing one."""
+    """The `adapters` fact once every centroid cluster has an adapter trained on B4's choice and centroids,
+    over the candidate's current pinned weights and template kwargs (the fact records neither, so this is
+    where a change of revision is caught); otherwise None and the clusters still missing one."""
     (choice, choice_sha), (centroids, centroids_sha) = _trained_on(config)
+    entry = candidate(config, choice["slm"])
+    trained_for = {"slm": choice["slm"], "facts": {"choice": choice_sha, "centroids": centroids_sha},
+                   "base": dict(entry["hf"]), "chat_template_kwargs": dict(entry.get("chat_template_kwargs") or {})}
     adapters, missing = {}, []
     for cluster in sorted(centroids["clusters"]):
         manifest_path = adapters_dir() / cluster / "manifest.json"
@@ -311,8 +345,8 @@ def register_adapters(config: Dict[str, Any]) -> Tuple[Optional[Path], List[str]
             missing.append(cluster)
             continue
         manifest = json.loads(manifest_path.read_text())
-        if (manifest["slm"], manifest["facts"]) != (choice["slm"], {"choice": choice_sha, "centroids": centroids_sha}):
-            missing.append(cluster)  # trained for another choice or other centroids: retrain
+        if {k: manifest.get(k) for k in trained_for} != trained_for:
+            missing.append(cluster)  # another choice, other centroids, other weights or template kwargs: retrain
             continue
         sha = sha256_dir(manifest_path.parent / "adapter")
         if sha != manifest["adapter_sha256"]:
@@ -323,6 +357,19 @@ def register_adapters(config: Dict[str, Any]) -> Tuple[Optional[Path], List[str]
         return None, missing
     payload = {"slm": choice["slm"], "choice": choice_sha, "centroids": centroids_sha, "adapters": adapters}
     return write_fact(JUDGMENT, "adapters", payload), []
+
+
+def plan_id(plan: Dict[str, Any]) -> str:
+    """The identity of a training: everything it depends on (the dataset by its sha256)."""
+    return sha256_bytes(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode())
+
+
+def precheck(plan: Dict[str, Any], rows: List[dict]) -> Dict[str, int]:
+    """The template checks of train_lora, run here with the candidate's tokenizer before any GPU starts."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(plan["base"]["repo"], revision=plan["base"]["revision"])
+    return check_rows(tokenizer, rows, plan["chat_template_kwargs"], plan["hyperparameters"]["sft"]["max_length"])[0]
 
 
 def _scratch() -> Path:
@@ -350,17 +397,22 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
             stats = train_lora(plan, parse_dataset(raw, plan["dataset"]["path"]), trained, _device())
             gpu, seconds = None, 0.0  # a local run is not billed; stats records its device and time
         elif on == "modal":
+            precheck(plan, parse_dataset(raw, plan["dataset"]["path"]))
             sys.path.insert(0, str(paths.ROOT))
             from modal_apps import train as modal_train
 
-            with modal_train.app.run():
+            # detached: the training goes on if this machine sleeps; running the same command again
+            # collects the stored result of the same plan instead of training twice
+            with modal_train.app.run(detach=True):
                 result = modal_train.train_adapter.remote(plan, raw)
             for rel, content in result["files"].items():
                 (trained / rel).parent.mkdir(parents=True, exist_ok=True)
                 (trained / rel).write_bytes(content)
             if sha256_dir(trained) != result["sha256"]:
                 raise TrainError("the adapter downloaded from Modal is not the one trained there (sha256 differs)")
-            stats, gpu, seconds = result["stats"], config["train"]["gpu"], result["function_seconds"]
+            # a result collected from an earlier (detached) run keeps that run's cost
+            stats = {**result["stats"], "collected_from_earlier_run": bool(result.get("reused"))}
+            gpu, seconds = config["train"]["gpu"], result["function_seconds"]
         else:
             raise TrainError(f"--on must be local or modal, not {on!r}")
         adapter = _install_adapter(cluster, trained)

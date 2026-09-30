@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 from bench import paths  # noqa: E402
 from bench.contracts import facts  # noqa: E402
 from bench.preflight import PASS, lora_parity, peft_generate  # noqa: E402
-from test_preflight import FakeVLLM  # noqa: E402
+from test_preflight import FakeVLLM, cards  # noqa: E402
 from test_train_fixtures import TINY, TINY_NAME, make_s5_repo, save  # noqa: E402
 
 KWARGS = {"enable_thinking": False}
@@ -57,7 +57,8 @@ def test_local_p4_passes_when_the_server_reproduces_peft(tmp_path, monkeypatch):
     settings.update({"n_prompts": 2, "max_new_tokens": 5})
     prompts = [json.loads(line)["prompt"] for line in (paths.ROOT / "train/datasets/c0.jsonl").read_text().splitlines()][:2]
     ref = peft_generate(TINY, str(adapter), prompts, KWARGS, 5, settings["top_logprobs"], "cpu")
-    server = FakeVLLM({TINY_NAME: ref["base"], "c0": ref["adapter"]}, prompts)  # a vLLM that matches HF exactly
+    server = FakeVLLM({TINY_NAME: ref["base"], "c0": ref["adapter"]}, prompts,  # a vLLM that matches HF exactly
+                      cards(manifest["adapter_sha256"]))
     try:
         config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
         verdict = lora_parity(save(config, config_path), "c0", "local")

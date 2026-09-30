@@ -171,8 +171,11 @@ serving:                       # vLLM, one candidate per server, its adapters be
   prefix_caching: true         # SPEC 6.6: the load test runs with the prefix cache on
   generation_config: vllm      # only the request's parameters apply, never the model's sampling defaults
   max_concurrent_requests: 256 # per container; above it the Modal proxy answers 503
+  min_containers: 0            # 1 while agent runs use it: a cold start answers 503, and hooks do not retry
   scaledown_window_s: 300
   startup_timeout_s: 1800
+  download_timeout_s: 3600
+  warmup_timeout_s: 600
   unauthenticated: true        # Modal's proxy auth needs headers the agent's client does not send; vLLM's own API key guards it
 
 train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
@@ -197,13 +200,13 @@ train:                         # S5: one LoRA adapter per cluster on the chosen 
 loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's input
   aiperf_version: 0.13.0
   concurrency: [1, 4, 8, 16, 32]   # one run per level
-  request_count: 500           # per level, cycling over the source run's calls
-  warmup_request_count: 20
+  request_count: 500           # per level: that many calls, each level its own (no prompt replayed twice,
+  warmup_request_count: 20     # so the prefix cache holds only what real traffic would share); warm-up calls apart
   stream: false                # the agent does not stream (bench/agent/hooks.py): latency is the whole request
   request_timeout_s: 600
   ready_timeout_s: 1800        # a cold server loads its weights before the first answer
   client: {cpu: 4, timeout_s: 7200}   # the Modal container that runs AIPerf beside the server
 
 preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
-  lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600}
+  lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
   schedule: {train_hours_max: 12}   # all adapters must train overnight (SPEC 7.3, Day 1 night)

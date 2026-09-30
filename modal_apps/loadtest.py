@@ -22,17 +22,17 @@ app = modal.App(SETTINGS["apps"]["loadtest"])
 @app.function(image=image, cpu=SETTINGS["loadtest"]["cpu"], timeout=SETTINGS["loadtest"]["timeout_s"],
               volumes={common.HF_CACHE: hf_cache}, secrets=[api_key])
 def run_aiperf(payloads: bytes, args: dict) -> dict:
-    from bench.loadtest import PAYLOADS, aiperf_command, run_aiperf as run, wait_ready
+    from bench.loadtest import PAYLOADS, aiperf_command, run_aiperf as run, wait_ready, warm_up
 
     key = os.environ.get("VLLM_API_KEY")
     with tempfile.TemporaryDirectory() as work:
         run_dir = Path(work)
         (run_dir / PAYLOADS).write_bytes(payloads)
-        waited = wait_ready(args["base_url"], key, args["model"], args["ready_timeout_s"])
+        waited, card = wait_ready(args["base_url"], key, args["model"], args["ready_timeout_s"])
+        warm_up(args["base_url"], key, args["warmup"], args["timeout_s"])
         cmd = aiperf_command(shutil.which("aiperf"), args["url"], args["model"], args["concurrency"],
-                             args["request_count"], args["warmup"], args["tokenizer"], args["timeout_s"],
-                             args["stream"], key)
+                             args["request_count"], args["tokenizer"], args["timeout_s"], args["stream"], key)
         returncode = run(run_dir, cmd)
         files = {p.relative_to(run_dir).as_posix(): p.read_bytes() for p in sorted(run_dir.rglob("*"))
                  if p.is_file() and p.name != PAYLOADS}
-    return {"returncode": returncode, "ready_after_s": waited, "files": files}
+    return {"returncode": returncode, "ready_after_s": waited, "served_model": card, "files": files}

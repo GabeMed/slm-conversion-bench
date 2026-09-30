@@ -21,11 +21,12 @@ SERVE_LOCK = ROOT / "env" / "train" / "serve-vllm.lock"  # vLLM and everything i
 HF_CACHE = "/root/.cache/huggingface"
 VLLM_CACHE = "/root/.cache/vllm"
 ADAPTERS = "/adapters"  # the adapters volume: one directory per adapter, named by its sha256_dir
+RESULTS = "results"     # beside them: <plan id>.json once a training finished, <plan id>.started while it runs
 PORT = 8000
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)  # vllm/config/lora.py:MaxLoRARanks @ v0.30.0
 SERVING_KEYS = ("vllm_version", "base_image", "gpu", "cpu", "max_model_len", "gpu_memory_utilization",
-                "prefix_caching", "generation_config", "max_concurrent_requests", "scaledown_window_s",
-                "startup_timeout_s", "unauthenticated")
+                "prefix_caching", "generation_config", "max_concurrent_requests", "min_containers",
+                "scaledown_window_s", "startup_timeout_s", "download_timeout_s", "warmup_timeout_s", "unauthenticated")
 
 
 class SettingsError(RuntimeError):
@@ -35,7 +36,8 @@ class SettingsError(RuntimeError):
 def common_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     modal = config["modal"]
     return {"apps": dict(modal["apps"]), "volumes": dict(modal["volumes"]), "secrets": dict(modal["secrets"]),
-            "train": {"gpu": config["train"]["gpu"], "timeout_s": config["train"]["timeout_s"]},
+            "train": {"gpu": config["train"]["gpu"], "timeout_s": config["train"]["timeout_s"],
+                      "reference_timeout_s": config["preflight"]["lora_parity"]["reference_timeout_s"]},
             "loadtest": dict(config["loadtest"]["client"])}
 
 
@@ -67,11 +69,19 @@ def adapters_to_serve(config: Dict[str, Any], name: str) -> List[Dict[str, Any]]
             manifest = json.loads(manifest_path.read_text())
             if manifest["slm"] == name:
                 entries.append((manifest["cluster"], manifest["served_name"], manifest["adapter_sha256"]))
+    from bench.train import candidate
+
+    entry = candidate(config, name)
+    trained_for = {"base": dict(entry["hf"]), "chat_template_kwargs": dict(entry.get("chat_template_kwargs") or {})}
     adapters = []
     for cluster, served_name, sha in entries:
         adapter = root / cluster / "adapter"
         if not adapter.is_dir() or sha256_dir(adapter) != sha:
             raise SettingsError(f"train/adapters/{cluster}/adapter is not the adapter {sha} to be served")
+        manifest = json.loads((root / cluster / "manifest.json").read_text())
+        if {k: manifest.get(k) for k in trained_for} != trained_for:
+            raise SettingsError(f"the adapter of {cluster} was trained on other weights or template kwargs than "
+                                f"{name}'s pinned ones: retrain it")
         rank = json.loads((adapter / "adapter_config.json").read_text())["r"]
         adapters.append({"cluster": cluster, "served_name": served_name, "sha256": sha, "r": rank})
     return adapters
@@ -160,7 +170,7 @@ def wait_healthy(base: str, process: Optional[subprocess.Popen], timeout_s: floa
         time.sleep(poll_s)
 
 
-def warm_up(base: str, plan: Dict[str, Any], api_key: Optional[str], timeout_s: float = 600) -> List[str]:
+def warm_up(base: str, plan: Dict[str, Any], api_key: Optional[str], timeout_s: float) -> List[str]:
     """One short greedy request to the base and to each adapter, so the first measured request finds the
     adapters loaded and the kernels compiled."""
     models = [plan["name"], *[a["served_name"] for a in plan["adapters"]]]
@@ -168,3 +178,37 @@ def warm_up(base: str, plan: Dict[str, Any], api_key: Optional[str], timeout_s: 
         _post(f"{base}/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": "Hello"}],
                                               "max_tokens": 8, "temperature": 0.0}, api_key, timeout_s)
     return models
+
+
+def stored_training(root: str, plan_id: str, now: float, stale_after_s: float) -> Optional[Dict[str, Any]]:
+    """In the training container: the stored result of a finished training of this plan, with its files
+    (so running the same command after a disconnect collects it); None when there is none. A training of
+    the plan started less than stale_after_s ago is still running: an error, never a second training."""
+    from bench.contracts.facts import sha256_dir
+
+    results = Path(root) / RESULTS
+    done = results / f"{plan_id}.json"
+    if done.is_file():
+        result = json.loads(done.read_text())
+        adapter = Path(root) / result["sha256"]
+        if not adapter.is_dir() or sha256_dir(adapter) != result["sha256"]:
+            raise SettingsError(f"the stored adapter {result['sha256']} is not on the volume intact")
+        files = {p.relative_to(adapter).as_posix(): p.read_bytes() for p in sorted(adapter.rglob("*")) if p.is_file()}
+        return {**result, "files": files, "reused": True}
+    started = results / f"{plan_id}.started"
+    if started.is_file() and now - float(started.read_text()) < stale_after_s:
+        raise SettingsError(f"a training of this plan started {now - float(started.read_text()):.0f} s ago is still "
+                            "running: wait for it, then run the same command to collect it")
+    return None
+
+
+def mark_started(root: str, plan_id: str, now: float) -> None:
+    results = Path(root) / RESULTS
+    results.mkdir(parents=True, exist_ok=True)
+    (results / f"{plan_id}.started").write_text(str(now))
+
+
+def store_training(root: str, plan_id: str, result: Dict[str, Any]) -> None:
+    results = Path(root) / RESULTS
+    (results / f"{plan_id}.json").write_text(json.dumps(result, sort_keys=True))
+    (results / f"{plan_id}.started").unlink(missing_ok=True)

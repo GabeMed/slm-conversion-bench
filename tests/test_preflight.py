@@ -9,8 +9,8 @@ import pytest
 
 from bench import cli, paths
 from bench.preflight import (FAIL, PASS, PENDING, PreflightError, check_agent_runs, check_call_sites, check_data,
-                             check_lora_parity, check_pilot_spend, check_schedule, check_teacher_terms, compare,
-                             lora_parity, parity_verdict, served_generate)
+                             check_lora_parity, check_pilot_spend, check_teacher_terms, check_throughput,
+                             check_training_time, compare, lora_parity, parity_verdict, served_generate)
 from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, save
 
 STOP = [2]
@@ -71,6 +71,37 @@ def test_verdict_when_the_served_adapter_diverges_from_peft():
     assert "reserve" in verdict["action"] and verdict["base_matches_hf"] == 3
 
 
+def test_verdict_when_vllm_ignores_the_adapter_where_peft_changes_only_by_near_ties():
+    """The served adapter equals the base everywhere; HF-PEFT's changes are near-ties, so every prompt
+    'matches' by the top-k rule. Not a pass: the adapter changed nothing."""
+    base = [{"tokens": [10, 20], "top": [[10, 40], [20]]}]
+    adapter = [{"tokens": [40, 50], "top": [[40, 10], [50]]}]
+    verdict = parity_verdict(base, base, base, adapter, STOP)
+    assert verdict["adapter_matches_peft"] == 1 and verdict["status"] == FAIL
+    assert "ignores the adapter" in verdict["diagnosis"]
+
+
+def test_verdict_when_vllm_applies_the_adapter_on_only_some_decisive_prompts():
+    base = [gen([10 + i, 20]) for i in range(3)]
+    adapter = [gen([40 + i, 50]) for i in range(3)]
+    served = [adapter[0], base[1], base[2]]  # changes one prompt of three where PEFT's change is decisive
+    verdict = parity_verdict(base, served, base, adapter, STOP)
+    assert verdict["status"] == FAIL and verdict["ignored_where_peft_is_decisive"] == 2
+    assert "on 2 prompt(s)" in verdict["diagnosis"]
+
+
+def test_an_ignored_adapter_is_caught_even_where_the_servers_numerics_make_it_look_close():
+    """Prompt 0: the adapter is applied. Prompt 1: the served adapter is the served base, whose own top-k
+    happens to hold PEFT's token (so the top-k rule calls it close), while HF-PEFT's change is decisive."""
+    ref_base = [gen([10, 20]), {"tokens": [11, 21], "top": [[11, 99], [21]]}]
+    ref_adapter = [gen([40, 50]), {"tokens": [41, 51], "top": [[41, 11], [51]]}]
+    served_base = [gen([10, 20]), {"tokens": [11, 21], "top": [[11, 41], [21]]}]
+    served_adapter = [gen([40, 50]), served_base[1]]
+    verdict = parity_verdict(served_base, served_adapter, ref_base, ref_adapter, STOP)
+    assert verdict["adapter_matches_peft"] == 2 and verdict["adapter_changes_output"] == 1  # the top-k rule alone passes
+    assert verdict["status"] == FAIL and verdict["ignored_where_peft_is_decisive"] == 1
+
+
 def test_verdict_when_the_serving_itself_disagrees_does_not_blame_the_lora():
     base = [gen([10, 20]), gen([11, 21])]
     other = [gen([70, 80]), gen([71, 81])]
@@ -97,14 +128,21 @@ class FakeVLLM:
     """An OpenAI-compatible chat endpoint answering greedily from a script {model: [tokens per prompt]},
     with top-k logprobs as vLLM's `return_tokens_as_token_ids` gives them."""
 
-    def __init__(self, script, prompts):
-        self.script, self.prompts, self.requests = script, prompts, []
+    def __init__(self, script, prompts, cards=None):
+        self.script, self.prompts, self.requests, self.cards = script, prompts, [], cards or []
         self.token_name = lambda t: f"token_id:{t}"  # vLLM with return_tokens_as_token_ids
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def do_GET(self):
+                body = json.dumps({"object": "list", "data": fake.cards}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -139,6 +177,16 @@ def parity_repo(tmp_path, monkeypatch):
     return config_path, config, prompts
 
 
+def cards(adapter_sha256, root=None, base_root=TINY["repo"]):
+    """/v1/models as vLLM lists the base and an adapter (vllm/entrypoints/openai/models/serving.py)."""
+    return [{"id": TINY_NAME, "object": "model", "root": base_root},
+            {"id": "c0", "object": "model", "root": root or f"/adapters/{adapter_sha256}", "parent": TINY_NAME}]
+
+
+def _sha(name="c0"):
+    return json.loads((paths.ROOT / f"train/adapters/{name}/manifest.json").read_text())["adapter_sha256"]
+
+
 def _reference(prompts):
     calls = []
 
@@ -164,7 +212,7 @@ SERVED = {
 def test_p4_against_a_fake_vllm(parity_repo, monkeypatch, fake, status, diagnosis):
     config_path, config, prompts = parity_repo
     server = FakeVLLM({TINY_NAME: [gen([10 + i, 20, 30]) for i in range(len(prompts))],
-                       "c0": [SERVED[fake](i) for i in range(len(prompts))]}, prompts)
+                       "c0": [SERVED[fake](i) for i in range(len(prompts))]}, prompts, cards(_sha()))
     try:
         config["roles"]["slm_candidates"][-1]["endpoint"].update({"base_url": server.base_url, "api_key_env": "TEST_SLM_KEY"})
         monkeypatch.setenv("TEST_SLM_KEY", "k-123")
@@ -179,12 +227,38 @@ def test_p4_against_a_fake_vllm(parity_repo, monkeypatch, fake, status, diagnosi
     assert calls == [(TINY, prompts, {"enable_thinking": False}, settings["max_new_tokens"], settings["top_logprobs"])]
     # every served request is greedy, with top-k as token ids, and carries the configured key
     assert {r["auth"] for r in server.requests} == {"Bearer k-123"}
-    assert {r["path"] for r in server.requests} == {"/v1/chat/completions"}
+    assert {r["path"] for r in server.requests} == {"/v1/chat/completions"}  # after GET /v1/models
     for r in server.requests:
         assert r["body"]["temperature"] == 0.0 and r["body"]["logprobs"] is True
         assert r["body"]["return_tokens_as_token_ids"] is True
         assert r["body"]["top_logprobs"] == settings["top_logprobs"] and r["body"]["max_tokens"] == settings["max_new_tokens"]
     assert len(server.requests) == 2 * len(prompts)
+
+
+@pytest.mark.parametrize("listed, message", [
+    (lambda sha: cards("f" * 64), "not the adapter trained"),  # retrained, not redeployed
+    (lambda sha: cards(sha, base_root="Qwen/Other"), "not 'trl-internal-testing"),
+    (lambda sha: cards(sha)[:1], "deploy them"),
+])
+def test_p4_refuses_to_judge_an_adapter_the_server_does_not_serve(parity_repo, listed, message):
+    config_path, config, prompts = parity_repo
+    server = FakeVLLM({}, prompts, listed(_sha()))
+    try:
+        config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
+        failed = check_lora_parity(save(config, config_path), "c0", "local")
+    finally:
+        server.close()
+    assert failed["status"] == FAIL and message in failed["evidence"]["error"] and "not decided" in failed["action"]
+    assert not server.requests  # nothing generated
+
+
+def test_a_bug_in_p4_is_raised_not_reported_as_an_unreachable_server(parity_repo, monkeypatch):
+    from bench import preflight
+
+    _, config, _ = parity_repo
+    monkeypatch.setattr(preflight, "lora_parity", lambda *a: {}["status"])
+    with pytest.raises(KeyError):
+        check_lora_parity(config, "c0", "local")
 
 
 def test_served_generate_refuses_a_server_that_does_not_return_token_ids(parity_repo):
@@ -256,24 +330,32 @@ def test_pilot_spend_is_pending_on_what_other_fronts_provide(tmp_path, monkeypat
     assert check_pilot_spend(config)["status"] == PENDING
 
 
-def test_schedule_projects_the_measured_training_time_over_every_dataset(tmp_path, monkeypatch):
+def test_training_time_projects_the_measured_gpu_time_over_every_dataset(tmp_path, monkeypatch):
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
-    assert check_schedule(config)["status"] == PENDING
+    assert check_training_time(config)["status"] == PENDING
     local = fake_adapter("c0", config).parent / "manifest.json"
     manifest = json.loads(local.read_text())
     local.write_text(json.dumps({**manifest, "where": "local", "stats": {"train_seconds": 1, "examples_seen": 1}}))
-    assert check_schedule(config)["status"] == PENDING  # a CPU run does not project GPU time
+    assert check_training_time(config)["status"] == PENDING  # a CPU run does not project GPU time
     local.write_text(json.dumps({**manifest, "where": "modal", "stats": {"train_seconds": 100, "examples_seen": 50}}))
-    waiting = check_schedule(config)
+    measured = check_training_time(config)
     epochs = config["train"]["sft"]["num_train_epochs"]
-    assert waiting["evidence"]["dataset_rows"] == 8 and waiting["evidence"]["seconds_per_example"] == 2
-    assert waiting["evidence"]["projected_train_hours"] == round(2 * 8 * epochs / 3600, 2)
-    assert waiting["status"] == PENDING and "load test" in waiting["evidence"]["needs"]
-    (paths.RUNS / "loadtest-x").mkdir(parents=True)
-    (paths.RUNS / "loadtest-x" / "manifest.json").write_text(json.dumps({"run_id": "loadtest-x", "concurrency": 4, "status": "done"}))
-    assert check_schedule(config)["status"] == PASS
+    assert measured["evidence"]["dataset_rows"] == 8 and measured["evidence"]["seconds_per_example"] == 2
+    assert measured["evidence"]["projected_train_hours"] == round(2 * 8 * epochs / 3600, 2)
+    assert measured["status"] == PASS
     config["preflight"]["schedule"]["train_hours_max"] = 0.001
-    assert check_schedule(config)["status"] == FAIL
+    assert check_training_time(config)["status"] == FAIL
+
+
+def test_throughput_lists_only_finished_load_runs_and_leaves_the_judgment_to_j8(tmp_path, monkeypatch):
+    make_s5_repo(tmp_path, monkeypatch)
+    for run_id, status in (("loadtest-a", "failed"), ("loadtest-b", "running"), ("loadtest-c", "done")):
+        (paths.RUNS / run_id).mkdir(parents=True)
+        (paths.RUNS / run_id / "manifest.json").write_text(json.dumps(
+            {"run_id": run_id, "engine": "slm:x", "concurrency": 4, "status": status}))
+    check = check_throughput()
+    assert check["status"] == PENDING and [r["run_id"] for r in check["evidence"]["done_loadtest_runs"]] == ["loadtest-c"]
+    assert check["evidence"]["needs"] == "J8 over these runs"
 
 
 def test_bench_preflight_writes_the_report_and_exits_1_unless_everything_passes(tmp_path, monkeypatch, capsys):
@@ -282,7 +364,8 @@ def test_bench_preflight_writes_the_report_and_exits_1_unless_everything_passes(
     report_path = next(paths.RUNS.glob("preflight-*/report.json"))
     report = json.loads(report_path.read_text())
     assert [c["id"] for c in report["checks"]] == ["agent_end_to_end", "call_sites_registered", "data_ids_and_gold",
-                                                   "teacher_terms", "pilot_spend", "schedule", "lora_parity"]
+                                                   "teacher_terms", "pilot_spend", "training_time", "throughput",
+                                                   "lora_parity"]
     assert report["all_pass"] is False and all(c["action"] for c in report["checks"])
     assert str(paths.ROOT) not in report_path.read_text()
     assert "lora_parity" in capsys.readouterr().out
@@ -293,9 +376,10 @@ def test_p4_on_modal_asks_the_gpu_reference_for_the_adapter_by_its_sha256(parity
 
     config_path, config, prompts = parity_repo
     server = FakeVLLM({TINY_NAME: [gen([10 + i, 20, 30]) for i in range(len(prompts))],
-                       "c0": [gen([40 + i, 50, 60]) for i in range(len(prompts))]}, prompts)
+                       "c0": [gen([40 + i, 50, 60]) for i in range(len(prompts))]}, prompts, cards(_sha()))
     reference, _ = _reference(prompts)
-    calls = fake_modal_app(monkeypatch, "train", peft_reference=lambda sha, *args: reference(*args))
+    calls = fake_modal_app(monkeypatch, "train",
+                           peft_reference=lambda sha, *args: {**reference(*args), "function_seconds": 12.5})
     try:
         config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
         verdict = lora_parity(save(config, config_path), "c0", "modal")
@@ -304,4 +388,4 @@ def test_p4_on_modal_asks_the_gpu_reference_for_the_adapter_by_its_sha256(parity
     manifest = json.loads((paths.ROOT / "train/adapters/c0/manifest.json").read_text())
     (sha, base, got_prompts, kwargs, _, _), = calls["peft_reference"]
     assert sha == manifest["adapter_sha256"] and base == TINY and got_prompts == prompts
-    assert verdict["status"] == PASS and verdict["reference_on"] == "modal"
+    assert verdict["status"] == PASS and verdict["reference_on"] == "modal" and verdict["reference_gpu_seconds"] == 12.5

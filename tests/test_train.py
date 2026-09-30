@@ -132,6 +132,19 @@ def test_an_adapter_trained_on_other_facts_does_not_count(tmp_path, monkeypatch)
     assert register_adapters(config) == (None, ["c0"])
 
 
+@pytest.mark.parametrize("change", ["revision", "kwargs"])
+def test_an_adapter_trained_on_other_weights_or_kwargs_than_the_candidates_does_not_count(tmp_path, monkeypatch, change):
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    fake_adapter("c0", config)
+    fake_adapter("c1", config)
+    entry = config["roles"]["slm_candidates"][-1]
+    if change == "revision":  # e.g. after P-4 said to fix the pinned revision
+        entry["hf"]["revision"] = "b" * 40
+    else:
+        entry["chat_template_kwargs"] = {"enable_thinking": True}
+    assert register_adapters(save(config, config_path)) == (None, ["c0", "c1"])
+
+
 def test_an_adapter_changed_after_training_is_refused(tmp_path, monkeypatch):
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
     adapter = fake_adapter("c0", config)
@@ -169,9 +182,12 @@ def _adapter_files(tmp_path):
 
 
 def test_training_on_modal_keeps_what_modal_trained_and_costs_its_gpu_seconds(tmp_path, monkeypatch):
+    from bench import train
     from bench.train import train_cluster
 
     _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    prechecked = []
+    monkeypatch.setattr(train, "precheck", lambda plan, rows: prechecked.append(len(rows)))
     files, sha = _adapter_files(tmp_path)
     stats = {"device": "cuda", "train_seconds": 90.0, "examples_seen": 8}
     calls = fake_modal_app(monkeypatch, "train", train_adapter=lambda plan, raw: {
@@ -179,19 +195,23 @@ def test_training_on_modal_keeps_what_modal_trained_and_costs_its_gpu_seconds(tm
     result = train_cluster(str(config_path), "c0", "modal")
     (plan, raw), = calls["train_adapter"]
     assert plan["dataset"]["sha256"] == hashlib.sha256(raw).hexdigest() and plan["base"] == TINY
+    assert prechecked == [4]  # the template checks ran here, before any GPU
+    assert calls["app.run"] == [{"detach": True}]  # the training survives this machine sleeping
     adapter = paths.ROOT / "train" / "adapters" / "c0" / "adapter"
     assert {p.name: p.read_bytes() for p in adapter.iterdir()} == files
     manifest = json.loads(result["manifest"].read_text())
     price = config["modal"]["gpu_prices"]["usd_per_s"][config["train"]["gpu"]]
     assert (manifest["where"], manifest["gpu"], manifest["gpu_seconds"]) == ("modal", config["train"]["gpu"], 100.0)
     assert manifest["cost_usd"] == round(100.0 * price, 4) and manifest["adapter_sha256"] == sha
-    assert manifest["stats"] == stats and result["missing"] == ["c1"]
+    assert manifest["stats"] == {**stats, "collected_from_earlier_run": False} and result["missing"] == ["c1"]
 
 
 def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monkeypatch):
+    from bench import train
     from bench.train import train_cluster
 
     _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(train, "precheck", lambda plan, rows: None)
     files, _ = _adapter_files(tmp_path)
     fake_modal_app(monkeypatch, "train", train_adapter=lambda plan, raw: {
         "sha256": "0" * 64, "files": files, "stats": {}, "function_seconds": 1.0})

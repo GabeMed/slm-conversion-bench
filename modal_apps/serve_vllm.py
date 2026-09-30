@@ -43,7 +43,7 @@ image = (
 app = modal.App(f"{SETTINGS['apps']['serve']}-{PLAN['name']}")
 
 
-@app.function(image=image, volumes={common.HF_CACHE: hf_cache}, secrets=hf_secrets, timeout=3600)
+@app.function(image=image, volumes={common.HF_CACHE: hf_cache}, secrets=hf_secrets, timeout=PLAN["download_timeout_s"])
 def download() -> str:
     """The candidate's weights at the pinned revision, into the HF-cache volume (once, before serving)."""
     from huggingface_hub import snapshot_download
@@ -55,7 +55,7 @@ def download() -> str:
 
 @app.server(image=image, gpu=PLAN["gpu"], cpu=PLAN["cpu"], port=common.PORT, secrets=[api_key],
             volumes={common.HF_CACHE: hf_cache, common.VLLM_CACHE: vllm_cache, common.ADAPTERS: adapters},
-            env={"HF_HUB_OFFLINE": "1"}, min_containers=0, max_containers=1,
+            env={"HF_HUB_OFFLINE": "1"}, min_containers=PLAN["min_containers"], max_containers=1,
             max_concurrency=PLAN["max_concurrent_requests"], scaledown_window=PLAN["scaledown_window_s"],
             startup_timeout=PLAN["startup_timeout_s"], unauthenticated=PLAN["unauthenticated"])
 class Server:
@@ -65,7 +65,7 @@ class Server:
         self.process = subprocess.Popen(common.vllm_command(PLAN))
         base = f"http://127.0.0.1:{common.PORT}"
         common.wait_healthy(base, self.process, PLAN["startup_timeout_s"])
-        common.warm_up(base, PLAN, os.environ.get("VLLM_API_KEY"))
+        common.warm_up(base, PLAN, os.environ.get("VLLM_API_KEY"), PLAN["warmup_timeout_s"])
 
     @modal.exit()
     def stop(self):

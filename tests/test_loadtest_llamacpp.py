@@ -27,12 +27,15 @@ def _llamacpp_serves(model):
 
 
 def test_aiperf_replays_a_runs_calls_against_llamacpp(tmp_path, monkeypatch):
+    """Also: the API key AIPerf is given appears in none of its artifacts (llama.cpp ignores it)."""
     if not (Path(sys.executable).parent / "aiperf").exists() and not shutil.which("aiperf"):
         pytest.skip("AIPerf is not installed (env/train)")
     _, config_path, config = make_repo(tmp_path, monkeypatch)
     if not _llamacpp_serves(config["roles"]["production_llm"]["model"]):
         pytest.skip("the llama.cpp smoke server is not up")
     config["roles"]["production_llm"]["params"]["max_tokens"] = 16
+    config["roles"]["production_llm"]["endpoint"]["api_key_env"] = "F3_TEST_KEY"
+    monkeypatch.setenv("F3_TEST_KEY", "sk-f3-secret-never-written")
     config["loadtest"].update({"concurrency": [2], "request_count": 4, "warmup_request_count": 1})
     save(config, config_path)
     source = paths.RUNS / "agent-B0-train-fixture"
@@ -45,10 +48,14 @@ def test_aiperf_replays_a_runs_calls_against_llamacpp(tmp_path, monkeypatch):
     run_dir = next(paths.RUNS.glob("loadtest-production_llm-c2-*"))
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["aiperf_returncode"] == 0
-    assert (manifest["concurrency"], manifest["n_payloads"], manifest["where"]) == (2, 2, "local")
+    assert (manifest["concurrency"], manifest["source_calls"], manifest["where"]) == (2, 2, "local")
+    assert manifest["payloads_repeat"] is True  # two source calls cannot fill 4 requests without repeating
+    assert manifest["served_model"]["id"] == config["roles"]["production_llm"]["model"]
     assert manifest["endpoint_kind"] == "llamacpp" and manifest["gpu"] is None
     export = json.loads((run_dir / "profile_export_aiperf.json").read_text())
     assert export["aiperf_version"].startswith("0.13.0")
     assert export["request_count"]["avg"] == 4 and export["was_cancelled"] is False
     assert export["request_latency"]["p95"] > 0 and export["request_throughput"]["avg"] > 0
     assert not export.get("error_summary")
+    leaked = [p for p in run_dir.rglob("*") if p.is_file() and b"sk-f3-secret-never-written" in p.read_bytes()]
+    assert not leaked
