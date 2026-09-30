@@ -1,0 +1,142 @@
+"""The test registry (REQ-013) and the call-site assertion (REQ-001; SPEC 7.1), on a temporary git
+repository with a published pre-registration: an execution on `test` commits its intent before
+anything runs and its manifest when it ends, never anything else; it runs only when the call sites
+of train and calib are registered and committed, and a call site outside them aborts it."""
+import hashlib
+import json
+import subprocess
+
+import pytest
+
+pytest.importorskip("langchain_core")
+
+from bench import barrier, paths  # noqa: E402
+from bench.agent import hooks, registry, runner  # noqa: E402
+from bench.contracts.calls import CALL_SITES, read_calls  # noqa: E402
+from bench.contracts.config import config_sha256  # noqa: E402
+from synthetic import make_repo  # noqa: E402
+from test_agent_wiring import ScriptedChess  # noqa: E402
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A clone of a bare origin, with the pre-registration of this configuration published."""
+    origin, root = tmp_path / "origin.git", tmp_path / "repo"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    root.mkdir()
+    _, config_path, config = make_repo(root, monkeypatch)
+    runner.preprocess(str(config_path), ["tiny"])
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "t")
+    git(root, "remote", "add", "origin", str(origin))
+    (root / ".gitignore").write_text("runs/\ndata/raw/\ndata/bird_dev/\n")
+    (root / "SPEC.md").write_text("protocol\n")
+    (root / "prereg").mkdir()
+    prereg = {"spec_sha256": sha(root / "SPEC.md"), "config_sha256": config_sha256(config),
+              "splits_sha256": sha(paths.SPLITS), "data_manifest_sha256": sha(paths.DATA_MANIFEST), "commit": "c"}
+    (root / "prereg" / "manifest.json").write_text(json.dumps(prereg, sort_keys=True) + "\n")
+    (root / "prereg" / "HASH").write_text(sha(root / "prereg" / "manifest.json") + "\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "init")
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    return root, config_path
+
+
+def register(root, config_path, call_sites=None, commit=True):
+    train = runner.run_agent(str(config_path), "B0", "train", ids=["1"])
+    path = registry.update_call_sites([train.name])
+    if call_sites is not None:
+        registered = json.loads(path.read_text())
+        path.write_text(json.dumps({**registered, "call_sites": call_sites}))
+    if commit:
+        git(root, "add", registry.CALL_SITES_FILE)
+        git(root, "commit", "-q", "-m", "register the call sites")
+    return train
+
+
+def test_the_intent_is_committed_before_anything_runs_and_the_manifest_after(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    before = git(root, "rev-parse", "HEAD").strip()
+    seen_while_running = []
+
+    class Watching(ScriptedChess):
+        def invoke(self, messages):
+            if not seen_while_running:
+                seen_while_running.append(git(root, "ls-files", "registry/test").split())
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    intent, manifest_rel = f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"
+    assert seen_while_running == [[intent]]  # a run that dies from here on leaves an intent with no manifest
+    assert sorted(git(root, "ls-files", "registry/test").split()) == [intent, manifest_rel]
+    assert git(root, "diff", "--name-only", before, "HEAD").split() == [intent, manifest_rel]  # nothing else, ever
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "done" and json.loads(git(root, "show", f"HEAD:{manifest_rel}")) == manifest
+    assert manifest["prereg_hash"] == (root / "prereg" / "HASH").read_text().strip()
+    assert manifest["call_sites_registry_sha256"] == sha(root / registry.CALL_SITES_FILE)
+    assert manifest["unregistered_call_sites"] == [] and manifest["commit"] == before
+    recorded = json.loads(git(root, "show", f"HEAD~1:{intent}"))
+    assert (recorded["run_id"], recorded["arm"], recorded["prereg_hash"]) == (run_dir.name, "B0", manifest["prereg_hash"])
+    assert str(root) not in git(root, "show", "HEAD") + git(root, "show", "HEAD~1")  # no local path in the record
+
+
+def test_a_single_call_execution_on_test_is_registered_too(repo):
+    root, config_path = repo
+    register(root, config_path)
+    run_dir = runner.run_agent(str(config_path), "B2", "test", ids=["9"], engine="production_llm")
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+    assert sorted(git(root, "ls-files", "registry/test").split()) == [
+        f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]
+
+
+def test_a_call_site_outside_the_registered_set_aborts_the_run(repo):
+    root, config_path = repo
+    register(root, config_path, call_sites=[s for s in CALL_SITES if s != "select_columns"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "failed" and manifest["unregistered_call_sites"] == ["select_columns"]
+    assert "REQ-001" in json.dumps(manifest["harness_errors"])
+    assert "select_columns" not in {c["call_site"] for c in read_calls(run_dir / "calls.jsonl")}  # stopped before the call
+    assert json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))["status"] == "failed"
+
+
+def test_no_registered_call_sites_no_test_run(repo):
+    root, config_path = repo
+    with pytest.raises(barrier.TestSplitLocked, match="does not exist"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    register(root, config_path, commit=False)
+    with pytest.raises(barrier.TestSplitLocked, match="not committed"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    git(root, "add", registry.CALL_SITES_FILE)
+    git(root, "commit", "-q", "-m", "register")
+    (root / registry.CALL_SITES_FILE).write_text('{"call_sites": ["agent_ir"]}')
+    with pytest.raises(barrier.TestSplitLocked, match="uncommitted"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert not (root / "registry" / "test").exists()
+    assert all(not p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())
+
+
+def test_only_done_train_and_calib_runs_register_call_sites(repo):
+    root, config_path = repo
+    train = register(root, config_path)
+    registered = json.loads((root / registry.CALL_SITES_FILE).read_text())
+    assert registered["call_sites"] == sorted(set(CALL_SITES) - {"revise"})  # what the run called, nothing more
+    assert registered["sources"][train.name]["split"] == "train"
+    test_run = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    with pytest.raises(registry.RegistryError, match="only train and calib"):
+        registry.update_call_sites([test_run.name])
+    manifest = json.loads((train / "manifest.json").read_text())
+    (train / "manifest.json").write_text(json.dumps({**manifest, "status": "failed"}))
+    with pytest.raises(registry.RegistryError, match="not 'done'"):
+        registry.update_call_sites([train.name])
