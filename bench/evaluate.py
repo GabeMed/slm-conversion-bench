@@ -61,7 +61,7 @@ def evaluate(source_run_id: str) -> Path:
     if config_sha256(config) != run_manifest["config_sha256"]:  # validated when the run loaded it
         raise data.DataError(f"the configuration snapshot of {source_run_id} does not match its manifest")
     split = run_manifest["split"]
-    barrier.ensure_split_allowed(split)
+    barrier.ensure_split_allowed(split, config)
     if run_manifest["status"] != "done":
         raise data.DataError(f"run {source_run_id} is {run_manifest['status']!r}, not 'done': "
                              f"an incomplete or failed run is never scored")

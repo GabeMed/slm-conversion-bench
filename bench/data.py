@@ -177,7 +177,7 @@ def questions_for(config: dict, split: str) -> Dict[str, dict]:
     """The questions of one split, by id. train and calib come from BIRD dev; test from Plat-SQL."""
     if split not in SPLIT_NAMES:
         raise DataError(f"unknown split {split!r}")
-    barrier.ensure_split_allowed(split)
+    barrier.ensure_split_allowed(split, config)
     ids = set(load_splits()[split])
     source = _test_questions(config) if split == "test" else _dev_questions(config)
     return {q["question_id"]: q for q in source if q["question_id"] in ids}

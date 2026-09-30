@@ -76,10 +76,16 @@ def write_fact(judgment: str, name: str, payload: Dict[str, Any], root: Optional
     return path
 
 
-@lru_cache(maxsize=None)
 def read_fact(path: str, name: str) -> Tuple[Dict[str, Any], str]:
     """The payload and its sha256. The file must be the fact `name`, and its content sha256 must be
-    the directory it lives in."""
+    the directory it lives in. Checked on every read: the cache below is keyed by the file's
+    modification time and size, so a file changed on disk is read and verified again."""
+    stat = Path(path).stat()
+    return _read_fact(path, name, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=None)
+def _read_fact(path: str, name: str, mtime_ns: int, size: int) -> Tuple[Dict[str, Any], str]:
     if Path(path).name != f"{name}.json":
         raise FactError(f"{path} is not a {name} fact")
     raw = Path(path).read_bytes()

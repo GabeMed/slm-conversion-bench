@@ -158,7 +158,7 @@ def _check_preprocessed(config: Dict[str, Any], db_ids: List[str]) -> None:
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None) -> Path:
     config = load_config(config_path)
-    barrier.ensure_split_allowed(split)
+    barrier.ensure_split_allowed(split, config)
     questions = data.questions_for(config, split)
     if ids:
         outside = [q for q in ids if q not in questions]

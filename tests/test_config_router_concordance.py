@@ -92,9 +92,9 @@ EMBEDDING = {"model": "m", "revision": "a" * 40, "max_seq_length": 512, "truncat
 @pytest.fixture
 def fact_root(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "ROOT", tmp_path)
-    facts.read_fact.cache_clear()
+    facts._read_fact.cache_clear()
     yield tmp_path
-    facts.read_fact.cache_clear()
+    facts._read_fact.cache_clear()
 
 
 def _write(judgment, name, payload):
@@ -175,9 +175,9 @@ def test_facts_are_read_by_the_name_the_arm_expects_and_untampered(arms, fact_ro
     config, _ = arms
     with pytest.raises(facts.FactError, match="not a choice fact"):
         route("B3", "filter_column", MSG, _with(config, "B3", choice=config["arms"]["B4"]["centroids"]))
+    assert route("B3", "filter_column", MSG, config) == Route("slm:qwen3-8b", None)  # read and cached
     path = fact_root / config["arms"]["B3"]["choice"]
-    path.write_text('{"slm": "granite-4.2-8b"}')
-    facts.read_fact.cache_clear()
+    path.write_text('{"slm": "granite-4.2-8b"}')  # changed on disk after the first read, same process
     with pytest.raises(facts.FactError, match="not its directory"):
         route("B3", "filter_column", MSG, config)
 
