@@ -16,11 +16,13 @@ VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptiv
               "no verdict")
 
 
-def j4(ok=True, testable=True, diff=-0.01, pilot=0.1, ci_low=None):
-    """A J4 result as F2's J4 returns it."""
-    return {"d": 0.1, "d_pilot": pilot, "margin_from": "pilot" if pilot is not None else "pairs", "delta": 0.04,
+def j4(ok=True, testable=True, diff=-0.01, pilot=0.1, ci_low=None, ci_high=None, margin_from=None):
+    """A J4 result as F2's J4 returns it (with the upper bound F2 is adding)."""
+    margin_from = margin_from or ("pilot" if pilot is not None else "pairs")
+    return {"d": 0.1, "d_pilot": pilot, "margin_from": margin_from, "delta": 0.04,
             "diff": diff, "ci_low": ci_low if ci_low is not None else (0.0 if ok else -0.09),
-            "noninferior": (ok if testable else None) if pilot is not None else None, "power": 0.8, "testable": testable}
+            "ci_high": ci_high if ci_high is not None else diff + 0.05,
+            "noninferior": (ok if testable else None) if margin_from != "pairs" else None, "power": 0.8, "testable": testable}
 
 
 def j4_results(ok4=True, ok5=True, testable=True, diff=-0.01, pilot=0.1):
@@ -112,6 +114,84 @@ def test_the_steps_table_reads_the_judgments():
     s6 = {r["step"].split(" ")[0]: r for r in report.steps(data)}["S6"]["did"]
     assert s6 == ("allocation: c0 → slm, c1 → production_llm; 1 chosen on the SLM cost extrapolated from "
                   "per-adapter load tests alone (c0)")
+
+
+def test_no_verdict_is_read_from_j4_itself_and_refuting_takes_the_upper_bound():
+    assert report.outcome(j4(True, pilot=None, margin_from="given")) == "non-inferior"  # J7-style margin, no d_pilot
+    assert report.outcome(j4(True, pilot=0.1, margin_from="pairs")) == "no pilot"
+    assert report.outcome({**j4(True), "noninferior": None}) == "no pilot"
+    assert report.outcome(j4(False, diff=-0.2, ci_high=-0.02)) == "inconclusive"  # the point below −Δ, not the bound
+    assert report.outcome({k: v for k, v in j4(False, diff=-0.2).items() if k != "ci_high"}) == "inconclusive"
+    assert report.outcome(j4(False, diff=-0.2, ci_high=-0.05)) == "worse"
+
+
+def test_appendix_b_with_no_routine_measured_is_no_data():
+    row_ = row(report.claims_map(data_with({}, {}, repair=j4(False, diff=-0.2), per_call=per_call({}))), "Appendix B")
+    assert row_["verdict"] == "no data (no routine call site measured)"
+
+
+def test_cost_verdicts_carry_their_labels_and_an_upper_bound_is_inconclusive():
+    tests = {**j4_results()}
+    costs = {"B0": {"": 1.0}, "B4": {"20%": 0.1}, "B5": {"20%": 0.05}}
+    data = data_with(tests, costs)
+    data["arms"]["B5"]["slm_cost_basis"] = "extrapolated from per-adapter load tests"
+    assert row(report.claims_map(data), "V3")["verdict"] == \
+        "20%: confirms (20.0× vs B0) [costs: extrapolated from per-adapter load tests]"
+    data["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)
+    v3 = row(report.claims_map(data), "V3")["verdict"]
+    assert v3.startswith("20%: inconclusive (rests on an upper-bound cost) [costs: ") and \
+        "upper bound (cache not reported for 7 calls of B0)" in v3
+    assert row(report.claims_map(data), "A6")["verdict"].startswith("20%: inconclusive (rests on an upper-bound cost)")
+
+
+def test_several_test_runs_of_one_configuration_get_no_verdict():
+    tests = {"B0|B4": {**j4(True), "several_runs": ["agent-B4-a", "agent-B4-b"]}, "B0|B5": j4(True)}
+    rows = report.claims_map(data_with(tests, {"B0": {"": 1.0}, "B4": {"20%": 0.1}}))
+    assert row(rows, "V1")["verdict"] == "no verdict (several test runs of one configuration: agent-B4-a, agent-B4-b)"
+    assert row(rows, "V3")["verdict"] == "20%: no verdict (several test runs of one configuration: agent-B4-a, agent-B4-b)"
+
+
+def registry_of(*runs):
+    return {"available": True, "runs": [{"run_id": r, "type": "agent", "arm": a, "engine": None, "status": st,
+                                          "commit": "c", "prereg_hash": "h", "started_at": "2026-10-01T09:00:00+00:00",
+                                          "facts": f} for r, a, st, f in runs]}
+
+
+def test_a_test_report_is_bound_to_the_registry(tmp_path, monkeypatch):
+    from fixtures.fake import repo, write_run
+    repo(tmp_path, monkeypatch)
+    arms = {"B0": {"run_id": "b0"}, "B4": {"run_id": "b4"}}
+    judged = {"j6": {"choice_fact": {"sha256": "C"}}, "j5": {"centroids": {"sha256": "K"}},
+              "j7": {"adapters": "A", "allocation_fact": {"sha256": "L"}}}
+    good = registry_of(("b0", "B0", "done", {}), ("b4", "B4", "done", {"choice": "C", "centroids": "K", "adapters": "A"}))
+    bind = lambda registry, reads={}, pilot={}, split="test": report._registry_bindings(  # noqa: E731
+        split, {a: dict(v) for a, v in arms.items()}, registry, judged, reads, pilot)
+    bind(good)
+    with pytest.raises(JudgmentError, match="not a done entry"):
+        bind(registry_of(("b0", "B0", "failed", {}), good["runs"][1].values().__iter__() and ("b4", "B4", "done", {})))
+    with pytest.raises(JudgmentError, match="not registered"):
+        bind(registry_of(("b4", "B4", "done", {"choice": "C", "centroids": "K", "adapters": "A"})))
+    with pytest.raises(JudgmentError, match="recorded the centroids fact"):
+        bind(registry_of(("b0", "B0", "done", {}), ("b4", "B4", "done", {"choice": "C", "centroids": "X", "adapters": "A"})))
+    with pytest.raises(JudgmentError, match="another teacher run"):
+        bind(good, reads={"per_call": {"teacher": {"run_id": "other-b0"}}})
+    with pytest.raises(JudgmentError, match="test registry"):
+        bind({"available": False, "reason": "not a git checkout", "runs": []})
+    bind({"available": False, "reason": "x", "runs": []}, split="calib")  # only a test report is bound
+    marked = {a: dict(v) for a, v in arms.items()}
+    twice = registry_of(*[(r["run_id"], r["arm"], r["status"], r["facts"]) for r in good["runs"]], ("b4-again", "B4", "done", {}))
+    report._registry_bindings("test", marked, twice, judged, {}, {})
+    assert marked["B4"]["several_runs"] == ["b4", "b4-again"] and marked["B0"]["several_runs"] is None
+    write_run("eval-pilot-late", {"type": "eval", "status": None, "finished_at": "2026-10-01T10:00:00+00:00"})
+    write_run("eval-pilot-early", {"type": "eval", "status": None, "finished_at": "2026-09-30T10:00:00+00:00"})
+    bind(good, pilot={"B0": "eval-pilot-early"})
+    with pytest.raises(JudgmentError, match="did not finish before the first test"):
+        bind(good, pilot={"B0": "eval-pilot-early", "B3": "eval-pilot-late"})
+
+
+def test_the_chart_legend_reads_the_configured_utilizations():
+    data = {"arms": {"B4": {"ex": 0.8, "cost_per_correct": {"30%": 0.2, "90%": 0.1}}}, "utilizations": ["30%", "90%"]}
+    assert "one point per utilization, 30% (right) to 90% (left)" in report.chart_svg(data)
 
 
 def test_registry_reads_f1s_committed_intents_and_manifests(tmp_path):
@@ -252,7 +332,9 @@ def pipeline(tmp_path, monkeypatch):
         rows = [{"question_id": q, "difficulty": ("simple", "moderate", "challenging")[int(q) % 3],
                  "correct": b0_ok[q] if unit(arm, "keep", q) < QUALITY[arm] else not b0_ok[q]} for q in ids]
         write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "arm": arm.split("-")[0], "engine": engine,
-                                "split": split, "n": len(rows), "status": None}, files={"results.jsonl": rows})
+                                "split": split, "n": len(rows), "status": None,
+                                "finished_at": "2026-09-30T12:00:00+00:00" if split == "calib" else "2026-10-02T12:00:00+00:00"},
+                  files={"results.jsonl": rows})
     for arm, calls in arms_calls.items():
         run_id = f"agent-{arm}-test"
         calls = [{**c, "run_id": run_id} for c in calls]
@@ -282,12 +364,21 @@ def pipeline(tmp_path, monkeypatch):
     for args in (("init", "-q"), ("config", "user.email", "t@example.org"), ("config", "user.name", "t")):
         subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
     (tmp_path / "registry" / "test").mkdir(parents=True)
+    recorded = {"B3": {"choice": choice.parent.name},
+                "B4": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name},
+                "B5": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name,
+                       "allocation": allocation.parent.name}}
     for arm in arms_calls:
+        engine = {"B2-production": "production_llm", "B2-cheap": "cheap_alt"}.get(arm)
+        identity = {"type": "agent", "arm": arm.split("-")[0], "engine": engine, "commit": "c" * 40, "prereg_hash": "d" * 64}
+        (tmp_path / "registry" / "test" / f"agent-{arm}-test.intent.json").write_text(json.dumps(
+            {**identity, "run_id": f"agent-{arm}-test", "split": "test", "started_at": "2026-10-01T09:00:00+00:00"}))
         (tmp_path / "registry" / "test" / f"agent-{arm}-test.manifest.json").write_text(json.dumps(
-            {"type": "agent", "arm": arm.split("-")[0], "status": "done", "commit": "c" * 40, "prereg_hash": "d" * 64}))
+            {**identity, "status": "done", "facts": recorded.get(arm, {})}))
     subprocess.run(["git", "-C", str(tmp_path), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "registry"], check=True, capture_output=True)
-    return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path}
+    return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path,
+            "j6": j6_path, "root": tmp_path}
 
 
 def test_report_end_to_end_on_a_fake_execution(pipeline):
@@ -354,3 +445,41 @@ def test_report_refuses_an_eval_of_another_arm(pipeline):
     pipeline["plan"].write_text(yaml.safe_dump(plan))
     with pytest.raises(JudgmentError, match="is not B1 on test"):
         report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)
+
+
+def test_generation_and_repair_get_their_own_tests_with_the_pilot_restricted(pipeline):
+    from fixtures.world import fake_noninferiority as j4_
+    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority,
+                     pilot_ids=PILOT)
+    data = json.loads((out / "report.json").read_text())
+    assert set(data["gold_tests"]) == {"generate_candidate", "revise"} and data["repair_test"] == data["gold_tests"]["revise"]
+    assert "## Clusters with gold" in (out / "report.md").read_text()
+    j6 = read_result(pipeline["j6"], "J6")["result"]
+    gold = j6["per_call_site"][j6["choice"]]["revise"]["gold"]["by_question"]
+    d_on = lambda ids: j4_({q: gold["replay"][q] for q in ids}, {q: gold["teacher"][q] for q in ids}, 5, 1, 10)["d"]  # noqa: E731
+    pilot = sorted(set(PILOT) & set(gold["teacher"]))
+    assert data["repair_test"]["d_pilot"] == d_on(pilot) != d_on(sorted(gold["teacher"]))  # the pilot questions only
+    a4 = next(r for r in data["map"] if r["claim"].startswith("A4"))
+    assert "B5 against B0: " in a4["result"]
+    a6 = next(r for r in data["map"] if r["claim"].startswith("A6"))
+    assert "[costs: extrapolated from per-adapter load tests]" in a6["verdict"]  # B5's SLM cost
+
+
+def test_the_report_refuses_prices_of_different_dates_and_mismatched_results(pipeline):
+    from bench.judge import j2, j3
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    dated = json.loads(json.dumps(pipeline["config"]))
+    dated["prices"]["as_of"] = "2026-10-15"
+    for key, value, message in (
+            (("arms", "B1", "cost"), relative(j3.run("agent-B1-test", "eval-B1", None, dated)), "different dates"),
+            (("format", "B4"), plan["format"]["B0"], "not of B4's execution"),
+            (("per_call",), relative(write_result("J2", *j2.judge_run("agent-B4-test"))), "replay routed as B4")):
+        changed = json.loads(json.dumps(plan))
+        node = changed
+        for part in key[:-1]:
+            node = node[part]
+        node[key[-1]] = value
+        pipeline["plan"].write_text(yaml.safe_dump(changed))
+        with pytest.raises(JudgmentError, match=message):
+            report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority,
+                       pilot_ids=PILOT)

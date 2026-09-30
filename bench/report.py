@@ -19,7 +19,11 @@ discordance J4 measures between B3 (the zero-shot SLM) and B0 on the pre-registe
 (`bench.data.pilot_sample`), one number for every end-to-end comparison; for repair, between the
 zero-shot candidate S4 chose and the teacher on the pilot questions' repair calls (J6's result).
 J4 then takes Δ at n = the test's pairs. A comparison with no pilot gets no verdict (J4 returns
-`noninferior: None`), never a pass. The test
+`noninferior: None`, `margin_from: "pairs"`), never a pass. **A test report is bound to the test
+registry**: every arm's run is a `done` entry; a configuration (type, arm, engine, pre-registration)
+with more than one registered test run gets no verdict, and every run is listed (SPEC §6.1); the
+facts the B3–B5 runs recorded are the ones the plan's J5, J6 and J7 name; the per-call evaluation
+replays the plan's B0 run; and the pilot finished before the first test execution started. The test
 registry is read from git as F1 records it: `registry/test/<run_id>.intent.json` before a test
 execution starts and `<run_id>.manifest.json` when it ends, as committed at HEAD; an intent with no
 manifest is an interrupted execution.
@@ -28,19 +32,24 @@ Writes `reports/<sha256>/`: `report.md`, `report.json` (every number, with the j
 from; its sha256 names the directory) and `ex_cost.svg`, the main chart.
 
 **How each row of the SPEC §5 map is decided** (the SPEC fixes the criteria; where it leaves a
-term open, the reading is stated here and in the row). A J4 comparison has one of five outcomes,
-shared by every row: no pilot (no verdict), not testable (Δ above the cap), non-inferior, worse
-(the difference is below −Δ) or inconclusive (neither).
+term open, the reading is stated here and in the row). A J4 comparison has one outcome, shared by
+every row: several runs (no verdict), no pilot (no verdict), not testable (Δ above the cap),
+non-inferior (the one-sided 95% lower bound above −Δ), worse (the one-sided 95% **upper** bound
+below −Δ: refuting takes the same standard as confirming) or inconclusive (neither). A cost verdict
+carries the labels of the costs it rests on (estimated, lower bound, upper bound, extrapolated), and
+one that rests on an upper-bound cost is inconclusive; arms priced from price tables of different
+dates are refused.
 - V1/A1: confirms if B4 or B5 is non-inferior to B0; refutes if both are worse; otherwise the
   outcomes say why not (no pilot, not testable, inconclusive).
-- A4/A11: the replaceable fraction of B5 by call, token and cost; the SPEC says "high" without a
-  number, so the row is descriptive.
+- A4/A11: the replaceable fraction of B5 by call, token and cost, and whether B5 met
+  non-inferiority; the SPEC says "high" without a number, so the row is descriptive.
 - Appendix B: on the per-call-site evaluation of B4 on the test inputs. The routine (the call sites
   the paper assigns to SLMs: keywords, column filter, table and column selection) passes when each
   agrees with the teacher at `thresholds.concordance_min` or more: the agreement proxy, which D15
-  says supports no per-cluster claim, so the verdict says it rests on it. Refutes when the
-  routine fails, or when repair is non-inferior (a tie: the partition is conservative); confirms
-  when repair is worse and the routine passes; otherwise repair's outcome says why not.
+  says supports no per-cluster claim, so the verdict says it rests on it. No routine call site
+  measured is no data. Refutes when the routine fails, or when repair is non-inferior (a tie: the
+  partition is conservative); confirms when repair is worse and the routine passes; otherwise
+  repair's outcome says why not.
 - A5: format validity per call site (SPEC §6.3), B4 against B0: confirms when B4 is at least B0's
   on every call site both have, refutes when it is below on any.
 - A6, V3/A2, AV2: per utilization of the SLM. "The best arm without training" is the cheapest per
@@ -56,10 +65,12 @@ import hashlib
 import json
 import math
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import paths
+from bench.contracts.concordance import GOLD_CALL_SITES as GOLD_SITES
 from bench.provenance import scrub
 from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
                               run_dir)
@@ -127,6 +138,55 @@ def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callabl
     return plain(noninferiority({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids}, *settings))["d"]
 
 
+def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any], judged: Dict[str, Any],
+                       reads: Dict[str, Any], pilot_plan: Dict[str, str]) -> None:
+    """A test report is bound to what the test registry recorded (SPEC 6.1, REQ-013): every arm's run
+    is a `done` entry, each configuration's registered runs are all known (several of one
+    configuration: no verdict), the facts the B3–B5 runs recorded are the ones the plan names, the
+    per-call evaluation replays the plan's B0 run, and the pilot finished before the first test
+    execution started. Marks `several_runs` on the arms concerned; raises on everything else."""
+    if split != "test":
+        return
+    if not registry["available"]:
+        raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
+    entries = {r["run_id"]: r for r in registry["runs"]}
+    for arm, found in arms.items():
+        entry = entries.get(found["run_id"])
+        if entry is None or entry["status"] != "done":
+            raise JudgmentError(f"{arm}'s run {found['run_id']} is not a done entry of the test registry "
+                                f"({'not registered' if entry is None else entry['status']})")
+        key = (entry["type"], entry["arm"], entry["engine"], entry["prereg_hash"])
+        same = sorted(r["run_id"] for r in registry["runs"] if (r["type"], r["arm"], r["engine"], r["prereg_hash"]) == key)
+        found["several_runs"] = same if len(same) > 1 else None
+    expected = {}
+    if judged.get("j6"):
+        expected["choice"] = judged["j6"]["choice_fact"]["sha256"]
+    if judged.get("j5"):
+        expected["centroids"] = judged["j5"]["centroids"]["sha256"]
+    if judged.get("j7"):
+        expected["adapters"] = judged["j7"]["adapters"]
+        expected["allocation"] = judged["j7"]["allocation_fact"]["sha256"]
+    for arm, names in (("B3", ("choice",)), ("B4", ("choice", "centroids", "adapters")),
+                       ("B5", ("choice", "centroids", "adapters", "allocation"))):
+        if arm not in arms:
+            continue
+        recorded = entries[arms[arm]["run_id"]].get("facts") or {}
+        for name in names:
+            if name in expected and recorded.get(name) != expected[name]:
+                raise JudgmentError(f"{arm}'s test run recorded the {name} fact {recorded.get(name)!r}; "
+                                    f"the plan's judgments name {expected[name]!r}")
+    if reads.get("per_call") and "B0" in arms and reads["per_call"]["teacher"]["run_id"] != arms["B0"]["run_id"]:
+        raise JudgmentError("the per-call evaluation replays another teacher run than the plan's B0")
+    intents = [r["started_at"] for r in registry["runs"] if r.get("started_at")]
+    if pilot_plan and intents:
+        first = min(datetime.fromisoformat(t) for t in intents)
+        for arm, eval_run_id in pilot_plan.items():
+            finished = manifest(eval_run_id).get("finished_at")
+            if not finished or datetime.fromisoformat(finished) >= first:
+                raise JudgmentError(f"the pilot's {arm} evaluation {eval_run_id} did not finish before the first test "
+                                    f"execution started ({first.isoformat()}): its margin would not be pre-registered")
+
+
 def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_summary: Callable,
            noninferiority: Callable, pilot_ids: List[str]) -> Dict[str, Any]:
     """Every number of the report, each from a judgment."""
@@ -142,31 +202,42 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             raise JudgmentError(f"the J3 result of {arm} was not computed with {spec['eval']}")
         (summary,) = ex_summary(rows[arm])
         correct[arm] = correct_of(rows[arm])
+        cost = j3["result"]
         arms[arm] = {"n": summary["n"], "ex": summary["ex"],
                      "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
-                     "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(j3["result"]),
-                     "cost_label": j3["result"]["label"], "lower_bound": j3["result"].get("lower_bound", False),
-                     "slm_cost_basis": (j3["result"].get("slm_cost_basis") or {}).get("basis"),
-                     "failed_unbilled": j3["result"]["failed_unbilled"], "prices_as_of": j3["result"]["prices_as_of"],
-                     "calls": j3["result"]["calls"], "replaceable_fraction": j3["result"]["replaceable_fraction"]}
+                     "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(cost),
+                     "cost_label": cost["label"], "lower_bound": cost.get("lower_bound", False),
+                     "upper_bound": cost.get("upper_bound", False), "cache_not_reported": cost.get("cache_not_reported", 0),
+                     "slm_cost_basis": (cost.get("slm_cost_basis") or {}).get("basis"),
+                     "failed_unbilled": cost["failed_unbilled"], "prices_as_of": cost["prices_as_of"],
+                     "calls": cost["calls"], "replaceable_fraction": cost["replaceable_fraction"]}
         sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
+    dates = {a["prices_as_of"] for a in arms.values()}
+    if len(dates) > 1:
+        raise JudgmentError(f"the arms were priced with price tables of different dates {sorted(map(str, dates))}")
+
+    judged, reads = {}, {}
+    for key, judgment in (("j5", "J5"), ("j6", "J6"), ("j7", "J7"), ("j8", "J8"), ("per_call", "J2"),
+                          ("teacher_train_cost", "J3")):
+        found = _result(plan, key, judgment)
+        judged[key] = found["result"] if found else None
+        reads[key] = found["reads"] if found else None
+        if found:
+            sources[key] = result_reference(plan[key])
+    if judged["per_call"] and (judged["per_call"].get("mode"), judged["per_call"].get("arm"),
+                               judged["per_call"].get("split")) != ("replay", "B4", split):
+        raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
+    registry = test_registry()
+    _registry_bindings(split, arms, registry, judged, reads, pilot_plan)
+
     settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
     d_pilot = pilot_d(pilot_plan, pilot_ids, ex_table, noninferiority, settings)
     tests = {}
     for candidate, reference_arm in PAIRS:
         if candidate in correct and reference_arm in correct:
-            tests[f"{reference_arm}|{candidate}"] = plain(noninferiority(correct[candidate], correct[reference_arm],
-                                                                         *settings, d_pilot=d_pilot))
-
-    judged = {}
-    for key, judgment in (("j5", "J5"), ("j6", "J6"), ("j7", "J7"), ("j8", "J8"), ("per_call", "J2"),
-                          ("teacher_train_cost", "J3")):
-        found = _result(plan, key, judgment)
-        judged[key] = found["result"] if found else None
-        if found:
-            sources[key] = result_reference(plan[key])
-    if judged["per_call"] and (judged["per_call"].get("arm"), judged["per_call"].get("split")) != ("B4", split):
-        raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
+            test = plain(noninferiority(correct[candidate], correct[reference_arm], *settings, d_pilot=d_pilot))
+            several = sorted(set((arms[candidate].get("several_runs") or []) + (arms[reference_arm].get("several_runs") or [])))
+            tests[f"{reference_arm}|{candidate}"] = {**test, "several_runs": several or None}
     formats = {}
     for arm, path in (plan.get("format") or {}).items():
         found = read_result(path, "J2")
@@ -174,24 +245,26 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             raise JudgmentError(f"the format result of {arm} is not of {arm}'s execution")
         formats[arm] = found["result"]["format_validity"]
         sources.setdefault("format", {})[arm] = result_reference(path)
-    repair = None
-    revise = (judged["per_call"] or {}).get("per_call_site", {}).get("revise")
-    if revise and revise["gold"]:
-        d = None  # the repair pilot: J6's chosen candidate, zero-shot, against the teacher on calib's repair calls
-        zeroshot = ((judged["j6"] or {}).get("per_call_site") or {}).get((judged["j6"] or {}).get("choice"), {})
-        gold = (zeroshot.get("revise") or {}).get("gold")
+    gold_tests = {}  # SPEC 7.2 K4: n and Δ per cluster with gold, here each gold call site
+    zeroshot = ((judged["j6"] or {}).get("per_call_site") or {}).get((judged["j6"] or {}).get("choice"), {})
+    for site in GOLD_SITES:
+        entry = (judged["per_call"] or {}).get("per_call_site", {}).get(site)
+        if not entry or not entry["gold"]:
+            continue
+        d = None  # its pilot: J6's chosen candidate, zero-shot, against the teacher on the pilot questions' calls
+        gold = (zeroshot.get(site) or {}).get("gold")
         ids = sorted(set(pilot_ids) & set(gold["by_question"]["teacher"])) if gold else []
         if ids:
             d = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
                                      {q: gold["by_question"]["teacher"][q] for q in ids}, *settings))["d"]
-        repair = plain(noninferiority(revise["gold"]["by_question"]["replay"], revise["gold"]["by_question"]["teacher"],
-                                      *settings, d_pilot=d))
-    registry = test_registry()
-    if split == "test" and not registry["available"]:
-        raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
-    return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int), "repair_test": repair, "formats": formats,
+        gold_tests[site] = plain(noninferiority(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
+                                                *settings, d_pilot=d))
+    utilizations_cfg = [f"{round(u * 100)}%" for u in config["cost"]["utilizations"]]
+    return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int),
+            "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"), "formats": formats,
             "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
-            "v3_min_ratio": config["claims"]["v3_min_ratio"], "registry": registry, "sources": sources}
+            "v3_min_ratio": config["claims"]["v3_min_ratio"], "utilizations": utilizations_cfg,
+            "registry": registry, "sources": sources}
 
 
 def plain(value: Any) -> Any:
@@ -206,16 +279,28 @@ NO_PILOT = "no verdict (no pilot d)"
 
 
 def outcome(test: Optional[Dict[str, Any]]) -> str:
-    """The one reading of a J4 comparison every row shares."""
+    """The one reading of a J4 comparison every row shares. No verdict is read from J4 itself
+    (`margin_from == "pairs"` or `noninferior is None`); worse means the one-sided 95% upper bound
+    of the difference is below −Δ (the same standard as non-inferior, from the other side)."""
     if not test:
         return "no data"
-    if test.get("d_pilot") is None:
+    if test.get("several_runs"):
+        return "several runs"
+    if test.get("margin_from") == "pairs":
         return "no pilot"
     if not test["testable"]:
         return "not testable"
+    if test["noninferior"] is None:
+        return "no pilot"
     if test["noninferior"]:
         return "non-inferior"
-    return "worse" if test["diff"] < -test["delta"] else "inconclusive"
+    ci_high = test.get("ci_high")
+    return "worse" if ci_high is not None and ci_high < -test["delta"] else "inconclusive"
+
+
+def _several(data, *tests) -> Optional[str]:
+    runs = sorted({r for t in tests if t for r in (t.get("several_runs") or [])})
+    return f"no verdict (several test runs of one configuration: {', '.join(runs)})" if runs else None
 
 
 def _cost(data, arm, u) -> Optional[float]:
@@ -240,6 +325,36 @@ def best_untrained(data, u) -> Tuple[Optional[str], Optional[float]]:
     return (min(options)[1], min(options)[0]) if options else (None, None)
 
 
+def cost_labels(data, used: List[str]) -> List[str]:
+    """The labels of the costs a verdict rests on."""
+    labels = set()
+    for arm in used:
+        found = data["arms"].get(arm) or {}
+        if found.get("cost_label") == "estimated":
+            labels.add("estimated")
+        if found.get("lower_bound"):
+            labels.add("lower bound")
+        if found.get("upper_bound"):
+            labels.add(f"upper bound (cache not reported for {found['cache_not_reported']} calls of {arm})")
+        if found.get("slm_cost_basis") and found["slm_cost_basis"] != "measured":
+            labels.add(found["slm_cost_basis"])
+    return sorted(labels)
+
+
+def cost_verdict(data, verdict: str, used: List[str]) -> str:
+    """A cost verdict with the labels of the costs it rests on; one that rests on an upper-bound cost
+    (an LLM arm whose provider reported no cache) is inconclusive, never a confirmation."""
+    used = [a for a in used if a]
+    several = _several(data, *(data["tests"].get(f"B0|{a}") for a in used if a != "B0"))
+    if several:
+        return several
+    labels = cost_labels(data, used)
+    upper = [label for label in labels if label.startswith("upper bound")]
+    if upper and verdict not in ("no data",):
+        verdict = "inconclusive (rests on an upper-bound cost)"
+    return f"{verdict} [costs: {'; '.join(labels)}]" if labels else verdict
+
+
 def _power(*tests) -> str:
     return ", ".join(f"{t['power']:.2f}" for t in tests if t and t.get("power") is not None) or "—"
 
@@ -254,6 +369,9 @@ def _why_not(outcomes: List[str]) -> str:
 
 
 def v1_verdict(t4, t5) -> str:
+    several = _several(None, t4, t5)
+    if several:
+        return several
     outcomes = [outcome(t) for t in (t4, t5) if t]
     if not outcomes:
         return "no data"
@@ -264,18 +382,23 @@ def v1_verdict(t4, t5) -> str:
     return _why_not(outcomes)
 
 
+def _ci(t) -> str:
+    return f"CI [{_pp(t['ci_low'])}, {_pp(t.get('ci_high'))}]"
+
+
 def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     rows = []
     t4, t5 = data["tests"].get("B0|B4"), data["tests"].get("B0|B5")
     rows.append({"claim": "V1 / A1: SLMs suffice for agent calls (p.3–4)",
                  "result": "; ".join(f"{a} − B0: {_pp(t['diff'])} (Δ {_margin(t['delta'])} from the {t['margin_from']}, "
-                                     f"CI low {_pp(t['ci_low'])})" for a, t in (("B4", t4), ("B5", t5)) if t) or "—",
+                                     f"{_ci(t)})" for a, t in (("B4", t4), ("B5", t5)) if t) or "—",
                  "verdict": v1_verdict(t4, t5), "power": _power(t4, t5)})
 
     fraction = data["arms"].get("B5", {}).get("replaceable_fraction")
     rows.append({"claim": "A4 / A11: calls are narrow, subtasks simple (p.5, p.7)",
                  "result": (f"B5 replaceable: {_pct(fraction['calls'])} of calls, {_pct(fraction['tokens'])} of tokens, "
-                            f"{_pct(fraction['cost_at_production_price'])} of cost") if fraction else "—",
+                            f"{_pct(fraction['cost_at_production_price'])} of cost; B5 against B0: {outcome(t5)}")
+                 if fraction else "—",
                  "verdict": "descriptive (the SPEC fixes no number for 'high')" if fraction else "no data", "power": "—"})
 
     rows.append(_appendix_b(data))
@@ -288,21 +411,30 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
         if b5_cost is None or base_cost is None:
             a6.append((u, "no data"))
         elif b5_cost >= base_cost:
-            a6.append((u, "refutes"))
+            a6.append((u, cost_verdict(data, "refutes", ["B5", base])))
         else:
-            a6.append((u, "confirms" if _passes_v1(data, "B5") else _why_not([outcome(t5)])))
-        trained = [c for a in TRAINED if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
+            a6.append((u, cost_verdict(data, "confirms" if _passes_v1(data, "B5") else _why_not([outcome(t5)]), ["B5", base])))
+        trained = [(c, a) for a in TRAINED if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
+        several = _several(data, t4, t5)
         if base_cost is None:
             v3.append((u, "no data"))
+        elif several:
+            v3.append((u, several))
         elif not trained:
             v3.append((u, f"{_why_not([outcome(t) for t in (t4, t5) if t])} (no trained arm passes V1)"))
         else:
-            ratio = base_cost / min(trained)
-            v3.append((u, f"{'confirms' if ratio >= data['v3_min_ratio'] else 'refutes'} ({ratio:.1f}× vs {base})"))
-        slm_costs = [c for a in TRAINED for c in [_cost(data, a, u)] if c is not None]
+            cheapest, arm = min(trained)
+            ratio = base_cost / cheapest
+            v3.append((u, cost_verdict(data, f"{'confirms' if ratio >= data['v3_min_ratio'] else 'refutes'} "
+                                             f"({ratio:.1f}× vs {base})", [arm, base])))
+        slm_costs = [(c, a) for a in TRAINED for c in [_cost(data, a, u)] if c is not None]
         b1 = _cost(data, "B1", u)
-        av2.append((u, "no data" if b1 is None or not slm_costs else
-                    "refutes the paper (AV2 wins)" if b1 <= min(slm_costs) else "does not refute"))
+        if b1 is None or not slm_costs:
+            av2.append((u, "no data"))
+        else:
+            cheapest, arm = min(slm_costs)
+            av2.append((u, cost_verdict(data, "refutes the paper (AV2 wins)" if b1 <= cheapest else "does not refute",
+                                        ["B1", arm])))
     per_u = lambda items: " · ".join(f"{u}: {v}" if u else v for u, v in items)  # noqa: E731
     rows.append({"claim": "A6: heterogeneous systems (p.6)", "result": "B5 vs the best arm without training, per utilization",
                  "verdict": per_u(a6), "power": _power(t5)})
@@ -348,12 +480,18 @@ def _appendix_b(data) -> Dict[str, str]:
         return {**row, "result": "—", "verdict": "no data"}
     routine = {site: e["agreement"]["rate"] for site, e in per_call["per_call_site"].items()
                if site in ROUTINE and e["agreement"] and e["agreement"]["rate"] is not None}
-    passes_routine = bool(routine) and all(rate >= data["concordance_min"] for rate in routine.values())
     repaired = outcome(repair)
-    result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])} from the {repair['margin_from']}), "
-              f"{repaired}; routine agreement: " + ", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())))
+    result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])} from the {repair['margin_from']}, "
+              f"{_ci(repair)}), {repaired}; routine agreement: "
+              + (", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())) or "none measured"))
+    if not routine:
+        return {**row, "result": result, "verdict": "no data (no routine call site measured)"}
+    passes_routine = all(rate >= data["concordance_min"] for rate in routine.values())
     proxy = "the routine by the agreement proxy, which supports no per-cluster claim (D15)"
-    if not passes_routine:
+    several = _several(data, repair)
+    if several:
+        verdict = several
+    elif not passes_routine:
         verdict = f"refutes (the SLM loses on the routine; {proxy})"
     elif repaired == "non-inferior":
         verdict = "refutes (the SLM ties on repair)"
@@ -413,8 +551,9 @@ def _test_line(data, key) -> str:
 # ---------------------------------------------------------------- the test registry
 
 def test_registry(root: Optional[Path] = None) -> Dict[str, Any]:
-    """Test-split executions as F1 commits them (`registry/test/`), read at HEAD: each intent, and
-    its manifest if the execution ended; an intent without one is an interrupted execution."""
+    """Test-split executions as F1 commits them (`registry/test/`), read at HEAD: each run's intent
+    (when it started) merged with its manifest (how it ended, the facts it used); an intent without
+    a manifest is an interrupted execution."""
     root = root or paths.ROOT
 
     def git(*args: str) -> subprocess.CompletedProcess:
@@ -424,17 +563,22 @@ def test_registry(root: Optional[Path] = None) -> Dict[str, Any]:
         return {"available": False, "reason": scrub(listed.stderr.strip() or "git failed")[:200], "runs": []}
     files = {Path(line).name for line in listed.stdout.splitlines()}
     run_ids = sorted({name.rsplit(".", 2)[0] for name in files if name.endswith((".intent.json", ".manifest.json"))})
+
+    def shown(name: str) -> Optional[Dict[str, Any]]:
+        if name not in files:
+            return None
+        out = git("show", f"HEAD:{REGISTRY_DIR}/{name}")
+        if out.returncode != 0:
+            raise JudgmentError(f"cannot read {REGISTRY_DIR}/{name} at HEAD")
+        return json.loads(out.stdout)
     runs = []
     for run_id in run_ids:
-        name = f"{run_id}.manifest.json" if f"{run_id}.manifest.json" in files else f"{run_id}.intent.json"
-        shown = git("show", f"HEAD:{REGISTRY_DIR}/{name}")
-        if shown.returncode != 0:
-            raise JudgmentError(f"cannot read {REGISTRY_DIR}/{name} at HEAD")
-        found = json.loads(shown.stdout)
-        ended = name.endswith(".manifest.json")
+        intent, ended = shown(f"{run_id}.intent.json") or {}, shown(f"{run_id}.manifest.json")
+        found = ended or intent
         runs.append({"run_id": run_id, "type": found.get("type"), "arm": found.get("arm"), "engine": found.get("engine"),
-                     "status": found.get("status") if ended else "interrupted (intent, no manifest)",
-                     "commit": found.get("commit"), "prereg_hash": found.get("prereg_hash")})
+                     "status": ended.get("status") if ended else "interrupted (intent, no manifest)",
+                     "commit": found.get("commit"), "prereg_hash": found.get("prereg_hash"),
+                     "started_at": intent.get("started_at"), "facts": (ended or {}).get("facts")})
     return {"available": True, "runs": runs}
 
 
@@ -520,7 +664,8 @@ def chart_svg(data: Dict[str, Any]) -> str:
         out.append(f'<text class="label" x="{lx:.1f}" y="{ly:.1f}">{arm}</text>')
     out.append(f'<circle class="no-slm" cx="{left + 6}" cy="12" r="5"/><text class="label" x="{left + 16}" y="16">no SLM</text>'
                f'<circle class="slm" cx="{left + 86}" cy="12" r="5"/>'
-               f'<text class="label" x="{left + 96}" y="16">SLM: one point per utilization, 20% (right) to 100% (left)</text>')
+               f'<text class="label" x="{left + 96}" y="16">SLM: one point per utilization, {data["utilizations"][0]} (right) to '
+               f'{data["utilizations"][-1]} (left)</text>')
     out.append("</svg>")
     return "\n".join(out)
 
@@ -573,6 +718,11 @@ def render(data: Dict[str, Any]) -> str:
                          _pct(e["agreement"]["rate"]) if e["agreement"] else "—"])
         parts += [f"## Per-call-site evaluation ({per_call.get('arm') or per_call.get('engine')}, teacher's context)", "",
                   _table(["call site", "n", "format valid", "EX (gold)", "agreement with the teacher (fidelity)"], rows), ""]
+    if data["gold_tests"]:
+        parts += ["## Clusters with gold: per-call non-inferiority on the test inputs (SPEC §7.2 K4)", "",
+                  _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "CI", "outcome", "power"],
+                         [[site, t["n"], "—" if t.get("d_pilot") is None else f"{t['d_pilot']:.3f}", _margin(t["delta"]),
+                           _pp(t["diff"]), _ci(t), outcome(t), _power(t)] for site, t in sorted(data["gold_tests"].items())]), ""]
     registry = data["registry"]
     parts += ["## Test registry", ""]
     if not registry["available"]:

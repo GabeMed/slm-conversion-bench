@@ -102,8 +102,9 @@ def fake_noninferiority(correct_a: Dict[str, bool], correct_b: Dict[str, bool], 
         delta = (1.6449 + 0.8416) * math.sqrt((d if d_pilot is None else d_pilot) / n)
         testable, margin_from = delta * 100 <= delta_cap_pp, "pairs" if d_pilot is None else "pilot"
     ci_low = sum(diffs) / n - 1.6449 * math.sqrt(d / n)
+    ci_high = sum(diffs) / n + 1.6449 * math.sqrt(d / n)  # the one-sided 95% upper bound F2 is adding
     return {"n": n, "d": d, "d_pilot": d_pilot, "margin_from": margin_from,
-            "delta": delta, "testable": testable, "diff": sum(diffs) / n, "ci_low": ci_low,
+            "delta": delta, "testable": testable, "diff": sum(diffs) / n, "ci_low": ci_low, "ci_high": ci_high,
             "noninferior": ci_low > -delta if testable and margin_from != "pairs" else None, "power": 0.8}
 
 
