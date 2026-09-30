@@ -1,0 +1,5 @@
+# Judgments J1-J8 and the report: current Python, no agent dependencies (never imports CHESS).
+# Install: uv venv .venv-analysis && uv pip install --python .venv-analysis/bin/python -r env/analysis/requirements.txt -e ".[test]"
+numpy>=2.1
+scipy>=1.14
+scikit-learn>=1.6

@@ -6,8 +6,11 @@ command that executes something on a split calls `ensure_split_allowed` before r
 """
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from bench import paths
+
+PREREG_HASH = "prereg/HASH"
 
 
 class TestSplitLocked(RuntimeError):
@@ -18,9 +21,10 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
 
 
-def prereg_published(root: Path = paths.ROOT) -> str:
+def prereg_published(root: Optional[Path] = None) -> str:
     """Empty string when published; otherwise the reason it is not."""
-    rel = paths.PREREG_HASH.relative_to(paths.ROOT).as_posix()
+    root = root or paths.ROOT
+    rel = PREREG_HASH
     if not (root / rel).is_file():
         return f"{rel} does not exist: run `bench prereg` and push it before touching the test split"
     if _git(root, "ls-files", "--error-unmatch", rel).returncode != 0:
@@ -36,7 +40,7 @@ def prereg_published(root: Path = paths.ROOT) -> str:
     return ""
 
 
-def ensure_split_allowed(split: str, root: Path = paths.ROOT) -> None:
+def ensure_split_allowed(split: str, root: Optional[Path] = None) -> None:
     if split != "test":
         return
     reason = prereg_published(root)

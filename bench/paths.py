@@ -7,7 +7,6 @@ RAW = DATA / "raw"
 SPLITS = DATA / "splits.json"
 DATA_MANIFEST = DATA / "MANIFEST.json"
 RUNS = ROOT / "runs"
-PREREG_HASH = ROOT / "prereg" / "HASH"
 VENDOR_CHESS = ROOT / "vendor" / "chess"
 
 

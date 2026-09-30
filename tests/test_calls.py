@@ -81,3 +81,9 @@ def test_retry_chain():
     assert "different invocation" in " ".join(validate_calls([first, other]))
     skipped = dict(second, attempt=3)
     assert "previous attempt" in " ".join(validate_calls([first, skipped]))
+
+
+def test_one_line_per_invocation_and_attempt():
+    again = record(call_id=str(uuid.uuid4()))  # same question, call site, key and attempt
+    assert "same invocation and attempt" in " ".join(validate_calls([FIXTURES[1], again]))
+    assert validate_calls([FIXTURES[1], dict(again, invocation_key="single@2")]) == []

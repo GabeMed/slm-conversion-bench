@@ -7,7 +7,7 @@ roles:
   production_llm:              # the LLM the agent uses = the teacher (SPEC §3, D6)
     model: MiMo-V2.6-Pro
     endpoint: {kind: api, base_url: null, api_key_env: PRODUCTION_LLM_API_KEY}  # provider: before runs
-    params: {max_tokens: 4096}
+    params: {max_tokens: 4096, timeout_s: 600}
     terms:                     # both must allow training on outputs (D6); link and date
       weights_license: null    # before runs
       provider_terms: null     # before runs
@@ -15,10 +15,17 @@ roles:
   cheap_alt:                   # cheaper open-weight generalist, no training (B1)
     model: gpt-oss-120b
     endpoint: {kind: api, base_url: null, api_key_env: CHEAP_ALT_API_KEY}  # provider: before runs
-    params: {max_tokens: 4096}
+    params: {max_tokens: 4096, timeout_s: 600}
   slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
-    - {name: qwen3-8b, base: Qwen3-8B, endpoint: {kind: vllm, base_url: null, api_key_env: null}}
-    - {name: granite-4.2-8b, base: Granite-4.2-8B, endpoint: {kind: vllm, base_url: null, api_key_env: null}}
+    # served under `name` (--served-model-name); adapters under their own served names
+    - name: qwen3-8b
+      base: Qwen3-8B
+      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      params: {max_tokens: 4096, timeout_s: 600}
+    - name: granite-4.2-8b
+      base: Granite-4.2-8B
+      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      params: {max_tokens: 4096, timeout_s: 600}
   slm_reserve: [Nemotron-3-Nano-4B]
 
 # CHESS IR -> SS -> CG, as published (run/configs/CHESS_IR_SS_CG.yaml), with every engine routed
@@ -125,5 +132,7 @@ eval:
   timeout_s: 60
   fixed_date: null             # F2: pre-registered date substituted for 'now' in pred and gold
 
-arms:
-  B5: {allocation_file: judgments/J7/allocation.json}
+arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
+  B3: {choice: null}           # J6 (S4)
+  B4: {centroids: null, adapters: null}                    # J5 (S3), S5
+  B5: {centroids: null, adapters: null, allocation: null}  # J5, S5, J7 (S6)

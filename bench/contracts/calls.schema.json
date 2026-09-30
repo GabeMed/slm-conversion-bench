@@ -20,7 +20,7 @@
       "enum": ["agent_ir", "agent_ss", "agent_cg", "extract_keywords", "filter_column",
                "select_tables", "select_columns", "generate_candidate", "revise"]
     },
-    "invocation_key": {"type": "string", "minLength": 1},
+    "invocation_key": {"type": "string", "minLength": 1, "description": "stable identity of the invocation across runs; a repetition within one question gets the suffix @<n> (n >= 2)"},
     "cluster": {"type": ["string", "null"]},
     "engine": {"type": "string", "minLength": 1},
     "model_role": {"enum": ["production_llm", "cheap_alt", "slm"]},
@@ -54,7 +54,7 @@
       }
     },
     "latency_ms": {"type": "integer", "minimum": 0},
-    "started_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"},
     "temperature": {"type": "number", "minimum": 0},
     "error": {"type": ["string", "null"]}
   },

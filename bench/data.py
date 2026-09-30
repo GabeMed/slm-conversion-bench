@@ -5,14 +5,13 @@ file) and `data/splits.json` (train, calib, test, excluded). The inputs themselv
 """
 import hashlib
 import json
-import random
 import shutil
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Dict, List
 
-from bench import paths
+from bench import barrier, paths
 
 SPLIT_NAMES = ("train", "calib", "test")
 BIRD_DEV_SIZE = 1534
@@ -82,18 +81,32 @@ def _normalize(item: dict) -> dict:
     return {**item, "question_id": str(item["question_id"]), "evidence": item.get("evidence") or ""}
 
 
-def _read_json_list(path: Path) -> List[dict]:
-    return [_normalize(item) for item in json.loads(path.read_text())]
+def _read_pinned(config: dict, name: str) -> List[dict]:
+    """A pinned JSON input, checked against its sha256 on every read (the gold comes from here)."""
+    pin = config["data"][name]
+    path = _raw_path(name, pin)
+    raw = path.read_bytes()
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != pin["sha256"]:
+        raise DataError(f"{path}: sha256 {actual} differs from the pin {pin['sha256']}")
+    return [_normalize(item) for item in json.loads(raw)]
 
 
 def dev_questions(config: dict) -> List[dict]:
-    pin = config["data"]["bird_dev_questions"]
-    return _read_json_list(_raw_path("bird_dev_questions", pin))
+    return _read_pinned(config, "bird_dev_questions")
 
 
 def test_questions(config: dict) -> List[dict]:
-    pin = config["data"]["plat_sql_test"]
-    return _read_json_list(_raw_path("plat_sql_test", pin))
+    """The raw test file. Only `bench data` reads it directly (for the ids of the splits);
+    every execution goes through `questions_for`, which applies the test barrier."""
+    return _read_pinned(config, "plat_sql_test")
+
+
+def calib_sample(pool: List[str], size: int, seed: int) -> List[str]:
+    """The calibration ids: the `size` ids of the pool with the smallest sha256("<seed>:<id>").
+    Independent of the Python version, unlike `random.sample`."""
+    ranked = sorted(pool, key=lambda q: hashlib.sha256(f"{seed}:{q}".encode()).hexdigest())
+    return sorted(ranked[:size], key=int)
 
 
 def build_splits(config: dict, dev: List[dict], test: List[dict]) -> dict:
@@ -114,7 +127,7 @@ def build_splits(config: dict, dev: List[dict], test: List[dict]) -> dict:
     if mismatched:
         raise DataError(f"db_id differs between BIRD dev and the test set for ids {mismatched[:10]}")
     pool = sorted(set(dev_ids) - mini_dev, key=int)
-    calib = sorted(random.Random(config["seeds"]["calib_split"]).sample(pool, config["splits"]["calib_size"]), key=int)
+    calib = calib_sample(pool, config["splits"]["calib_size"], config["seeds"]["calib_split"])
     calib_set = set(calib)
     train = [q for q in pool if q not in calib_set]
     return {
@@ -138,8 +151,12 @@ def run(config: dict) -> dict:
         recorded = json.loads(paths.DATA_MANIFEST.read_text())["databases"]
         if recorded != db_hashes:
             changed = sorted(db for db in set(recorded) | set(db_hashes) if recorded.get(db) != db_hashes.get(db))
-            raise DataError(f"database files differ from data/MANIFEST.json: {changed}")
+            raise DataError(f"database files differ from data/MANIFEST.json: {changed} "
+                            f"(delete {paths.bird_root(config)} and run `bench data` again)")
     splits = build_splits(config, dev_questions(config), test_questions(config))
+    if paths.SPLITS.exists() and json.loads(paths.SPLITS.read_text()) != splits:
+        raise DataError("the rebuilt splits differ from the committed data/splits.json; "
+                        "the splits are a fact: change them only on purpose, by deleting the file")
     manifest = {"inputs": inputs, "databases": db_hashes}
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     paths.SPLITS.write_text(json.dumps(splits, indent=1) + "\n")
@@ -154,6 +171,7 @@ def questions_for(config: dict, split: str) -> Dict[str, dict]:
     """The questions of one split, by id. train and calib come from BIRD dev; test from Plat-SQL."""
     if split not in SPLIT_NAMES:
         raise DataError(f"unknown split {split!r}")
+    barrier.ensure_split_allowed(split)
     ids = set(load_splits()[split])
     source = test_questions(config) if split == "test" else dev_questions(config)
     return {q["question_id"]: q for q in source if q["question_id"] in ids}

@@ -4,8 +4,15 @@ Every LLM invocation of the agent goes through `invoke_tool_call` (tools) or `in
 (the agent's choice of the next tool). Both ask the router (C4) for the engine, invoke it with
 no hidden retry, and write one C1 line per attempt, failures included.
 
+Two kinds of failure, kept apart:
+- the **model's** (an invocation error, an empty or unparseable output) is a C1 line, and the
+  exception goes on to CHESS, which handles it as it always did;
+- the **harness's** (no run or question set, routing, configuration, a missing API key) is
+  recorded here as well, because CHESS swallows every exception, and the runner reads it with
+  `take_harness_errors()` to fail the run instead of recording it as done.
+
 State is process-global: one run and one question at a time per process. The tools of a question
-call the model from several threads, and the writer is shared under a lock.
+call the model from several threads; the writer and the counters are shared under a lock.
 """
 import json
 import os
@@ -18,12 +25,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from bench.contracts.config import engine_spec
-from bench.contracts.router import route
+from bench.contracts.router import Route, route
 
 _config: Optional[Dict[str, Any]] = None
 _run: Optional["_RunState"] = None
 _models: Dict[tuple, Any] = {}
 _models_lock = threading.Lock()
+
+
+class HarnessError(RuntimeError):
+    """A failure of the harness, not of the model: the run must not be recorded as done."""
 
 
 @dataclass
@@ -32,6 +43,8 @@ class _RunState:
     arm: str
     calls_path: Path
     question_id: Optional[str] = None
+    occurrences: Dict[tuple, int] = field(default_factory=dict)
+    harness_errors: List[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -51,14 +64,25 @@ def configure(config: Dict[str, Any]) -> None:
 def start_run(run_id: str, arm: str, calls_path: Path) -> None:
     global _run
     if _config is None:
-        raise RuntimeError("hooks.configure() must run before start_run()")
+        raise HarnessError("hooks.configure() must run before start_run()")
     calls_path.parent.mkdir(parents=True, exist_ok=True)
     calls_path.touch()
     _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path)
 
 
 def set_question(question_id: str) -> None:
-    _require_run().question_id = str(question_id)
+    run = _require_run()
+    with run.lock:
+        run.question_id = str(question_id)
+        run.occurrences.clear()
+
+
+def take_harness_errors() -> List[str]:
+    """The harness errors since the last call (the runner calls it after each question)."""
+    run = _require_run()
+    with run.lock:
+        errors, run.harness_errors = run.harness_errors, []
+    return errors
 
 
 def end_run() -> None:
@@ -68,13 +92,41 @@ def end_run() -> None:
 
 def _require_run() -> _RunState:
     if _run is None:
-        raise RuntimeError("no run in progress: the harness runner must call hooks.start_run()")
+        raise HarnessError("no run in progress: the harness runner must call hooks.start_run()")
     return _run
+
+
+def _harness(what: str, fn: Callable[[], Any]) -> Any:
+    """Run a harness step; a failure is recorded for the runner, then raised."""
+    try:
+        return fn()
+    except Exception as e:
+        message = f"{what}: {type(e).__name__}: {e}"
+        if _run is not None:
+            with _run.lock:
+                _run.harness_errors.append(message)
+        raise HarnessError(message) from e
+
+
+def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
+    """Checks and decisions made before the model is called: question, identity, route."""
+    run = _require_run()
+    if run.question_id is None:
+        raise HarnessError("hooks.set_question() was not called for this question")
+    with run.lock:
+        n = run.occurrences.get((call_site, invocation_key), 0) + 1
+        run.occurrences[(call_site, invocation_key)] = n
+    key = invocation_key if n == 1 else f"{invocation_key}@{n}"
+    chosen = route(run.arm, call_site, messages, _config)
+    temperature = float(_config["call_sites"][call_site]["temperature"])
+    return key, chosen, temperature, chat_model(chosen.engine, temperature)
 
 
 # ---------------------------------------------------------------- models
 
-def _chat_model(engine: str, temperature: float):
+def chat_model(engine: str, temperature: float):
+    """The client for one engine at one temperature, built once. A configured API key that is not
+    set is an error: an empty key would make the client fall back to OPENAI_API_KEY."""
     key = (engine, temperature)
     with _models_lock:
         if key not in _models:
@@ -84,15 +136,21 @@ def _chat_model(engine: str, temperature: float):
             params = dict(spec.get("params") or {})
             endpoint = spec["endpoint"]
             if not endpoint.get("base_url"):
-                raise RuntimeError(f"engine {engine} has no endpoint.base_url in the configuration")
+                raise HarnessError(f"engine {engine} has no endpoint.base_url in the configuration")
             api_key_env = endpoint.get("api_key_env")
+            if api_key_env:
+                api_key = os.environ.get(api_key_env)
+                if not api_key:
+                    raise HarnessError(f"engine {engine}: environment variable {api_key_env} is not set")
+            else:
+                api_key = "EMPTY"  # local servers (llama.cpp, vLLM) accept any key
             _models[key] = ChatOpenAI(
                 model=spec["model"],
                 openai_api_base=endpoint["base_url"],
-                openai_api_key=os.environ.get(api_key_env, "") if api_key_env else "EMPTY",
+                openai_api_key=api_key,
                 temperature=temperature,
                 max_tokens=params.pop("max_tokens", None),
-                timeout=params.pop("timeout_s", 600),
+                timeout=params.pop("timeout_s"),
                 max_retries=0,  # every attempt is visible in C1; no hidden client retry
                 model_kwargs=params,
             )
@@ -121,33 +179,24 @@ def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
-def _invoke(engine: str, temperature: float, messages: List[Any]):
+def _invoke(model: Any, messages: List[Any]):
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
     try:
-        output, exception = _chat_model(engine, temperature).invoke(messages), None
-    except Exception as e:  # recorded, then re-raised by the caller
+        output, exception = model.invoke(messages), None
+    except Exception as e:  # the model's failure: recorded, then re-raised by the caller
         output, exception = None, e
     return output, exception, started_at, int((time.perf_counter() - t0) * 1000)
 
 
-def _write(record: Dict[str, Any]) -> None:
+def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Route, messages,
+            started_at, latency_ms, temperature, output, parsed, parsed_ok, error) -> None:
     run = _require_run()
-    line = json.dumps(record, ensure_ascii=False)
-    with run.lock, open(run.calls_path, "a") as fh:
-        fh.write(line + "\n")
-
-
-def _record(*, call_id, retry_of, attempt, call_site, invocation_key, engine, messages, started_at,
-            latency_ms, temperature, output, parsed, parsed_ok, error) -> None:
-    run = _require_run()
-    if run.question_id is None:
-        raise RuntimeError("hooks.set_question() was not called for this question")
-    spec = engine_spec(_config, engine)
-    _write({
+    spec = engine_spec(_config, chosen.engine)
+    line = json.dumps({
         "run_id": run.run_id, "call_id": call_id, "retry_of": retry_of, "attempt": attempt,
         "question_id": run.question_id, "call_site": call_site, "invocation_key": invocation_key,
-        "cluster": None, "engine": f"{engine}:{spec['model']}", "model_role": spec["model_role"],
+        "cluster": chosen.cluster, "engine": chosen.engine, "model_role": spec["model_role"],
         "model": spec["model"], "endpoint": spec["endpoint"]["kind"],
         "prompt_messages": messages,
         "response_text": output.content if output is not None else None,
@@ -155,7 +204,9 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, engine, me
         "usage": _usage(output) if output is not None else
         {"input": None, "cached_input": None, "output": None, "source": "missing"},
         "latency_ms": latency_ms, "started_at": started_at, "temperature": temperature, "error": error,
-    })
+    }, ensure_ascii=False)
+    with run.lock, open(run.calls_path, "a") as fh:
+        fh.write(line + "\n")
 
 
 # ---------------------------------------------------------------- calls
@@ -164,15 +215,13 @@ def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any]
     """One tool call: route, invoke, parse; retry an empty or unparseable output up to the configured cap."""
     from langchain_core.exceptions import OutputParserException
 
-    run = _require_run()
     messages = _message_dicts(lc_messages)
-    engine = route(run.arm, call_site, messages, _config)
-    temperature = float(_config["call_sites"][call_site]["temperature"])
+    key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
     max_attempts = _config["retries"]["parse_max_attempts"]
     retry_of = None
     for attempt in range(1, max_attempts + 1):
         call_id = str(uuid.uuid4())
-        output, exception, started_at, latency_ms = _invoke(engine, temperature, lc_messages)
+        output, exception, started_at, latency_ms = _invoke(model, lc_messages)
         parsed, parsed_ok, error, retryable = None, False, None, False
         if exception is not None:
             error = f"{type(exception).__name__}: {exception}"
@@ -185,10 +234,10 @@ def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any]
                 error, retryable = f"OutputParserException: {e}", True
             except Exception as e:  # not retried, as in CHESS
                 error, exception = f"{type(e).__name__}: {e}", e
-        _record(call_id=call_id, retry_of=retry_of, attempt=attempt, call_site=call_site,
-                invocation_key=invocation_key, engine=engine, messages=messages, started_at=started_at,
-                latency_ms=latency_ms, temperature=temperature, output=output, parsed=parsed,
-                parsed_ok=parsed_ok, error=error)
+        _harness(call_site, lambda: _record(
+            call_id=call_id, retry_of=retry_of, attempt=attempt, call_site=call_site, invocation_key=key,
+            chosen=chosen, messages=messages, started_at=started_at, latency_ms=latency_ms,
+            temperature=temperature, output=output, parsed=parsed, parsed_ok=parsed_ok, error=error))
         if parsed_ok:
             return parsed
         if exception is not None:
@@ -202,13 +251,11 @@ def invoke_agent_call(call_site: str, invocation_key: str, message: str, parse: 
     """The agent's next-tool choice: one attempt, as in CHESS. `parse` is the agent's own reading of the response."""
     from langchain_core.messages import HumanMessage
 
-    run = _require_run()
     lc_messages = [HumanMessage(content=message)]
     messages = _message_dicts(lc_messages)
-    engine = route(run.arm, call_site, messages, _config)
-    temperature = float(_config["call_sites"][call_site]["temperature"])
+    key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
     call_id = str(uuid.uuid4())
-    output, exception, started_at, latency_ms = _invoke(engine, temperature, lc_messages)
+    output, exception, started_at, latency_ms = _invoke(model, lc_messages)
     parsed, parsed_ok, error = None, False, None
     if exception is not None:
         error = f"{type(exception).__name__}: {exception}"
@@ -217,9 +264,10 @@ def invoke_agent_call(call_site: str, invocation_key: str, message: str, parse: 
             parsed, parsed_ok = parse(output.content), True
         except Exception as e:  # the agent itself raises on the same response right after
             error = f"{type(e).__name__}: {e}"
-    _record(call_id=call_id, retry_of=None, attempt=1, call_site=call_site, invocation_key=invocation_key,
-            engine=engine, messages=messages, started_at=started_at, latency_ms=latency_ms,
-            temperature=temperature, output=output, parsed=parsed, parsed_ok=parsed_ok, error=error)
+    _harness(call_site, lambda: _record(
+        call_id=call_id, retry_of=None, attempt=1, call_site=call_site, invocation_key=key, chosen=chosen,
+        messages=messages, started_at=started_at, latency_ms=latency_ms, temperature=temperature,
+        output=output, parsed=parsed, parsed_ok=parsed_ok, error=error))
     if exception is not None:
         raise exception
     return output.content
@@ -233,6 +281,8 @@ def embeddings(purpose: str):
     provider = settings["provider"]
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise HarnessError("embeddings.provider is openai and OPENAI_API_KEY is not set")
         return OpenAIEmbeddings(model=settings[f"{purpose}_model"])
     if provider == "fake":
         from langchain_core.embeddings import DeterministicFakeEmbedding

@@ -62,7 +62,12 @@ def evaluate(source_run_id: str) -> Path:
         raise data.DataError(f"{run_manifest['config_path']} changed since run {source_run_id}")
     split = run_manifest["split"]
     barrier.ensure_split_allowed(split)
+    if run_manifest["status"] != "done":
+        raise data.DataError(f"run {source_run_id} is {run_manifest['status']!r}, not 'done': "
+                             f"an incomplete or failed run is never scored")
     predictions: Dict[str, Optional[str]] = json.loads((source / "predictions.json").read_text())
+    if set(predictions) != set(run_manifest["question_ids"]):
+        raise data.DataError(f"the predictions of {source_run_id} are not exactly its question ids")
     gold = data.questions_for(config, split)
     unpaired = sorted(set(predictions) - set(gold), key=int)
     if unpaired:

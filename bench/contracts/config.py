@@ -69,6 +69,32 @@ def _check_endpoint(where: str, endpoint: Any) -> List[str]:
     return errors
 
 
+def _check_params(where: str, params: Any) -> List[str]:
+    timeout = (params or {}).get("timeout_s")
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        return [f"{where}.params.timeout_s must be a number > 0"]
+    return []
+
+
+def _agent_engines(node: Any, where: str = "agent") -> List[str]:
+    """Every engine in the CHESS team configuration must be `routed`, with no temperature:
+    the router (C4) and `call_sites` are the only authorities, and a stale model name here
+    would look like it chooses a model while being ignored."""
+    errors = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("engine", "engine_name") and value != "routed":
+                errors.append(f"{where}.{key} must be 'routed', not {value!r}")
+            elif key == "temperature":
+                errors.append(f"{where}.temperature: temperatures live in call_sites")
+            else:
+                errors += _agent_engines(value, f"{where}.{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            errors += _agent_engines(value, f"{where}[{i}]")
+    return errors
+
+
 def validate_config(config: Dict[str, Any]) -> List[str]:
     errors = [f"missing key: {k}" for k in REQUIRED if k not in config]
     if errors:
@@ -80,10 +106,13 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
             errors.append(f"roles.{role}.model must be a string")
             continue
         errors += _check_endpoint(f"roles.{role}", spec.get("endpoint"))
+        errors += _check_params(f"roles.{role}", spec.get("params"))
     for i, candidate in enumerate(roles.get("slm_candidates") or []):
         if not isinstance(candidate.get("name"), str) or not isinstance(candidate.get("base"), str):
             errors.append(f"roles.slm_candidates[{i}] needs name and base")
         errors += _check_endpoint(f"roles.slm_candidates[{i}]", candidate.get("endpoint"))
+        errors += _check_params(f"roles.slm_candidates[{i}]", candidate.get("params"))
+    errors += _agent_engines(config["agent"])
     call_sites = config["call_sites"]
     if set(call_sites) != set(CALL_SITES):
         errors.append(f"call_sites must list exactly {sorted(CALL_SITES)}")
@@ -106,7 +135,16 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
 
 
 def engine_spec(config: Dict[str, Any], engine: str) -> Dict[str, Any]:
-    """The model and endpoint behind an engine name returned by the router (C4)."""
+    """The model and endpoint behind an engine name returned by the router (C4):
+    `production_llm`, `cheap_alt`, `slm:<candidate>` (the base, served under the candidate's
+    name) or `slm:<candidate>+lora:<served_name>` (an adapter, served under its own name)."""
     if engine in SINGLE_MODEL_ROLES:
         return {"model_role": engine, **config["roles"][engine]}
+    if engine.startswith("slm:"):
+        name, _, served_name = engine[len("slm:"):].partition("+lora:")
+        for candidate in config["roles"].get("slm_candidates") or []:
+            if candidate["name"] == name:
+                return {"model_role": "slm", "model": served_name or name,
+                        "endpoint": candidate["endpoint"], "params": candidate.get("params") or {}}
+        raise ConfigError(f"engine {engine!r}: no slm candidate named {name!r}")
     raise ConfigError(f"unknown engine {engine!r}")

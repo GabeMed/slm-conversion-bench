@@ -26,7 +26,8 @@ def execute_sql(db_path: str, sql: str, fetch: Union[str, int] = "all", timeout:
 
         def run(self):
             try:
-                with sqlite3.connect(db_path, timeout=60) as conn:
+                # PATCH 15 (slm-conversion-bench): read-only, so model-written SQL can never change the pinned database
+                with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60) as conn:
                     cursor = conn.cursor()
                     cursor.execute(sql)
                     if fetch == "all":
