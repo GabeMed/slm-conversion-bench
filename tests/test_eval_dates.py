@@ -62,7 +62,14 @@ FAR = "1999-12-31"  # far from today: the machine's clock would give another yea
     ("SELECT strftime('%Y'), strftime('%Y', 'now'), strftime(substr('%Y%m', 1, 2), 'now')", ("1999", "1999", "1999")),
     ("SELECT julianday(COALESCE(NULL, 'now'))", (2451543.5,)),
     ("SELECT date(('now')), \"date\"('now'), DATE(/*c*/ 'now'), date(lower('NOW'))", ("1999-12-31",) * 4),
-    ("SELECT timediff('now', '1999-12-30')", ("+0000-00-01 00:00:00.000",)),
+    ("SELECT timediff('now', '1999-12-30'), timediff('1999-12-30', 'now')",
+     ("+0000-00-01 00:00:00.000", "-0000-00-01 00:00:00.000")),
+    # the keywords' own functions, called by a quoted name, read the current moment too
+    ('SELECT "current_date"(), [current_timestamp](), `current_time`()', ("1999-12-31", "1999-12-31 00:00:00", "00:00:00")),
+    # SQLite reads 'now' as C text: from a blob, and up to a NUL
+    ("SELECT date(CAST('now' AS BLOB)), date(x'6e6f77'), date('now' || char(0))", ("1999-12-31",) * 3),
+    # and the time values 'subsec' / 'subsecond' as now, with fractional seconds
+    ("SELECT datetime('subsec'), datetime('SUBSECOND', '+1 day')", ("1999-12-31 00:00:00.000", "2000-01-01 00:00:00.000")),
     ("SELECT datetime('now', 'localtime')", ("1999-12-31 00:00:00",)),
 ])
 def test_the_current_moment_is_the_fixed_date_by_value(db, sql, expected):
@@ -72,9 +79,23 @@ def test_the_current_moment_is_the_fixed_date_by_value(db, sql, expected):
 @pytest.mark.parametrize("sql,expected", [
     ("SELECT 'now' > '2000', date('2000-01-01', '+1 day')", (1, "2000-01-02")),  # text; a date that is not now
     ("SELECT strftime('now', '2000-01-01'), date('2000-01-01', 'now')", ("now", None)),  # a format; a modifier
+    ("SELECT datetime(946598400, 'unixepoch'), date(NULL), strftime(NULL)", ("1999-12-31 00:00:00", None, None)),
 ])
 def test_now_elsewhere_keeps_sqlites_own_meaning(db, sql, expected):
     assert execute(db, sql, 5, FAR) == ([expected], None, False)
+
+
+def test_a_query_that_read_now_and_then_failed_is_flagged(db):
+    endless = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(date('now', '+' || n || ' days')) FROM r"
+    assert execute(db, endless, 0.3, FAR) == (None, "timeout", True)
+
+
+def test_errors_inside_the_date_functions_keep_their_message(db):
+    # the message SQLite gives, not "user-defined function raised exception"
+    assert execute(db, "SELECT timediff('now')", 5, FAR)[1] == \
+        "OperationalError: wrong number of arguments to function timediff()"
+    # text that is not UTF-8 never reaches the wrapper (Python cannot decode it): said so, where SQLite gives NULL
+    assert "not valid UTF-8" in execute(db, "SELECT strftime('%Y', CAST(x'ff' AS TEXT))", 5, FAR)[1]
 
 
 def test_a_prediction_that_reads_now_through_an_expression_is_flagged(db):

@@ -7,9 +7,9 @@ comment, blanks) is an execution error, never an empty answer.
 
 The current moment is the pre-registered `eval.fixed_date` (midnight UTC), in prediction and gold
 alike, so arms evaluated on different days, on machines in different time zones, stay comparable:
-the keywords CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME are replaced in the text, and SQLite's
-date functions are overridden on the connection so that every value 'now' they read, however it was
-computed, is the fixed moment.
+SQLite's date functions (and the functions behind CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME,
+which are also replaced in the text) are overridden on the connection, so that every value they read
+as the current moment, however it was computed, is the fixed moment.
 """
 import json
 import os
@@ -58,9 +58,10 @@ def fixed_date(config: Dict[str, Any]) -> str:
 
 
 def fix_keywords(sql: str, day: str) -> Tuple[str, bool]:
-    """`sql` with CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME (keywords, which no function
-    override reaches) replaced by `day` at midnight, and whether any was. Nothing inside a comment,
-    a literal or a quoted identifier is touched."""
+    """`sql` with the keywords CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME replaced by `day` at
+    midnight, and whether any was. Nothing inside a comment, a literal or a quoted identifier is
+    touched. The clock (`_FixedClock`) also overrides the functions these keywords compile to, so
+    this is a second guard, kept by decision."""
     keywords = {"current_timestamp": f"'{day} 00:00:00'", "current_date": f"'{day}'", "current_time": "'00:00:00'"}
     out, replaced = [], False
     for kind, text in _tokens(sql):
@@ -70,37 +71,79 @@ def fix_keywords(sql: str, day: str) -> Tuple[str, bool]:
     return "".join(out), replaced
 
 
+# SQLite's own zero-argument functions behind the keywords, and the function each equals at 'now'.
+_KEYWORD_FUNCTIONS = {"current_date": "date", "current_time": "time", "current_timestamp": "datetime"}
+# SQLite (date.c) reads these time values as the current moment, 'subsec' / 'subsecond' (3.42+) with
+# fractional seconds; any case, as C text, so from a blob too and up to a NUL.
+_MOMENTS = ("now", "subsec", "subsecond") if sqlite3.sqlite_version_info >= (3, 42, 0) else ("now",)
+
+
+def _moment(value: Any) -> Optional[str]:
+    if isinstance(value, bytes):
+        value = value.split(b"\0", 1)[0].decode("utf-8", "replace")
+    elif isinstance(value, str):
+        value = value.split("\0", 1)[0]
+    else:
+        return None
+    return value.lower() if value.lower() in _MOMENTS else None
+
+
 class _FixedClock:
     """SQLite's date functions, installed over the built-ins of a connection, with the current
-    moment fixed: a time value whose value is the text 'now' (in any case, as SQLite compares it),
-    or a time value left out (date(), strftime(fmt)), is the fixed stamp. The result is computed by
-    the real built-in on a connection of its own, so every other meaning is SQLite's. `readings`
-    counts the times the current moment was read."""
+    moment fixed: a time value SQLite reads as the current moment (see `_moment`), or a time value
+    left out (date(), strftime(fmt)), is the fixed stamp, and current_date() / current_time() /
+    current_timestamp() (the keywords' functions, reachable by a quoted name) give the fixed moment.
+    The result is computed by the real built-in on a connection of its own, so every other meaning
+    is SQLite's. `readings` counts the times the current moment was read; `failure` keeps the error
+    a wrapper raised, with SQLite's own message."""
 
     def __init__(self, day: str):
         self.stamp = f"{day} 00:00:00"
         self.readings = 0
+        self.failure: Optional[str] = None
         self._builtins = sqlite3.connect(":memory:")
 
     def install(self, connection: sqlite3.Connection) -> None:
         for name, positions in _TIME_VALUE.items():
-            connection.create_function(name, -1, self._function(name, positions), deterministic=True)
+            connection.create_function(name, -1, self._guarded(self._function(name, positions)), deterministic=True)
+        for name, function in _KEYWORD_FUNCTIONS.items():
+            connection.create_function(name, -1, self._guarded(self._keyword(name, function)), deterministic=True)
+
+    def _builtin(self, name: str, args: List[Any]) -> Any:
+        return self._builtins.execute(f"SELECT {name}({', '.join('?' * len(args))})", args).fetchone()[0]
+
+    def _guarded(self, call: Callable[..., Any]) -> Callable[..., Any]:
+        def guarded(*args: Any) -> Any:
+            try:
+                return call(*args)
+            except Exception as e:  # SQLite would only say "user-defined function raised exception"
+                self.failure = self.failure or f"{type(e).__name__}: {e}"
+                raise
+        return guarded
+
+    def _keyword(self, name: str, function: str) -> Callable[..., Any]:
+        def call(*args: Any) -> Any:
+            if args:
+                raise sqlite3.OperationalError(f"wrong number of arguments to function {name}()")
+            self.readings += 1
+            return self._builtin(function, [self.stamp])
+        return call
 
     def _function(self, name: str, positions: Tuple[int, ...]) -> Callable[..., Any]:
-        query = {}
-
         def call(*args: Any) -> Any:
             args = list(args)
-            if name != "timediff" and len(args) == positions[0]:  # no time value: SQLite reads 'now'
+            omitted = (len(args) == 0 if name != "strftime" else len(args) == 1 and args[0] is not None)
+            if name != "timediff" and omitted:  # no time value: SQLite reads 'now'
                 args.append(self.stamp)
                 self.readings += 1
             for i in positions:
-                if i < len(args) and isinstance(args[i], str) and args[i].lower() == "now":
+                moment = _moment(args[i]) if i < len(args) else None
+                if moment is not None:
                     args[i] = self.stamp
                     self.readings += 1
-            if len(args) not in query:
-                query[len(args)] = f"SELECT {name}({', '.join('?' * len(args))})"
-            return self._builtins.execute(query[len(args)], args).fetchone()[0]
+                    if moment != "now" and name != "timediff":
+                        args.insert(i + 1, "subsec")  # what the time value 'subsec' also asks for
+            return self._builtin(name, args)
         return call
 
     def close(self) -> None:
@@ -133,11 +176,12 @@ def execute(db_path: Path, sql: str, timeout_s: float, day: str) -> Tuple[Option
     and whether it read the current moment (a keyword in the text, or 'now' at run time)."""
     sql, keyword = fix_keywords(sql, day)
     clock = _FixedClock(day)
-    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    clock.install(connection)
+    connection = None
     deadline = time.monotonic() + timeout_s
-    connection.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        clock.install(connection)
+        connection.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
         with _utc():
             cursor = connection.execute(sql)
             rows = cursor.fetchall()
@@ -145,10 +189,17 @@ def execute(db_path: Path, sql: str, timeout_s: float, day: str) -> Tuple[Option
             return None, "no statement", keyword
         return rows, None, keyword or clock.readings > 0
     except Exception as e:
-        timed_out = time.monotonic() > deadline
-        return None, "timeout" if timed_out else f"{type(e).__name__}: {e}", keyword or clock.readings > 0
+        error = f"{type(e).__name__}: {e}"
+        if time.monotonic() > deadline:
+            error = "timeout"
+        elif clock.failure:
+            error = clock.failure
+        elif "user-defined function raised exception" in error:  # an argument Python could not decode
+            error = "a date function got text that is not valid UTF-8 (the evaluator cannot read it)"
+        return None, error, keyword or clock.readings > 0
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
         clock.close()
 
 

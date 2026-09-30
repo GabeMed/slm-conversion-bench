@@ -189,16 +189,18 @@ def test_real_sensitivity_sets_are_the_twelve_date_golds_and_the_limit_golds():
 
 @real
 def test_real_date_golds_give_what_the_text_substitution_gave():
-    # the twelve were checked with 'now' replaced in the text; reading it by value must not change them
+    # the twelve were checked with 'now' replaced in the text; reading it by value must not change them.
+    # At a date far from today, so a clock that stopped replacing 'now' would show.
+    far = "1999-12-31"
     test = {q["question_id"]: q for q in data._test_questions(CONFIG)}
     for question_id in sorted(DATE_DEPENDENT_TEST_GOLDS, key=int):
         gold = test[question_id]
         path = paths.sqlite_path(CONFIG, gold["db_id"])
-        by_text = re.sub(r"'now'", f"'{DAY} 00:00:00'", fix_keywords(gold["SQL"], DAY)[0], flags=re.IGNORECASE)
+        by_text = re.sub(r"'now'", f"'{far} 00:00:00'", fix_keywords(gold["SQL"], far)[0], flags=re.IGNORECASE)
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         expected = connection.execute(by_text).fetchall()
         connection.close()
-        rows, error, dated = execute(path, gold["SQL"], 30, DAY)
+        rows, error, dated = execute(path, gold["SQL"], 30, far)
         assert (set(rows), error, dated) == (set(expected), None, True), question_id
 
 
