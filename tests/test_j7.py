@@ -212,3 +212,43 @@ def test_run_refuses_mismatched_facts_and_missing_settings(tmp_path, monkeypatch
     with pytest.raises(JudgmentError, match="min_calls"):
         j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority, fake_margin, 500, QUESTIONS[:50])
     assert not (paths.ROOT / "judgments" / "J7").exists()
+
+
+def test_the_defaults_are_the_test_splits_size_and_the_registered_pilot(tmp_path, monkeypatch):
+    """Without n_test and pilot_ids, J7 takes n from the test split (never calib) and the pilot from
+    F2's bench.data.pilot_sample over calib, with stats.pilot_size and seeds.calib_split."""
+    from bench import data
+    config, centroids, choice, adapters, replays, j8, j6 = allocation_world(tmp_path, monkeypatch)
+    config["stats"]["pilot_size"] = 50
+    splits = {"train": [], "calib": QUESTIONS, "test": [str(q) for q in range(9000, 9498)], "excluded": []}
+    monkeypatch.setattr(data, "load_splits", lambda: splits)
+    asked = {}
+
+    def pilot_sample(calib, size, seed):  # F2's function, not on this branch yet
+        asked.update(calib=calib, size=size, seed=seed)
+        return calib[:size]
+    monkeypatch.setattr(data, "pilot_sample", pilot_sample, raising=False)
+    path, _ = j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority,
+                     fake_margin)
+    result = read_result(path, "J7")["result"]
+    assert result["settings"]["n_test"] == 498 != len(splits["calib"])
+    assert asked == {"calib": QUESTIONS, "size": 50, "seed": config["seeds"]["calib_split"]}
+    assert result["pilot_ids"] == sorted(QUESTIONS[:50], key=int)
+
+
+def test_the_pilot_is_j6s_zero_shot_never_the_b4_replay(tmp_path, monkeypatch):
+    from bench.judge import j2
+    config, centroids, choice, adapters, replays, j8, j6 = allocation_world(tmp_path, monkeypatch)
+    path, _ = j7.run(str(centroids), str(adapters), replays, "eval-t", str(j8), str(j6), config, fake_noninferiority,
+                     fake_margin, 500, QUESTIONS[:50])
+    result = read_result(path, "J7")["result"]
+    cluster_of = j7.router_clusters(j2.calls_of("replay-b4"), ["c0", "c1"])
+    group = lambda identity, attempts: cluster_of.get(identity)  # noqa: E731
+    settings = {**SETTINGS, "n_boot": config["stats"]["n_boot"]}
+
+    def pilot_from(replay_run, eval_run):
+        _, teacher, calls, replay_eval, teacher_eval, _ = j2.replay_inputs(replay_run, eval_run, "eval-t")
+        return j7.pilot_discordance(j2.compare(teacher, calls, replay_eval, teacher_eval, group), fake_noninferiority,
+                                    settings, QUESTIONS[:50])["c0"]
+    assert result["clusters"]["c0"]["d_pilot"] == pilot_from("zeroshot-qwen", "eval-zeroshot")
+    assert result["clusters"]["c0"]["d_pilot"] != pilot_from("replay-b4", "eval-b4")

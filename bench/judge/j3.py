@@ -10,7 +10,9 @@ correct query.
   invented). A call that failed before any response (a timeout, an HTTP error) has no usage by
   construction (C1): it is counted as `failed_unbilled` and not priced, and the result is marked a
   `lower_bound`, since a provider may bill such a call; refusing it would leave the arm with no cost
-  at all. `estimated` usage is priced and the result is labelled `estimated`.
+  at all. `estimated` usage is priced and the result is labelled `estimated`. A call with
+  `source: api` and `cached_input: null` had its cache **not reported**: it is priced with no cache
+  discount, so the arm's cost is an `upper_bound` (`cache_not_reported` counts them).
 - **The SLM** has no token price: each SLM call costs the load test's cost per request (J8) at each
   utilization of `cost.utilizations`, so an arm with SLM calls has one total per API variant and
   utilization (`standard@50%`). The SLM cost is `measured` only when every SLM call ran on the one
@@ -19,13 +21,15 @@ correct query.
   `extrapolated from per-adapter load tests` (`slm_cost_basis`).
 - **Per correct query**: the total over the execution divided by its correct questions, read from
   its `eval` execution (J1's source).
-- **Replaceable fraction** (SPEC §5), for an execution with SLM calls: the share of calls and of
-  tokens the SLM served, and of cost, as the share of the production LLM's price for all the
-  execution's tokens that fell on SLM calls.
+- **Replaceable fraction** (SPEC §5), for an execution with SLM calls: the share of calls the SLM
+  served (failed calls counted on both sides), of tokens (billed calls on both sides, a failed call
+  has none), and of cost, as the share of the production LLM's price for all the execution's tokens
+  that fell on SLM calls. The result records the price table it used (`as_of` and sha256).
 """
+import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
-from bench.judge.base import (JudgmentError, calls_of, read_jsonl, read_result, reference, require_done,
+from bench.judge.base import (JudgmentError, calls_of, canonical, read_jsonl, read_result, reference, require_done,
                               result_reference, run_dir, write_result)
 
 JUDGMENT = "J3"
@@ -59,7 +63,7 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
     """Totals over `calls`: counts, tokens, API cost per variant, SLM cost per utilization."""
     table, api = prices.get("table") or {}, {v: 0.0 for v in API_VARIANTS}
     slm: Dict[str, float] = {u: 0.0 for u in (slm_per_request or {})}
-    counts = {"calls": 0, "slm_calls": 0, "failed_unbilled": 0, "estimated": 0}
+    counts = {"calls": 0, "slm_calls": 0, "failed_unbilled": 0, "estimated": 0, "cache_not_reported": 0}
     token_totals = {"input": 0, "cached_input": 0, "output": 0}
     batch_known = True
     for call in calls:
@@ -87,6 +91,7 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
         entry = table.get(call["model"])
         if entry is None:
             raise JudgmentError(f"prices.table has no entry for model {call['model']!r}")
+        counts["cache_not_reported"] += use["source"] == "api" and use["cached_input"] is None
         for variant, cost in api_cost(call, entry).items():
             if cost is None:
                 batch_known = False
@@ -110,8 +115,9 @@ def scenarios(priced: Dict[str, Any]) -> Dict[str, Optional[float]]:
 
 def replaceable_fraction(calls: List[dict], prices: Dict[str, Any], production_model: str) -> Optional[Dict[str, Any]]:
     billed = [c for c in calls if c["usage"]["source"] != "missing"]
+    slm_calls = [c for c in calls if c["model_role"] == "slm"]
     slm = [c for c in billed if c["model_role"] == "slm"]
-    if not slm:
+    if not slm_calls:
         return None
     entry = (prices.get("table") or {}).get(production_model)
 
@@ -121,7 +127,7 @@ def replaceable_fraction(calls: List[dict], prices: Dict[str, Any], production_m
     def total_tokens(subset: List[dict]) -> int:
         return sum(c["usage"]["input"] + c["usage"]["output"] for c in subset)
     whole, part = at_production(billed), at_production(slm)
-    return {"calls": len(slm) / len(calls), "tokens": total_tokens(slm) / total_tokens(billed),
+    return {"calls": len(slm_calls) / len(calls), "tokens": total_tokens(slm) / total_tokens(billed) if billed else None,
             "cost_at_production_price": part / whole if whole else None}
 
 
@@ -135,7 +141,9 @@ def judge(calls: List[dict], question_ids: List[str], correct: Optional[Dict[str
         by_site.setdefault(call["call_site"], []).append(call)
     return {
         "prices_as_of": prices.get("as_of"), "label": "estimated" if priced["estimated"] else "measured",
+        "prices": {"as_of": prices.get("as_of"), "sha256": hashlib.sha256(canonical(prices.get("table") or {})).hexdigest()},
         "lower_bound": priced["failed_unbilled"] > 0,
+        "upper_bound": priced["cache_not_reported"] > 0, "cache_not_reported": priced["cache_not_reported"],
         "n_questions": len(question_ids), "n_correct": n_correct, **{k: priced[k] for k in
                                                                     ("calls", "slm_calls", "failed_unbilled", "estimated", "tokens")},
         "total": totals,

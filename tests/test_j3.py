@@ -3,7 +3,7 @@ labelled, SLM calls at the load test's cost, per question and per correct query.
 import pytest
 
 from bench.judge import j3
-from bench.judge.base import JudgmentError, read_result, write_result
+from bench.judge.base import JudgmentError, canonical, read_result, write_result
 from fixtures.fake import call, repo, usage, write_run
 
 PRICES = {"as_of": "2026-09-30", "table": {
@@ -112,3 +112,28 @@ def test_slm_cost_through_adapters_is_labelled_extrapolated(tmp_path, monkeypatc
                                       "combined": {"rule": "r", "engines": ["slm:qwen3-8b+lora:c0"], "loadtests": ["lt"]}})
     alone = read_result(j3.run("agent-B4x", None, str(adapter), config), "J3")["result"]
     assert alone["slm_cost_basis"]["basis"] == "extrapolated from per-adapter load tests"
+
+
+def test_a_cache_not_reported_is_priced_without_discount_as_an_upper_bound():
+    unreported = teacher_call("1", use={"input": 1_000_000, "cached_input": None, "output": 0, "source": "api"})
+    result = j3.judge([unreported, teacher_call("2")], ["1", "2"], None, PRICES, "teacher-model")
+    assert result["cache_not_reported"] == 1 and result["upper_bound"]
+    assert result["total"]["standard"] == pytest.approx(1.0 * 2.0 + 2.2)  # all its input at the input price
+    assert not j3.judge([teacher_call("2")], ["2"], None, PRICES, "teacher-model")["upper_bound"]
+
+
+def test_the_price_table_used_is_recorded():
+    result = j3.judge([teacher_call("1")], ["1"], None, PRICES, "teacher-model")
+    expected = __import__("hashlib").sha256(canonical(PRICES["table"])).hexdigest()
+    assert result["prices"] == {"as_of": "2026-09-30", "sha256": expected}
+
+
+def test_failed_slm_calls_count_on_both_sides_of_the_fraction():
+    slm_ok = call("r", "1", "filter_column", "t.a", parsed={}, role="slm", engine="slm:q+lora:c0", model="m",
+                  use=usage(1000, 0, 0))
+    slm_failed = call("r", "1", "filter_column", "t.b", response=None, parsed_ok=False, role="slm", engine="slm:q+lora:c0",
+                      model="m", use=usage(source="missing"))
+    llm = teacher_call("1", use=usage(1000, 0, 0))
+    fraction = j3.judge([slm_ok, slm_failed, llm], ["1"], None, PRICES, "teacher-model", SLM)["replaceable_fraction"]
+    assert fraction["calls"] == pytest.approx(2 / 3)  # both SLM calls, of all three
+    assert fraction["tokens"] == pytest.approx(0.5)   # billed calls on both sides

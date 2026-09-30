@@ -1,6 +1,7 @@
 """J6 · S4: the per-call-site score on calib, the pre-registered tie-break, and the choice fact."""
 import pytest
 
+from bench import paths
 from bench.contracts import facts
 from bench.judge import j6
 from bench.judge.base import JudgmentError, read_result
@@ -73,3 +74,18 @@ def test_run_refuses_what_is_not_a_zero_shot_on_calib(tmp_path, monkeypatch):
     config["roles"]["slm_candidates"] = config["roles"]["slm_candidates"][:1]
     with pytest.raises(JudgmentError, match="not the base"):
         j6.run(unknown, "eval-t", config)
+
+
+def test_s4_compares_exactly_the_configured_candidates_on_complete_replays(tmp_path, monkeypatch):
+    config, runs = zeroshot_world(tmp_path, monkeypatch)
+    one = dict(list(runs.items())[:1])
+    with pytest.raises(JudgmentError, match="exactly the configured candidates"):
+        j6.run(one, "eval-t", config)
+    manifest = paths.RUNS / "replay-granite-4.2-8b" / "manifest.json"
+    manifest.write_text(__import__("json").dumps({**__import__("json").loads(manifest.read_text()),
+                                                  "call_sites": sorted(set(GOLD_OR_ALL))}))
+    with pytest.raises(JudgmentError, match="complete zero-shot replay"):
+        j6.run(runs, "eval-t", config)
+
+
+GOLD_OR_ALL = ["agent_ir", "extract_keywords", "filter_column", "select_tables", "generate_candidate", "revise"]

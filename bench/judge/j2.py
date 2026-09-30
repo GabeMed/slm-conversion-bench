@@ -16,7 +16,10 @@ another engine, with the same retry policy (design §5.1). J2 pairs the two by i
   parsed (SPEC §6.3). An invocation whose last attempt did not parse has no output: it disagrees,
   and its SQL is wrong.
 
-Invocations are grouped by call site, or by any other key (J7 groups them by cluster). With a
+Invocations are grouped by call site, or by any other key (J7 groups them by cluster). A replay
+that declares its `call_sites` (F1's `replay --call-site`) is judged on those only: the teacher's
+invocations of other call sites are out of its scope, not wrong. Within its scope, an invocation of
+the teacher that the replay lacks is a refusal: a missing answer is not evidence either way. With a
 single execution and no replay, J2 gives the format validity of that execution alone (A5).
 """
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -69,12 +72,21 @@ def format_validity(calls: List[dict], group: Group = by_call_site) -> Dict[str,
 
 
 def compare(teacher_calls: List[dict], replay_calls: List[dict], replay_eval: Optional[Dict[Identity, bool]] = None,
-            teacher_eval: Optional[Dict[Identity, bool]] = None, group: Group = by_call_site) -> Dict[str, Dict[str, Any]]:
-    """Per group: the engine against the teacher on the same invocations (see the module docstring)."""
+            teacher_eval: Optional[Dict[Identity, bool]] = None, group: Group = by_call_site,
+            call_sites: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
+    """Per group: the engine against the teacher on the same invocations (see the module docstring);
+    `call_sites`, the replay's declared scope (None: every call site)."""
     teacher, replay = invocations(teacher_calls), invocations(replay_calls)
+    if call_sites is not None:
+        scope = set(call_sites)
+        teacher = {identity: attempts for identity, attempts in teacher.items() if identity[1] in scope}
     extra = set(replay) - set(teacher)
     if extra:
-        raise JudgmentError(f"the replay has invocations its source does not: {sorted(extra)[:3]}")
+        raise JudgmentError(f"the replay has invocations its source does not (or out of its call sites): {sorted(extra)[:3]}")
+    missing = sorted(set(teacher) - set(replay))
+    if missing:
+        raise JudgmentError(f"the replay lacks {len(missing)} of its source's invocations within its call sites, "
+                            f"e.g. {missing[:2]}: a missing answer is not evidence")
     out: Dict[str, Dict[str, Any]] = {}
     for identity in sorted(teacher):
         key = group(identity, teacher[identity])
@@ -159,8 +171,9 @@ def judge_replay(replay_run_id: str, replay_eval_run_id: Optional[str], teacher_
     reads, teacher, replay, replay_eval, teacher_eval, replayed = replay_inputs(
         replay_run_id, replay_eval_run_id, teacher_eval_run_id)
     return reads, {"mode": "replay", "split": replayed.get("split"),
-                   "engine": replayed.get("engine"), "arm": replayed.get("arm"),
-                   "per_call_site": compare(teacher, replay, replay_eval, teacher_eval)}
+                   "engine": replayed.get("engine"), "arm": replayed.get("arm"), "call_sites": replayed.get("call_sites"),
+                   "per_call_site": compare(teacher, replay, replay_eval, teacher_eval,
+                                            call_sites=replayed.get("call_sites"))}
 
 
 def judge_run(run_id: str):

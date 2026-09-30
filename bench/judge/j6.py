@@ -69,9 +69,14 @@ def run(zeroshots: Dict[str, str], teacher_eval_run_id: str, config: Dict[str, A
         run_reads, result = j2.judge_replay(replay_run_id, eval_run_id, teacher_eval_run_id)
         if result["split"] != "calib":
             raise JudgmentError(f"{replay_run_id} is on {result['split']!r}: S4 selects on calib only")
+        if result["call_sites"] is not None:
+            raise JudgmentError(f"{replay_run_id} replayed only {result['call_sites']}: S4 needs a complete zero-shot replay")
         sources.add(run_reads["teacher"]["run_id"])
         candidates[name] = result["per_call_site"]
         reads[name] = run_reads
+    if set(candidates) != names:
+        raise JudgmentError(f"S4 compares exactly the configured candidates {sorted(names)}; "
+                            f"zero-shot executions were given for {sorted(candidates)}")
     if len(sources) != 1:
         raise JudgmentError(f"the zero-shot executions replay different teacher runs: {sorted(sources)}")
     choice, table = choose(candidates, config["selection"]["footprint_gb"], config["selection"]["tie_tolerance"])

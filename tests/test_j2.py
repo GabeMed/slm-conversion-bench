@@ -93,3 +93,17 @@ def test_judge_replay_reads_the_executions_and_writes_a_result(tmp_path, monkeyp
     write_run("eval-e2e", {"type": "eval", "source_run_id": "replay-cheap", "status": None}, files={"results.jsonl": []})
     with pytest.raises(JudgmentError, match="per-call"):
         j2.judge_replay("replay-cheap", "eval-e2e", "eval-t")
+
+
+def test_a_replay_is_judged_on_its_declared_call_sites_and_must_cover_them():
+    t = [call("t", "1", "select_tables", parsed={"table_names": ["x"]}),
+         call("t", "1", "filter_column", "t.a", parsed={"is_column_information_relevant": "Yes"}),
+         call("t", "2", "select_tables", parsed={"table_names": ["x"]})]
+    only_tables = [call("r", "1", "select_tables", parsed={"table_names": ["x"]}),
+                   call("r", "2", "select_tables", parsed={"table_names": ["y"]})]
+    table = j2.compare(t, only_tables, call_sites=["select_tables"])
+    assert set(table) == {"select_tables"} and table["select_tables"]["agreement"]["rate"] == 0.5
+    with pytest.raises(JudgmentError, match="lacks 1"):  # the column filter is in scope when nothing is declared
+        j2.compare(t, only_tables)
+    with pytest.raises(JudgmentError, match="lacks 1"):
+        j2.compare(t, only_tables[:1], call_sites=["select_tables"])

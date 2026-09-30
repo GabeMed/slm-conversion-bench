@@ -111,7 +111,7 @@ def _f4(args) -> int:
             print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
         elif args.judgment == "j8":
             from bench.judge import j8
-            print(j8.run(args.loadtest, config))
+            print(j8.run(args.loadtest, config, args.sweep))
     except (JudgmentError, FactError, ConfigError, DataError, TestSplitLocked) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2
@@ -169,6 +169,7 @@ def f4_commands(sub) -> None:
     p.add_argument("--j6", required=True, help="the J6 result: its chosen candidate's zero-shot replay is the pilot")
     p = judgments.add_parser("j8", help="load: SLM cost per request at each utilization")
     p.add_argument("--loadtest", action="append", required=True)
+    p.add_argument("--sweep", action="append", help="the sweep to use when an engine has several (repeatable)")
     for p in judgments.choices.values():
         p.add_argument("--config", default="config.yaml")
     judge.set_defaults(f4=_f4)

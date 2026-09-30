@@ -13,9 +13,9 @@ def export(p95_ms, rps):
             "request_throughput": {"unit": "requests/sec", "avg": rps}}
 
 
-def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b", gpu="L4", cache=True):
-    write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": gpu, "concurrency": concurrency, "prefix_cache": cache},
-              files={j8.EXPORT: export(p95_ms, rps)})
+def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b", gpu="L4", cache=True, sweep=None):
+    write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": gpu, "concurrency": concurrency, "prefix_cache": cache,
+                       "sweep_id": sweep or f"sweep-{engine}"}, files={j8.EXPORT: export(p95_ms, rps)})
     return run_id
 
 
@@ -73,4 +73,21 @@ def test_adapters_are_measured_apart_and_combined_by_the_stated_rule(tmp_path, m
     # combined: the dearer engine's cost per request (c1 sustains 5 rps)
     assert result["cost_per_request"]["100%"] == pytest.approx(0.8 / (5.0 * 3600))
     assert result["combined"] == {"rule": "the highest cost per request among the engines measured",
-                                  "engines": ["slm:qwen3-8b+lora:c0", "slm:qwen3-8b+lora:c1"], "loadtests": sorted(runs)}
+                                  "engines": ["slm:qwen3-8b+lora:c0", "slm:qwen3-8b+lora:c1"], "loadtests": sorted(runs),
+                                  "sweeps": ["sweep-slm:qwen3-8b+lora:c0", "sweep-slm:qwen3-8b+lora:c1"]}
+
+
+def test_one_sweep_per_engine_unless_one_is_named(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_ms": 1000},
+                                             "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}})
+    runs = [loadtest("lt-a1", 1, 400, 2.0, sweep="sweep-a"), loadtest("lt-a8", 8, 900, 10.0, sweep="sweep-a"),
+            loadtest("lt-b8", 8, 900, 4.0, sweep="sweep-b")]
+    with pytest.raises(JudgmentError, match="several sweeps"):
+        j8.run(runs, config)
+    chosen = read_result(j8.run(runs, config, sweeps=["sweep-b"]), "J8")["result"]
+    assert chosen["combined"]["sweeps"] == ["sweep-b"] and chosen["combined"]["loadtests"] == ["lt-b8"]
+    assert chosen["cost_per_request"]["100%"] == pytest.approx(0.8 / (4.0 * 3600))
+    write_run("lt-none", {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": 1, "prefix_cache": True},
+              files={j8.EXPORT: export(400, 2.0)})
+    with pytest.raises(JudgmentError, match="no sweep_id"):
+        j8.run(["lt-none"], config)

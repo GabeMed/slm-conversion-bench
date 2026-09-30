@@ -18,6 +18,10 @@ one SLM call: J3 prices each SLM call of an execution at this cost, which makes 
 the execution's SLM calls per question times it. That holds as far as the load test's mix of calls
 is the execution's (F3 replays a source execution's calls; the manifest records which).
 
+**One sweep per engine**: F3 runs an engine's load levels as one sweep (`sweep_id`), in order on one
+warm server. J8 takes exactly one sweep of each engine; several sweeps of one engine are refused
+unless the invocation names the one to use (`sweeps`).
+
 **One engine per load test** (F3): the base (`slm:<candidate>`, B3's traffic) or one adapter
 (`slm:<candidate>+lora:<name>`). J8 takes the load tests of one or more engines of **one base on one
 GPU**, judges each engine apart, and combines them by one stated rule: the highest cost per request
@@ -26,7 +30,7 @@ on one server, which no single-engine load test measures, so their SLM cost from
 **extrapolation**; the result records the engines and load tests it combined, and J3 labels it.
 """
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from bench.judge.base import JudgmentError, reference, require_done, run_dir, write_result
 
@@ -57,7 +61,7 @@ def judge(levels: List[Dict[str, Any]], price_per_hour: float, slo_ms: float, ut
             "cost_per_request": {f"{round(u * 100)}%": price_per_hour / (per_hour * u) for u in utilizations}}
 
 
-def run(loadtest_run_ids: List[str], config: Dict[str, Any]):
+def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[List[str]] = None):
     cost = config["cost"]
     if cost.get("p95_slo_ms") is None:
         raise JudgmentError("cost.p95_slo_ms is not set: sustained throughput needs its pre-registered bound")
@@ -68,9 +72,19 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any]):
             raise JudgmentError(f"{run_id} did not run with the prefix cache on (SPEC §6.6)")
         gpus.add(found["gpu"])
         export = json.loads((run_dir(run_id) / EXPORT).read_text())
+        if not found.get("sweep_id"):
+            raise JudgmentError(f"{run_id} records no sweep_id: J8 takes one sweep per engine")
+        if sweeps and found["sweep_id"] not in sweeps:
+            continue
         levels.append({"run_id": run_id, "engine": found["engine"], "concurrency": found["concurrency"],
-                       "source_run_id": found.get("source_run_id"), **level(export)})
+                       "sweep_id": found["sweep_id"], "source_run_id": found.get("source_run_id"), **level(export)})
         reads[run_id] = reference(run_id)
+    if not levels:
+        raise JudgmentError(f"none of the load tests is of the sweeps named: {sorted(sweeps or [])}")
+    for engine in sorted({lv["engine"] for lv in levels}):
+        found_sweeps = sorted({lv["sweep_id"] for lv in levels if lv["engine"] == engine})
+        if len(found_sweeps) > 1:
+            raise JudgmentError(f"{engine} has several sweeps {found_sweeps}: name the one to use")
     engines = sorted({lv["engine"] for lv in levels})
     bases = {e.split("+lora:")[0] for e in engines}
     if len(bases) != 1 or len(gpus) != 1:
@@ -88,5 +102,5 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any]):
               "source_run_ids": sorted({lv.get("source_run_id") for lv in levels if lv.get("source_run_id")}),
               "engines": per_engine, "cost_per_request": combined,
               "combined": {"rule": "the highest cost per request among the engines measured", "engines": engines,
-                           "loadtests": sorted(reads)}}
+                           "loadtests": sorted(reads), "sweeps": sorted({lv["sweep_id"] for lv in levels})}}
     return write_result(JUDGMENT, {"loadtests": reads}, result)

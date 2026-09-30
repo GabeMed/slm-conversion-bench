@@ -206,7 +206,7 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
         missing = set(invocations(teacher)) - set(cluster_of)
         if missing:
             raise JudgmentError(f"the B4 replay did not route {len(missing)} teacher invocations, e.g. {sorted(missing)[:2]}")
-        evidence[engine] = j2.compare(teacher, replay, replay_eval, teacher_eval, group)
+        evidence[engine] = j2.compare(teacher, replay, replay_eval, teacher_eval, group, call_sites=found.get("call_sites"))
         for cluster, cost in mean_costs(replay, cluster_of, config["prices"],
                                         j8["cost_per_request"][lowest] if engine == "slm" else None).items():
             costs.setdefault(cluster, {})[engine] = cost
@@ -214,11 +214,12 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
     settings = {"delta_cap_pp": config["thresholds"]["delta_cap_pp"], "seed": config["seeds"]["bootstrap"],
                 "n_boot": n_boot(config), "min_calls": config["allocation"]["min_calls"],
                 "concordance_min": config["thresholds"]["concordance_min"], "n_test": n_test}
-    _, teacher, zeroshot, zeroshot_eval, teacher_eval, _ = j2.replay_inputs(
+    _, teacher, zeroshot, zeroshot_eval, teacher_eval, zs_manifest = j2.replay_inputs(
         pilot_reads["replay"]["run_id"], pilot_reads["replay_eval"]["run_id"], teacher_eval_run_id)
     if teacher[0]["run_id"] != reads["slm"]["teacher"]["run_id"]:
         raise JudgmentError("the pilot (J6's zero-shot) replays another teacher run than the calib replays")
-    pilot = pilot_discordance(j2.compare(teacher, zeroshot, zeroshot_eval, teacher_eval, group), noninferiority,
+    pilot = pilot_discordance(j2.compare(teacher, zeroshot, zeroshot_eval, teacher_eval, group,
+                                         call_sites=zs_manifest.get("call_sites")), noninferiority,
                               settings, pilot_ids)
     decided = allocate(clusters, evidence, costs, noninferiority, settings, pilot, margin)
     fact = write_fact(JUDGMENT, "allocation", {"centroids": centroids_sha, "adapters": adapters_sha,
