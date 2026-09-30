@@ -490,3 +490,13 @@ def test_p4_on_modal_asks_the_gpu_reference_for_the_adapter_by_its_sha256(parity
     (sha, base, got_prompts, kwargs, _, _), = calls["peft_reference"]
     assert sha == manifest["adapter_sha256"] and base == TINY and got_prompts == prompts
     assert verdict["status"] == PASS and verdict["reference_on"] == "modal" and verdict["reference_gpu_seconds"] == 12.5
+
+
+
+def test_preflight_on_modal_hands_its_configuration_to_the_modal_reference(tmp_path, monkeypatch):
+    import os
+
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("BENCH_CONFIG", raising=False)
+    cli.main(["preflight", "--config", str(config_path), "--on", "modal"])
+    assert os.environ["BENCH_CONFIG"] == str(config_path.resolve())

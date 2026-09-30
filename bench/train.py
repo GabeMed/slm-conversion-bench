@@ -27,6 +27,7 @@ silently truncated.
 """
 import hashlib
 import json
+import os
 import re
 import sys
 import tempfile
@@ -444,6 +445,7 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
         elif on == "modal":
             precheck(plan, parse_dataset(raw, plan["dataset"]["path"]))
             sys.path.insert(0, str(paths.ROOT))
+            os.environ["BENCH_CONFIG"] = str(Path(config_path).resolve())  # the Modal app reads this configuration
             from modal_apps import train as modal_train
 
             # detached: the training goes on if this machine sleeps; running the same command again

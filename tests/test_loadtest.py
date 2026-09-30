@@ -316,7 +316,11 @@ def test_on_modal_the_client_runs_beside_the_server_and_its_artifacts_come_back(
         "served_model": {"id": "c0", "root": "/adapters/abc", "parent": TINY_NAME, "object": "model"},
         "server_state": {"gpus": ["NVIDIA H200"], "vllm_command": ["vllm", "serve"], "revision": "r", "adapters": {}}})
     source = _source_run(calls=SOURCE)
+    monkeypatch.delenv("BENCH_CONFIG", raising=False)
     run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", source, "modal", concurrency=[8])
+    import os
+
+    assert os.environ["BENCH_CONFIG"] == str(config_path.resolve())  # the Modal app reads the --config given
     (raw, args), = calls["run_aiperf"]
     assert raw == (run_dirs[0] / "payloads.jsonl").read_bytes()
     endpoint = config["roles"]["slm_candidates"][-1]["endpoint"]
@@ -355,7 +359,8 @@ def test_without_aiperf_the_load_test_says_so_before_anything(served, monkeypatc
     assert not list(paths.RUNS.glob("loadtest-*")) and not server.seen and not server.posted
 
 
-def test_refused_credentials_fail_at_once_instead_of_waiting_for_a_cold_start():
+@pytest.mark.parametrize("code", [401, 403])
+def test_refused_credentials_fail_at_once_instead_of_waiting_for_a_cold_start(code):
     import time as clock
 
     server = FakeServer([])
@@ -363,14 +368,14 @@ def test_refused_credentials_fail_at_once_instead_of_waiting_for_a_cold_start():
 
     def refuse(self):
         server.seen.append((self.path, None))
-        self.send_response(401)
+        self.send_response(code)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     handler.do_GET = refuse
     try:
         t0 = clock.monotonic()
-        with pytest.raises(LoadtestError, match="refused the credentials \\(HTTP 401\\)"):
+        with pytest.raises(LoadtestError, match=f"refused the credentials \\(HTTP {code}\\)"):
             wait_ready(server.base_url, {"Modal-Key": "wrong"}, "c0", timeout_s=60, poll_s=0.01)
         assert clock.monotonic() - t0 < 5 and len(server.seen) == 1
     finally:
@@ -383,3 +388,37 @@ def test_a_missing_proxy_auth_variable_stops_the_load_test_before_any_request(se
     with pytest.raises(LoadtestError, match="T_MODAL_SECRET"):
         loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
     assert not server.seen and not server.posted
+
+
+
+def test_an_interrupted_aiperf_still_leaves_no_credential(served, monkeypatch):
+    config_path, _, _ = served
+
+    def interrupted(run_dir, cmd):
+        (run_dir / "profile_export_aiperf.json").write_text('{"Modal-Key": "mk-live"}')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(loadtest, "run_aiperf", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+    run_dir = next(paths.RUNS.glob("loadtest-*"))
+    assert "mk-live" not in (run_dir / "profile_export_aiperf.json").read_text()
+
+
+def test_a_warm_up_error_is_a_load_test_error_not_a_traceback(served, monkeypatch, capsys):
+    from bench import cli
+
+    config_path, _, server = served
+    handler = server.server.RequestHandlerClass
+
+    def refuse(self):
+        self.send_response(503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    handler.do_POST = refuse
+    _source_run(calls=SOURCE)
+    assert cli.main(["loadtest", "--config", str(config_path), "--engine", f"slm:{TINY_NAME}", "--source",
+                     "agent-B0-train-src", "--on", "local", "--concurrency", "1"]) == 2
+    assert "warm-up refused" in capsys.readouterr().err and "HTTP 503" in json.loads(
+        next(paths.RUNS.glob("loadtest-*/manifest.json")).read_text())["stopped_by"]

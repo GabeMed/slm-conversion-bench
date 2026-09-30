@@ -473,6 +473,16 @@ def test_the_training_function_releases_its_marker_when_training_fails(apps, tmp
     with pytest.raises(RuntimeError, match="out of memory"):
         train.train_adapter.local(plan, raw, run_identity(config))
     assert not list((tmp_path / "volume" / common.RESULTS).glob("*.started")) and train.adapters.commits == 2
+    assert train.hf_cache.commits == 2  # the weights it downloaded are kept even though training failed
+
+
+def test_the_training_function_refuses_a_gpu_other_than_its_own(apps, monkeypatch):
+    from bench.train import run_identity, training_plan
+
+    config, (_, train, _) = apps
+    plan, raw = training_plan(config, "c1")
+    with pytest.raises(RuntimeError, match="this function runs on L40S, the plan asks H100"):
+        train.train_adapter.local(plan, raw, {**run_identity(config), "gpu": "H100"})
 
 
 def test_the_training_function_stores_its_own_run_and_a_second_call_collects_it(apps, tmp_path, monkeypatch):
@@ -490,14 +500,17 @@ def test_the_training_function_stores_its_own_run_and_a_second_call_collects_it(
         return {"global_step": 2}
 
     monkeypatch.setattr(bench_train, "train_lora", trains)
+    monkeypatch.setattr(common, "gpu_names", lambda: ["NVIDIA L40S"])
     plan, raw = training_plan(config, "c1")
     identity = run_identity(config)
     first = train.train_adapter.local(plan, raw, identity)
     assert first["reused"] is False and first["run"]["commit"] == identity["commit"]
-    assert first["run"]["observed_gpus"] == [] and first["run"]["started_at"] <= first["run"]["finished_at"]
-    again = train.train_adapter.local(plan, raw, identity)
+    assert first["run"]["observed_gpus"] == ["NVIDIA L40S"] and first["run"]["started_at"] <= first["run"]["finished_at"]
+    # collected later, at another commit and price: the stored run is reported, never today's
+    later = {**identity, "commit": "d" * 40, "price_usd_per_s": 9.0, "price_as_of": "2027-01-01"}
+    again = train.train_adapter.local(plan, raw, later)
     assert again["reused"] is True and again["run"] == first["run"] and again["files"] == first["files"]
-    assert "collection_seconds" in again
+    assert again["run"]["commit"] == identity["commit"] and "collection_seconds" in again
 
 
 def test_the_modal_load_client_scrubs_the_key_and_the_proxy_headers(apps, tmp_path, monkeypatch):
@@ -550,3 +563,65 @@ def test_the_server_class_starts_through_start_serving(apps, monkeypatch):
     (plan, commit), = calls
     assert plan == serve.PLAN and instance.process == "vllm"
     assert commit == volume.commit  # its recorded state is committed to the vLLM-cache volume
+
+
+
+def test_gpu_names_are_observed_or_unknown_never_an_empty_guess(monkeypatch):
+    import subprocess as sp
+
+    class Done:
+        def __init__(self, returncode, stdout):
+            self.returncode, self.stdout = returncode, stdout
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Done(0, "NVIDIA L40S\n\n"))
+    assert common.gpu_names() == ["NVIDIA L40S"]
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Done(9, ""))
+    assert common.gpu_names() is None  # nvidia-smi failed: not observed
+
+    def missing(*a, **k):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(sp, "run", missing)
+    assert common.gpu_names() is None
+
+
+def test_start_serving_checks_the_adapters_before_launching(serving, tmp_path):
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    launched = []
+    with pytest.raises(common.SettingsError, match="not on the adapters volume"):
+        common.start_serving(plan, {"VLLM_API_KEY": "k"}, launch=launched.append, adapters_root=str(tmp_path / "empty"),
+                             state_root=str(tmp_path / "cache"))
+    assert not launched
+
+
+def test_start_serving_records_its_state_only_after_the_warm_up(serving, tmp_path):
+    import shutil
+
+    _, config = serving
+    plan = common.serve_plan(config, TINY_NAME)
+    volume = tmp_path / "adapters"
+    shutil.copytree(paths.ROOT / "train" / "adapters" / "c0" / "adapter", volume / plan["adapters"][0]["sha256"])
+    server = FakeVLLMServer()
+    handler = server.server.RequestHandlerClass
+
+    def refuse(self):
+        self.send_response(500)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    handler.do_POST = refuse
+
+    class Running:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    try:
+        with pytest.raises(Exception):
+            common.start_serving(plan, {"VLLM_API_KEY": "k"}, launch=lambda cmd: Running(), adapters_root=str(volume),
+                                 state_root=str(tmp_path / "cache"), base=server.base, gpus=lambda: ["NVIDIA L40S"])
+    finally:
+        server.server.shutdown()
+    assert not common.state_path(str(tmp_path / "cache"), TINY_NAME).exists()  # a server that never warmed up

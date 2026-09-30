@@ -73,8 +73,11 @@ def train_adapter(plan: dict, dataset: bytes, identity: dict) -> dict:
                 "files": files}
 
     # common.run_training: marker committed before, result stored, marker released and committed in a finally
-    result = common.run_training(common.ADAPTERS, key, time.time(), train, adapters.commit)
-    hf_cache.commit()
+    def commit() -> None:  # the weights downloaded into the HF cache are kept even when training fails
+        adapters.commit()
+        hf_cache.commit()
+
+    result = common.run_training(common.ADAPTERS, key, time.time(), train, commit)
     return {**result, "reused": False}
 
 

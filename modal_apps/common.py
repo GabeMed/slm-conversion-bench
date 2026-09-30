@@ -279,18 +279,21 @@ def state_path(root: str, name: str) -> Path:
     return Path(root) / STATE_DIR / f"{name}.json"
 
 
-def gpu_names() -> List[str]:
-    """The GPUs this container got (nvidia-smi), or none where there is no GPU."""
+def gpu_names() -> Optional[List[str]]:
+    """The GPUs this container got (nvidia-smi); None when they could not be observed (no nvidia-smi, or it
+    failed), never an empty list passed off as "no GPU"."""
     try:
         smi = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
     except FileNotFoundError:
-        return []
+        return None
+    if smi.returncode != 0:
+        return None
     return [line.strip() for line in smi.stdout.splitlines() if line.strip()]
 
 
 def start_serving(plan: Dict[str, Any], environ: Dict[str, str], launch: Callable = subprocess.Popen,
                   adapters_root: str = ADAPTERS, state_root: str = VLLM_CACHE, commit: Callable[[], Any] = lambda: None,
-                  base: str = f"http://127.0.0.1:{PORT}", gpus: Callable[[], List[str]] = gpu_names) -> Any:
+                  base: str = f"http://127.0.0.1:{PORT}", gpus: Callable[[], Optional[List[str]]] = gpu_names) -> Any:
     """The serving container's start, in order: refuse without any auth (before anything runs), check the
     adapters' bytes, launch vLLM, wait until healthy, warm up the base and every adapter, record what this
     server observed about itself (for the load test). Returns the vLLM process."""
@@ -301,7 +304,8 @@ def start_serving(plan: Dict[str, Any], environ: Dict[str, str], launch: Callabl
     warm_up(base, plan, environ.get("VLLM_API_KEY"), plan["warmup_timeout_s"])
     state = state_path(state_root, plan["name"])
     state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(json.dumps({**serving_state(plan, "\n".join(gpus())), "auth": auth}, indent=2))
+    observed = gpus()
+    state.write_text(json.dumps({**serving_state(plan, "\n".join(observed or [])), "gpus": observed, "auth": auth}, indent=2))
     commit()
     return process
 

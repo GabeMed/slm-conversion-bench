@@ -113,8 +113,13 @@ def warm_up(base_url: str, headers: Dict[str, str], payloads: List[dict], timeou
     for body in payloads:
         request = urllib.request.Request(f"{base_url.rstrip('/')}/chat/completions", data=json.dumps(body).encode(),
                                          headers=headers)
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            response.read()
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                response.read()
+        except urllib.error.HTTPError as e:
+            raise LoadtestError(f"warm-up refused by {base_url}: HTTP {e.code}") from None
+        except (urllib.error.URLError, OSError) as e:
+            raise LoadtestError(f"warm-up failed at {base_url}: {type(e).__name__}: {e}") from None
     return len(payloads)
 
 
@@ -220,9 +225,12 @@ def run_level(run_dir: Path, args: Dict[str, Any], api_key: Optional[str], heade
     write_aiperf_config(run_dir, aiperf_config(args["url"], args["model"], args["concurrency"], args["request_count"],
                                                args["timeout_s"], args["stream"], api_key_var if api_key else None,
                                                args["headers_env"]))
-    returncode = run_aiperf(run_dir, cmd)
-    return {"returncode": returncode, "ready_after_s": waited, "served_model": card,
-            "secrets_redacted_in": scrub_secrets(run_dir, [api_key or "", *headers.values()])}
+    redacted: List[str] = []
+    try:
+        returncode = run_aiperf(run_dir, cmd)
+    finally:  # an interrupted AIPerf may have written credentials too
+        redacted = scrub_secrets(run_dir, [api_key or "", *headers.values()])
+    return {"returncode": returncode, "ready_after_s": waited, "served_model": card, "secrets_redacted_in": redacted}
 
 
 # ---------------------------------------------------------------- the execution
@@ -303,6 +311,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
         aiperf_command(aiperf, tok)  # no AIPerf: refused before any run directory or request
     if on == "modal":
         sys.path.insert(0, str(paths.ROOT))
+        os.environ["BENCH_CONFIG"] = str(Path(config_path).resolve())  # the Modal apps read this configuration
         from modal_apps import loadtest as modal_loadtest
 
         remote = modal_loadtest

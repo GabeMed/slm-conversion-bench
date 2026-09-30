@@ -217,7 +217,11 @@ def test_training_on_modal_keeps_what_modal_trained_and_costs_its_gpu_seconds(tm
     stats = {"device": "cuda", "train_seconds": 90.0, "examples_seen": 8}
     calls = fake_modal_app(monkeypatch, "train",
                            train_adapter=lambda plan, raw, identity: _modal_result(sha, files, stats, identity))
+    monkeypatch.delenv("BENCH_CONFIG", raising=False)
     result = train_cluster(str(config_path), "c0", "modal")
+    import os
+
+    assert os.environ["BENCH_CONFIG"] == str(config_path.resolve())  # the Modal app reads the --config given
     (plan, raw, identity), = calls["train_adapter"]
     assert plan["dataset"]["sha256"] == hashlib.sha256(raw).hexdigest() and plan["base"] == TINY
     price = config["modal"]["gpu_prices"]["usd_per_s"][config["train"]["gpu"]]

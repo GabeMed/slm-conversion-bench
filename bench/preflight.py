@@ -465,7 +465,11 @@ def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = 
     from bench.contracts.config import config_sha256, load_config
     from bench.provenance import git_state, scrub
 
+    import os
+
     config = load_config(config_path)
+    if on == "modal":
+        os.environ["BENCH_CONFIG"] = str(Path(config_path).resolve())  # the Modal reference reads this configuration
     started = datetime.now(timezone.utc)
     checks = run_checks(config, parity_cluster, on)
     run_dir = paths.RUNS / f"preflight-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
