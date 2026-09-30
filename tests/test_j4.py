@@ -6,7 +6,7 @@ Constants: z0.95 = 1.6448536, z0.80 = 0.8416212, so z0.95 + z0.80 = 2.4864749.""
 import pytest
 
 from bench.judge import JudgeError
-from bench.judge.j4 import margin, noninferiority
+from bench.judge.j4 import lower_quantile, margin, noninferiority
 
 
 def arms(both_right, a_only, b_only, both_wrong):
@@ -93,3 +93,36 @@ def test_pairs_are_matched_by_question_id_not_by_order():
         noninferiority(a, {**b, "extra": True}, 5, seed=2, n_boot=300)
     with pytest.raises(JudgeError, match="same questions"):
         noninferiority(a, {q: v for q, v in b.items() if q != "0"}, 5, seed=2, n_boot=300)
+
+
+def test_the_lower_bound_is_the_500th_smallest_of_10000():
+    # (1 - 0.95) * 10000 is 500.00000000000045 in floating point, whose ceiling would take the 501st
+    values = [i / 10000 for i in reversed(range(10000))]  # 500th smallest 0.0499, 501st 0.05
+    assert lower_quantile(values) == 0.0499
+    assert lower_quantile([i / 20000 for i in range(20000)]) == 0.04995  # the 1000th, not the 1001st
+    assert lower_quantile([3.0, 1.0, 2.0]) == 1.0                       # ceil(0.15) = 1: the smallest
+
+
+def test_a_given_margin_is_used_as_is():
+    # J7 passes half the pre-registered margin: 0.0352346 / 2 = 0.0176173
+    a, b = arms(300, 60, 40, 100)  # diff 0.04, d 0.20
+    result = noninferiority(a, b, 5, seed=1, n_boot=2000, margin=0.0176173)
+    assert (result["delta"], result["margin_from"], result["testable"]) == (0.0176173, "given", True)
+    # Phi(0.0176173 / sqrt(0.20 / 500) - 1.6448536) = Phi(0.8808650 - 1.6448536) = Phi(-0.7639886) = 0.2224
+    assert result["power"] == pytest.approx(0.2224, abs=1e-4)
+    assert result["noninferior"] is True  # ci_low about 0.0072 > -0.0176
+
+
+@pytest.mark.parametrize("kwargs", [{"margin": -0.001}, {"margin": 0.0501}, {"d_pilot": -0.01}, {"d_pilot": 1.01},
+                                    {"margin": 0.01, "d_pilot": 0.1}])
+def test_margins_and_pilot_discordances_are_validated(kwargs):
+    a, b = arms(30, 6, 4, 10)
+    with pytest.raises(JudgeError):
+        noninferiority(a, b, 5, seed=1, n_boot=100, **kwargs)
+
+
+def test_a_pilot_that_never_disagreed_gives_a_zero_margin():
+    # kept as is until the author decides a floor: the test becomes one of superiority
+    a, b = arms(300, 0, 0, 200)
+    result = noninferiority(a, b, 5, seed=1, n_boot=200, d_pilot=0.0)
+    assert (result["delta"], result["testable"], result["ci_low"], result["noninferior"]) == (0.0, True, 0.0, False)

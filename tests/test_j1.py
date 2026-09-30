@@ -56,7 +56,7 @@ def test_the_two_single_call_engines_of_b2_are_two_configurations(tmp_path):
     assert correct(rows, "B2", "calib", engine="production_llm") == {q: True for q in ("1", "2", "3", "4")}
 
 
-@pytest.mark.parametrize("breakage", ["duplicate", "per_call", "count", "no_arm", "instrument", "pre_f2"])
+@pytest.mark.parametrize("breakage", ["duplicate", "per_call", "count", "no_arm", "instrument", "prereg", "pre_f2"])
 def test_the_table_refuses_ambiguous_or_broken_evaluations(tmp_path, breakage):
     dirs = [eval_dir(tmp_path, "e0", "B0", "calib", [True] * 4)]
     if breakage == "duplicate":  # the same arm and split scored twice: which one counts?
@@ -69,6 +69,9 @@ def test_the_table_refuses_ambiguous_or_broken_evaluations(tmp_path, breakage):
         dirs = [eval_dir(tmp_path, "a", None, "calib", [True] * 4)]
     elif breakage == "instrument":  # two arms of one split measured with different SQLite: not comparable
         dirs.append(eval_dir(tmp_path, "e4", "B4", "calib", [True] * 4, sqlite_version="3.45.0"))
+    elif breakage == "prereg":  # two arms of one split scored under two pre-registrations
+        dirs = [eval_dir(tmp_path, "t0", "B0", "test", [True] * 4, prereg_hash="a" * 64),
+                eval_dir(tmp_path, "t4", "B4", "test", [True] * 4, prereg_hash="b" * 64)]
     else:  # an eval written before the fixed date existed
         dirs = [eval_dir(tmp_path, "old", "B0", "calib", [True] * 4, fixed_date=None)]
     with pytest.raises(JudgeError):

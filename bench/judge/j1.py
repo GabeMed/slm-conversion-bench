@@ -5,7 +5,9 @@ single-call engines of B2 (None for the agent arms); `ex_summary` is EX per arm,
 per difficulty, and without the date-dependent golds and without the golds with LIMIT (the
 sensitivity the design asks for). EX is a fraction of questions. The executions of one split must
 share the instrument (fixed date, timeout, SQLite version, pre-registration), or they would not be
-comparable.
+comparable. The SQLite version is part of it because the SQL a prediction may use differs across
+versions and builds (`unixepoch()` and `->>` exist from 3.38, the math functions only when compiled
+in): the same prediction can be scored under one and be an execution error under another.
 """
 import json
 from pathlib import Path
