@@ -100,6 +100,42 @@ def test_local_changes_and_a_newer_remote_are_refused(repo, tmp_path):
     assert "differs from origin/main" in prereg_published(CONFIG, repo)  # seen only because the barrier fetches
 
 
+def test_the_remote_is_what_the_fetch_brought_not_a_stale_ref(repo, tmp_path):
+    """A clone whose refspec does not map main keeps a stale origin/main after `git fetch origin main`:
+    the barrier compares with the fetched commit, so a re-registration on the remote is still seen."""
+    register(repo)
+    git(repo, "config", "--unset-all", "remote.origin.fetch")
+    other = clone(tmp_path, tmp_path / "origin.git", "other")
+    register(other, splits_sha256="0" * 64)
+    assert "differs from origin/main" in prereg_published(CONFIG, repo)
+
+
+def test_the_fetch_never_prompts_and_times_out(repo, monkeypatch):
+    import bench.barrier as barrier
+    register(repo)
+    real, seen = subprocess.run, []
+
+    def run(cmd, **kwargs):
+        if "fetch" in cmd:
+            seen.append(kwargs)
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return real(cmd, **kwargs)
+    monkeypatch.setattr(barrier.subprocess, "run", run)
+    assert "could not fetch" in prereg_published(CONFIG, repo)
+    (kwargs,) = seen
+    assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0" and kwargs["timeout"] == barrier.FETCH_TIMEOUT_S
+
+
+def test_a_malformed_registration_is_a_refusal_not_a_crash(repo):
+    (repo / "prereg").mkdir()
+    (repo / "prereg" / "manifest.json").write_text("[not an object]\n")
+    (repo / "prereg" / "HASH").write_text(sha(repo / "prereg" / "manifest.json") + "\n")
+    git(repo, "add", "prereg")
+    git(repo, "commit", "-q", "-m", "a malformed registration")
+    git(repo, "push", "-q", "origin", "main")
+    assert "is not a JSON object" in prereg_published(CONFIG, repo)
+
+
 def test_no_remote_no_test(tmp_path):
     assert "could not fetch" in prereg_published(CONFIG, tmp_path)
     with pytest.raises(TestSplitLocked):
