@@ -10,6 +10,10 @@ rules (vendor/chess/src/workflow/agents/**), not when their text looks alike:
   removed, as `select_columns.py:aggregate_columns` does;
 - the agent's action: the same tool, or both done.
 SQL generation and repair have gold and are judged by execution (J1, J2), never by agreement.
+
+Deliberately stricter than CHESS in three edge cases, so the error is on the side of disagreeing:
+CHESS also de-duplicates columns and tables case-insensitively within one output, and drops the
+columns of tables it did not select; agreement here compares the output as written.
 """
 from typing import Any, FrozenSet, Tuple
 

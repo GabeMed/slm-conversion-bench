@@ -96,9 +96,9 @@ def dev_questions(config: dict) -> List[dict]:
     return _read_pinned(config, "bird_dev_questions")
 
 
-def test_questions(config: dict) -> List[dict]:
-    """The raw test file. Only `bench data` reads it directly (for the ids of the splits);
-    every execution goes through `questions_for`, which applies the test barrier."""
+def _test_questions(config: dict) -> List[dict]:
+    """The raw test file. Only `bench data` reads it directly (for the ids of the splits); every
+    execution goes through `questions_for`, which applies the test barrier."""
     return _read_pinned(config, "plat_sql_test")
 
 
@@ -139,6 +139,13 @@ def build_splits(config: dict, dev: List[dict], test: List[dict]) -> dict:
     }
 
 
+def check_splits_unchanged(splits: dict) -> None:
+    """The splits are a fact: rebuilding must give the committed file, or `bench data` stops."""
+    if paths.SPLITS.exists() and json.loads(paths.SPLITS.read_text()) != splits:
+        raise DataError("the rebuilt splits differ from the committed data/splits.json; "
+                        "change them only on purpose, by deleting the file")
+
+
 def run(config: dict) -> dict:
     """Fetch, check and pin every input; write data/MANIFEST.json and data/splits.json."""
     inputs = {}
@@ -153,10 +160,8 @@ def run(config: dict) -> dict:
             changed = sorted(db for db in set(recorded) | set(db_hashes) if recorded.get(db) != db_hashes.get(db))
             raise DataError(f"database files differ from data/MANIFEST.json: {changed} "
                             f"(delete {paths.bird_root(config)} and run `bench data` again)")
-    splits = build_splits(config, dev_questions(config), test_questions(config))
-    if paths.SPLITS.exists() and json.loads(paths.SPLITS.read_text()) != splits:
-        raise DataError("the rebuilt splits differ from the committed data/splits.json; "
-                        "the splits are a fact: change them only on purpose, by deleting the file")
+    splits = build_splits(config, dev_questions(config), _test_questions(config))
+    check_splits_unchanged(splits)
     manifest = {"inputs": inputs, "databases": db_hashes}
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     paths.SPLITS.write_text(json.dumps(splits, indent=1) + "\n")
@@ -173,7 +178,7 @@ def questions_for(config: dict, split: str) -> Dict[str, dict]:
         raise DataError(f"unknown split {split!r}")
     barrier.ensure_split_allowed(split)
     ids = set(load_splits()[split])
-    source = test_questions(config) if split == "test" else dev_questions(config)
+    source = _test_questions(config) if split == "test" else dev_questions(config)
     return {q["question_id"]: q for q in source if q["question_id"] in ids}
 
 

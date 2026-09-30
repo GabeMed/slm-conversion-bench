@@ -2,8 +2,10 @@
 import argparse
 import sys
 
+from bench.agent.hooks import HarnessError
 from bench.barrier import TestSplitLocked
 from bench.contracts.config import ConfigError
+from bench.contracts.facts import FactError
 from bench.data import DataError
 
 AGENT_ARMS = ("B0", "B1", "B3", "B4", "B5")
@@ -47,7 +49,7 @@ def main(argv=None) -> int:
         elif args.command == "eval":
             from bench.evaluate import evaluate
             print(evaluate(args.run_id))
-    except (TestSplitLocked, ConfigError, DataError) as e:
+    except (TestSplitLocked, ConfigError, DataError, FactError, HarnessError) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2
     return 0

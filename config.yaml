@@ -32,6 +32,9 @@ roles:
 # by C4. Temperatures live in `call_sites`, never here.
 agent:
   setting_name: CHESS_IR_SS_CG
+  # the order the agents run in (CHESS takes it from the order of team_agents, which a serializer
+  # may sort; it is explicit here, and part of the configuration's identity)
+  team_order: [information_retriever, schema_selector, candidate_generator]
   team_agents:
     information_retriever:
       engine: routed

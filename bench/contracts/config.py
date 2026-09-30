@@ -113,6 +113,9 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
         errors += _check_endpoint(f"roles.slm_candidates[{i}]", candidate.get("endpoint"))
         errors += _check_params(f"roles.slm_candidates[{i}]", candidate.get("params"))
     errors += _agent_engines(config["agent"])
+    order, team = config["agent"].get("team_order"), config["agent"].get("team_agents") or {}
+    if not isinstance(order, list) or sorted(order) != sorted(team) or len(set(order)) != len(order):
+        errors.append("agent.team_order must list every agent of agent.team_agents once, in running order")
     call_sites = config["call_sites"]
     if set(call_sites) != set(CALL_SITES):
         errors.append(f"call_sites must list exactly {sorted(CALL_SITES)}")
@@ -134,6 +137,13 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     return errors
 
 
+def chess_team_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The configuration CHESS receives: its team, with the agents in `team_order`."""
+    agent = config["agent"]
+    return {"setting_name": agent["setting_name"],
+            "team_agents": {name: agent["team_agents"][name] for name in agent["team_order"]}}
+
+
 def engine_spec(config: Dict[str, Any], engine: str) -> Dict[str, Any]:
     """The model and endpoint behind an engine name returned by the router (C4):
     `production_llm`, `cheap_alt`, `slm:<candidate>` (the base, served under the candidate's
@@ -141,10 +151,12 @@ def engine_spec(config: Dict[str, Any], engine: str) -> Dict[str, Any]:
     if engine in SINGLE_MODEL_ROLES:
         return {"model_role": engine, **config["roles"][engine]}
     if engine.startswith("slm:"):
-        name, _, served_name = engine[len("slm:"):].partition("+lora:")
+        name, lora, served_name = engine[len("slm:"):].partition("+lora:")
+        if lora and not served_name:
+            raise ConfigError(f"engine {engine!r}: empty adapter name")
         for candidate in config["roles"].get("slm_candidates") or []:
             if candidate["name"] == name:
-                return {"model_role": "slm", "model": served_name or name,
+                return {"model_role": "slm", "model": served_name if lora else name,
                         "endpoint": candidate["endpoint"], "params": candidate.get("params") or {}}
         raise ConfigError(f"engine {engine!r}: no slm candidate named {name!r}")
     raise ConfigError(f"unknown engine {engine!r}")

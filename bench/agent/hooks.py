@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from bench.contracts.config import engine_spec
 from bench.contracts.router import Route, route
+from bench.provenance import scrub
 
 _config: Optional[Dict[str, Any]] = None
 _run: Optional["_RunState"] = None
@@ -34,7 +35,16 @@ _models_lock = threading.Lock()
 
 
 class HarnessError(RuntimeError):
-    """A failure of the harness, not of the model: the run must not be recorded as done."""
+    """A failure of the harness, not of the model: the run must not be recorded as done.
+
+    It records itself in the current run when it is created, wherever it is raised (inside CHESS,
+    whose handlers swallow exceptions, included), so no call site has to remember to report it."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        if _run is not None:
+            with _run.lock:
+                _run.harness_errors.append(scrub(message))
 
 
 @dataclass
@@ -45,7 +55,7 @@ class _RunState:
     question_id: Optional[str] = None
     occurrences: Dict[tuple, int] = field(default_factory=dict)
     harness_errors: List[str] = field(default_factory=list)
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 class RoutedEngine:
@@ -97,15 +107,13 @@ def _require_run() -> _RunState:
 
 
 def _harness(what: str, fn: Callable[[], Any]) -> Any:
-    """Run a harness step; a failure is recorded for the runner, then raised."""
+    """Run a harness step; any failure becomes a (self-recording) HarnessError."""
     try:
         return fn()
+    except HarnessError:
+        raise
     except Exception as e:
-        message = f"{what}: {type(e).__name__}: {e}"
-        if _run is not None:
-            with _run.lock:
-                _run.harness_errors.append(message)
-        raise HarnessError(message) from e
+        raise HarnessError(f"{what}: {type(e).__name__}: {e}") from e
 
 
 def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
@@ -203,7 +211,8 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
         "parsed_output": _jsonable(parsed) if parsed_ok else None, "parsed_ok": parsed_ok,
         "usage": _usage(output) if output is not None else
         {"input": None, "cached_input": None, "output": None, "source": "missing"},
-        "latency_ms": latency_ms, "started_at": started_at, "temperature": temperature, "error": error,
+        "latency_ms": latency_ms, "started_at": started_at, "temperature": temperature,
+        "error": scrub(error) if error is not None else None,  # no local paths in a record
     }, ensure_ascii=False)
     with run.lock, open(run.calls_path, "a") as fh:
         fh.write(line + "\n")
@@ -275,19 +284,34 @@ def invoke_agent_call(call_site: str, invocation_key: str, message: str, parse: 
 
 # ---------------------------------------------------------------- retrieval embeddings
 
+def _recording(inner: Any) -> Any:
+    """Retrieval embeddings are the harness's infrastructure, not the model under test: any failure
+    (a missing or rejected key, a network error) is a harness failure, even where CHESS swallows it."""
+    from langchain_core.embeddings import Embeddings
+
+    class Recording(Embeddings):
+        def embed_documents(self, texts):
+            return _harness("embeddings", lambda: inner.embed_documents(texts))
+
+        def embed_query(self, text):
+            return _harness("embeddings", lambda: inner.embed_query(text))
+
+    return Recording()
+
+
 def embeddings(purpose: str):
     """Embeddings for CHESS retrieval: `entity` (retrieve_entity) or `context` (column-description vector DB)."""
     settings = _config["embeddings"]
     provider = settings["provider"]
     if provider == "openai":
-        from langchain_openai import OpenAIEmbeddings
         if not os.environ.get("OPENAI_API_KEY"):
             raise HarnessError("embeddings.provider is openai and OPENAI_API_KEY is not set")
-        return OpenAIEmbeddings(model=settings[f"{purpose}_model"])
+        from langchain_openai import OpenAIEmbeddings
+        return _recording(OpenAIEmbeddings(model=settings[f"{purpose}_model"]))
     if provider == "fake":
         from langchain_core.embeddings import DeterministicFakeEmbedding
-        return DeterministicFakeEmbedding(size=settings["fake_size"])
-    raise NotImplementedError(f"embeddings provider {provider!r} is built in F1")
+        return _recording(DeterministicFakeEmbedding(size=settings["fake_size"]))
+    raise HarnessError(f"embeddings provider {provider!r} is built in F1")
 
 
 def vector_db_dirname() -> str:

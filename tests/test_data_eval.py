@@ -1,6 +1,5 @@
 """Splits and pinned inputs (bench data), the evaluator (bench eval), the barrier at the commands,
 and CHESS's final-SQL rule."""
-import copy
 import hashlib
 import json
 import random
@@ -8,14 +7,14 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from bench import data, paths
 from bench.agent.runner import final_sql, run_agent
 from bench.barrier import TestSplitLocked
-from bench.contracts.config import config_sha256, load_config
+from bench.contracts.config import config_sha256, load_config  # noqa: F401
 from bench.data import DataError, build_splits, calib_sample
 from bench.evaluate import evaluate, execute, score
+from synthetic import GOLD, make_repo
 
 CONFIG = load_config(paths.ROOT / "config.yaml")
 
@@ -116,47 +115,22 @@ def test_timeout_and_read_only(db):
 
 # ---------------------------------------------------------------- the commands, on a synthetic repository
 
-def _sha(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 @pytest.fixture
-def repo(tmp_path, monkeypatch, db):
-    """A repository with one tiny database, pinned inputs, splits, and one finished run."""
-    for name, value in {"ROOT": tmp_path, "DATA": tmp_path / "data", "RAW": tmp_path / "data" / "raw",
-                        "SPLITS": tmp_path / "data" / "splits.json", "RUNS": tmp_path / "runs",
-                        "DATA_MANIFEST": tmp_path / "data" / "MANIFEST.json"}.items():
-        monkeypatch.setattr(paths, name, value)
-    config = copy.deepcopy(CONFIG)
-    root = paths.bird_root(config) / "dev_databases" / "tiny"
-    root.mkdir(parents=True)
-    (root / "tiny.sqlite").write_bytes(db.read_bytes())
-    paths.RAW.mkdir(parents=True)
-    dev = [{"question_id": q, "db_id": "tiny", "question": "?", "evidence": None, "difficulty": "simple",
-            "SQL": f"SELECT v FROM t WHERE id = {q}"} for q in (1, 2, 3)]
-    test = [{"question_id": "9", "db_id": "tiny", "question": "?", "evidence": "", "SQL": "SELECT 9"}]
-    for name, items in (("bird_dev_questions", dev), ("plat_sql_test", test)):
-        path = paths.RAW / f"{name}.json"
-        path.write_text(json.dumps(items))
-        config["data"][name]["sha256"] = _sha(path)
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config))
-    paths.SPLITS.write_text(json.dumps({"train": ["1", "2", "3"], "calib": [], "test": ["9"], "excluded": []}))
-    paths.DATA_MANIFEST.write_text(json.dumps({"inputs": {}, "databases": {
-        "tiny": {"sqlite": _sha(root / "tiny.sqlite"), "descriptions": {}}}}))
-    return tmp_path, config
+def repo(tmp_path, monkeypatch):
+    return make_repo(tmp_path, monkeypatch)
 
 
 def _finished_run(repo, split="train", status="done", predictions=None, question_ids=None):
-    tmp_path, config = repo
-    predictions = predictions if predictions is not None else {"1": "SELECT v FROM t WHERE id = 1",
-                                                               "2": "SELECT v FROM t WHERE id = 5"}
+    _, _, config = repo
+    predictions = predictions if predictions is not None else {"1": GOLD, "2": "SELECT 0"}
     run_dir = paths.RUNS / f"agent-B0-{split}-x"
     run_dir.mkdir(parents=True)
     (run_dir / "predictions.json").write_text(json.dumps(predictions))
+    (run_dir / "config.json").write_text(json.dumps(config))
     (run_dir / "manifest.json").write_text(json.dumps({
         "run_id": run_dir.name, "split": split, "status": status, "commit": "c",
         "question_ids": question_ids or sorted(predictions), "config_path": "config.yaml",
-        "config_sha256": config_sha256(load_config(tmp_path / "config.yaml"))}))
+        "config_sha256": config_sha256(config)}))
     return run_dir.name
 
 
@@ -168,11 +142,22 @@ def test_evaluate_scores_a_finished_run(repo):
     assert json.loads((out / "manifest.json").read_text())["databases"] == {"tiny": recorded}
 
 
+def test_evaluate_uses_the_runs_configuration_not_todays(repo):
+    run_id = _finished_run(repo)
+    (repo[0] / "config.yaml").write_text("changed: after the run\n")  # e.g. a fact pointed at in `arms`
+    assert evaluate(run_id).exists()
+    snapshot = paths.RUNS / run_id / "config.json"
+    tampered = json.loads(snapshot.read_text())
+    tampered["eval"]["timeout_s"] += 1
+    snapshot.write_text(json.dumps(tampered))
+    with pytest.raises(DataError, match="snapshot"):
+        evaluate(run_id)
+
+
 def test_evaluate_refuses_a_changed_database(repo):
     run_id = _finished_run(repo)
-    sqlite = paths.bird_root(repo[1]) / "dev_databases" / "tiny" / "tiny.sqlite"
-    connection = sqlite3.connect(sqlite)
-    connection.execute("INSERT INTO t VALUES (99, 'x')")
+    connection = sqlite3.connect(paths.sqlite_path(repo[2], "tiny"))
+    connection.execute("INSERT INTO gas_t VALUES (99, 'CZE', 'Premium')")
     connection.commit()
     connection.close()
     with pytest.raises(DataError, match="tiny.sqlite"):
@@ -182,7 +167,7 @@ def test_evaluate_refuses_a_changed_database(repo):
 def test_evaluate_refuses_a_changed_gold_file(repo):
     run_id = _finished_run(repo)
     path = paths.RAW / "bird_dev_questions.json"
-    path.write_text(path.read_text().replace("id = 2", "id = 5"))
+    path.write_text(path.read_text().replace("Premium", "Value"))
     with pytest.raises(DataError, match="differs from the pin"):
         evaluate(run_id)
 
@@ -197,17 +182,38 @@ def test_the_test_split_is_refused_by_every_command(repo):
     with pytest.raises(TestSplitLocked):
         evaluate(_finished_run(repo, split="test", predictions={"9": "SELECT 9"}))
     with pytest.raises(TestSplitLocked):
-        run_agent(str(repo[0] / "config.yaml"), "B0", "test", limit=1)
+        run_agent(str(repo[1]), "B0", "test", limit=1)
     with pytest.raises(TestSplitLocked):
-        data.questions_for(repo[1], "test")
+        data.questions_for(repo[2], "test")
     assert not any(paths.RUNS.glob("agent-B0-test-2*"))  # refused before a run directory exists
 
 
 def test_run_refuses_ids_outside_the_split_and_duplicates(repo):
     with pytest.raises(DataError, match="not in the train split"):
-        run_agent(str(repo[0] / "config.yaml"), "B0", "train", ids=["9"])
+        run_agent(str(repo[1]), "B0", "train", ids=["9"])
     with pytest.raises(DataError, match="more than once"):
-        run_agent(str(repo[0] / "config.yaml"), "B0", "train", ids=["1", "1"])
+        run_agent(str(repo[1]), "B0", "train", ids=["1", "1"])
+
+
+def test_rebuilt_splits_must_equal_the_committed_file(repo):
+    committed = json.loads(paths.SPLITS.read_text())
+    data.check_splits_unchanged(committed)
+    with pytest.raises(DataError, match="differ"):
+        data.check_splits_unchanged({**committed, "calib": ["1"]})
+
+
+def test_a_run_is_done_only_when_nothing_went_wrong():
+    from bench.agent.runner import new_outcome, run_status
+
+    def outcome(**parts):
+        return {**new_outcome(), "predictions": {"1": "x", "2": None}, **parts}
+    assert run_status(["1", "2"], outcome(), 0, []) == "done"
+    assert run_status(["1", "2"], outcome(tool_errors={"1": {"select_tables": "x"}}), 0, []) == "done"
+    assert run_status(["1", "2", "3"], outcome(), 0, []) == "interrupted"
+    assert run_status(["1", "2"], outcome(harness_errors={"1": ["route"]}), 0, []) == "failed"
+    assert run_status(["1", "2"], outcome(failures={"1": "KeyError"}), 0, []) == "failed"
+    assert run_status(["1", "2"], outcome(), 1, []) == "failed"
+    assert run_status(["1", "2"], outcome(), 0, ["tiny"]) == "failed"
 
 
 # ---------------------------------------------------------------- CHESS's final SQL
@@ -219,11 +225,3 @@ def test_final_sql_is_the_first_sql_of_the_last_key():
     assert final_sql(state) == "b"
     assert final_sql(SimpleNamespace(SQL_meta_infos={})) is None
     assert final_sql(SimpleNamespace(SQL_meta_infos={"generate_candidate": [info("a")], "revise_1": []})) is None
-
-
-def test_a_run_is_done_only_when_nothing_went_wrong():
-    from bench.agent.runner import run_status
-    assert run_status({"1": "x", "2": None}, ["1", "2"], {}, []) == "done"
-    assert run_status({"1": "x"}, ["1", "2"], {}, []) == "interrupted"
-    assert run_status({"1": "x"}, ["1"], {"1": ["route: FactError"]}, []) == "failed"
-    assert run_status({"1": "x"}, ["1"], {}, ["tiny"]) == "failed"

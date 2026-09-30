@@ -21,7 +21,7 @@ for patch 1, a correctness fix decided by the author.
 | 4 | **No fallback to another model** on empty output: it is a parse failure, retried on the same engine | `llm/models.py`, `bench/agent/hooks.py` | Published: switches to Gemini silently |
 | 5 | **Parse retries bounded** (`retries.parse_max_attempts`, 2) and **each attempt logged** with `retry_of` | `bench/agent/hooks.py` | Published: 12 identical retries at temperature 0, unlogged. Non-parser exceptions and HTTP errors are logged and raised, as published |
 | 6 | **One C1 line per LLM invocation** (`calls.jsonl`), including **the agents' own choice of the next tool** (call sites `agent_ir`, `agent_ss`, `agent_cg`) and a stable `invocation_key` per invocation (`table.column` for the column filter; `<template>:<i>` for generation; `<revise round>:<i>` for repair; `<agent>:<iteration>` for the agents; `single` otherwise; the suffix `@<n>` when the agent repeats the same invocation within a question). The agent's action is parsed with the agent's own rules (`Agent.parse_action`). CHESS's per-conversation log (`Logger.log_conversation`) is no longer written from the call layer: C1 replaces it; the rest of CHESS's logger is unchanged | `llm/models.py`, `agent.py`, `filter_column.py`, `generate_candidate.py`, `revise.py` | Published: agent calls are not logged, and parallel or repeated calls of one call site cannot be told apart. The generation step name no longer carries the engine name |
-| 10 | **Retrieval embeddings from the configuration** (`embeddings.provider`: `openai`, as published, or `fake` for tests), built when used rather than at import; the column-description vector DB lives in `context_vector_db_<provider>/`, so a DB built with one embedding is never queried with another; a missing DB raises (CHESS records the tool error in its state, and the runner copies it to the run manifest as `tool_errors`) | `db_catalog/preprocess.py`, `database_manager.py`, `retrieve_entity.py` | Published: OpenAI embeddings are required at import time |
+| 10 | **Retrieval embeddings from the configuration** (`embeddings.provider`: `openai`, as published, or `fake` for tests), built when used rather than at import; the column-description vector DB lives in `context_vector_db_<provider>/`, so a DB built with one embedding is never queried with another; a missing DB raises a harness error, and any failure of the embeddings themselves (a missing or rejected key, the network) is a harness error too; either fails the run | `db_catalog/preprocess.py`, `database_manager.py`, `retrieve_entity.py` | Published: OpenAI embeddings are required at import time |
 | 12 | **CHESS's own execution accuracy has no authority**: its evaluation node still runs, unchanged; predictions are taken by the published final-SQL rule (first SQL of the last key of `SQL_meta_infos`, `bench/agent/runner.py:final_sql`) and scored only by `bench eval` | `bench/agent/runner.py`, `bench/evaluate.py` | The internal EX compares against the gold inside the agent run and has known bugs |
 | 15 | **The agent's SQL runs on read-only connections** (`file:…?mode=ro`) | `database_utils/execution.py` | Published: read-write connections that commit, so a model-written `DELETE` or `DROP` would change the pinned database for every later question |
 
@@ -30,8 +30,10 @@ before import (this is why patch 11 of the design, a default for `INDEX_SERVER_P
 needed), the templates path and the results directory are pointed inside the run, and Chroma
 telemetry is off (`bench/agent/runner.py`).
 
-Harness failures inside the agent (routing, configuration, a missing API key) cannot be swallowed
-by CHESS's catch-all handlers: `bench/agent/hooks.py` records them, and the run is marked `failed`.
+Harness failures inside the agent (routing, configuration, a missing API key, the retrieval
+embeddings) cannot be swallowed by CHESS's catch-all handlers: a `HarnessError` records itself in
+the run the moment it is created (`bench/agent/hooks.py`), and the run is marked `failed`. The agents
+run in the explicit order `config.yaml › agent.team_order`, never in whatever order a mapping has.
 
 ## Not yet applied (front F1)
 

@@ -13,8 +13,6 @@ data/raw
 data/bird_dev
 data/models
 
-# sub-session worktrees
-.claude/
 
 # run outputs (facts); test-split registry entries are committed explicitly
 runs/

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import barrier, data, paths
-from bench.contracts.config import config_sha256, load_config
+from bench.contracts.config import config_sha256, validate_config
 from bench.provenance import git_state
 
 
@@ -57,9 +57,9 @@ def score(predictions: Dict[str, Optional[str]], gold: Dict[str, dict], db_path:
 def evaluate(source_run_id: str) -> Path:
     source = paths.RUNS / source_run_id
     run_manifest = json.loads((source / "manifest.json").read_text())
-    config = load_config(paths.ROOT / run_manifest["config_path"])
-    if config_sha256(config) != run_manifest["config_sha256"]:
-        raise data.DataError(f"{run_manifest['config_path']} changed since run {source_run_id}")
+    config = json.loads((source / "config.json").read_text())  # the run's own snapshot, not today's config.yaml
+    if config_sha256(config) != run_manifest["config_sha256"] or validate_config(config):
+        raise data.DataError(f"the configuration snapshot of {source_run_id} does not match its manifest")
     split = run_manifest["split"]
     barrier.ensure_split_allowed(split)
     if run_manifest["status"] != "done":
@@ -77,7 +77,7 @@ def evaluate(source_run_id: str) -> Path:
         data.check_database(config, db_id)
 
     started = datetime.now(timezone.utc)
-    run_id = f"eval-{source_run_id}-{started.strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = f"eval-{source_run_id}-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
     out = paths.RUNS / run_id
     out.mkdir(parents=True)
     results = score(predictions, gold, lambda db_id: paths.sqlite_path(config, db_id), config["eval"]["timeout_s"])

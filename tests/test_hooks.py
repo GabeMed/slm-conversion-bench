@@ -145,6 +145,7 @@ def test_no_question_no_call(tmp_path):
 
 def test_the_client_is_built_as_configured_one_per_temperature():
     config = load_config(SMOKE)
+    config["roles"]["production_llm"]["params"] = {"max_tokens": 77, "timeout_s": 123}
     hooks.configure(config)
     cold, warm = hooks.chat_model("production_llm", 0.0), hooks.chat_model("production_llm", 0.2)
     assert cold is not warm and cold is hooks.chat_model("production_llm", 0.0)
@@ -167,3 +168,43 @@ def test_a_configured_key_that_is_missing_never_falls_back_to_openai(monkeypatch
         hooks.chat_model("production_llm", 0.0)
     monkeypatch.setenv("PRODUCTION_LLM_API_KEY", "provider-key")
     assert hooks.chat_model("production_llm", 0.0).openai_api_key.get_secret_value() == "provider-key"
+
+
+# ---------------------------------------------------------------- harness failures are never lost
+
+def test_a_harness_error_records_itself_even_when_swallowed(run):
+    try:
+        raise hooks.HarnessError(f"missing {paths.ROOT}/data/x")
+    except Exception:
+        pass  # what CHESS's handlers do
+    assert hooks.take_harness_errors() == ["missing <repo>/data/x"]  # recorded, and scrubbed of the local path
+
+
+def test_embedding_failures_are_harness_failures(run, monkeypatch):
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    def broken(self, texts):
+        raise ConnectionError("embeddings endpoint unreachable")
+    monkeypatch.setattr(DeterministicFakeEmbedding, "embed_documents", broken)
+    with pytest.raises(hooks.HarnessError):
+        hooks.embeddings("entity").embed_documents(["a"])
+    (error,) = hooks.take_harness_errors()
+    assert "ConnectionError" in error
+
+
+def test_openai_embeddings_without_a_key_are_refused(monkeypatch):
+    config = load_config(SMOKE)
+    config["embeddings"]["provider"] = "openai"
+    hooks.configure(config)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(hooks.HarnessError, match="OPENAI_API_KEY"):
+        hooks.embeddings("entity")
+
+
+def test_model_error_text_is_scrubbed_of_local_paths(run):
+    model, calls_path, _ = run
+    model.script = [OSError(f"cannot open {paths.ROOT}/secret/file")]
+    with pytest.raises(OSError):
+        hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+    (line,) = read_calls(calls_path)
+    assert str(paths.ROOT) not in line["error"] and "<repo>/secret/file" in line["error"]

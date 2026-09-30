@@ -11,7 +11,7 @@ in the code chooses a model. `engine` resolves to a model and endpoint through
 | B0 | always `production_llm` |
 | B1 | always `cheap_alt` (its few-shot and cache budget are prompt-side, F1) |
 | B3 | always `slm:<choice.slm>`, the base chosen in S4, no adapter |
-| B4 | `slm:<adapters.slm>+lora:<served name of the adapter of assign(prompt)>` |
+| B4 | `slm:<choice.slm>+lora:<served name of the adapter of assign(prompt)>` |
 | B5 | `allocation[assign(prompt)]`; `slm` means B4's engine for that cluster; a cluster missing from the allocation stays with `production_llm` (SPEC S6) |
 
 B2 (single call) does not run the agent and never reaches the router. The facts an arm uses are
@@ -25,7 +25,8 @@ from bench.contracts.clusters import assign
 from bench.contracts.facts import FactError, read_fact
 
 AGENT_ARMS = ("B0", "B1", "B3", "B4", "B5")
-ARM_FACTS = {"B3": ("choice",), "B4": ("centroids", "adapters"), "B5": ("centroids", "adapters", "allocation")}
+ARM_FACTS = {"B3": ("choice",), "B4": ("choice", "centroids", "adapters"),
+             "B5": ("choice", "centroids", "adapters", "allocation")}
 
 
 class Route(NamedTuple):
@@ -34,19 +35,30 @@ class Route(NamedTuple):
 
 
 def arm_facts(arm: str, config: Dict[str, Any]) -> Dict[str, tuple]:
-    """{fact name: (payload, sha256)} for every fact the arm uses, checked for consistency."""
+    """{fact name: (payload, sha256)} for every fact the arm uses, checked to have been decided on
+    each other: the adapters on this choice and these centroids, one per centroid cluster; the
+    allocation on these centroids and adapters, over centroid clusters only."""
     settings = (config.get("arms") or {}).get(arm) or {}
     facts = {}
     for name in ARM_FACTS.get(arm, ()):
         if not settings.get(name):
             raise FactError(f"arms.{arm}.{name} is not set in the configuration")
-        facts[name] = read_fact(str(paths.ROOT / settings[name]))
-    if "adapters" in facts and facts["adapters"][0]["centroids"] != facts["centroids"][1]:
-        raise FactError(f"arms.{arm}: the adapters were trained on other centroids")
+        facts[name] = read_fact(str(paths.ROOT / settings[name]), name)
+    if "adapters" in facts:
+        adapters, (choice, choice_sha), (centroids, centroids_sha) = facts["adapters"][0], facts["choice"], facts["centroids"]
+        if (adapters["choice"], adapters["slm"]) != (choice_sha, choice["slm"]):
+            raise FactError(f"arms.{arm}: the adapters were trained for another choice of SLM")
+        if adapters["centroids"] != centroids_sha:
+            raise FactError(f"arms.{arm}: the adapters were trained on other centroids")
+        if set(adapters["adapters"]) != set(centroids["clusters"]):
+            raise FactError(f"arms.{arm}: the adapters' clusters are not the centroids' clusters")
     if "allocation" in facts:
-        decided_on = facts["allocation"][0]
-        if (decided_on["centroids"], decided_on["adapters"]) != (facts["centroids"][1], facts["adapters"][1]):
+        allocation = facts["allocation"][0]
+        if (allocation["centroids"], allocation["adapters"]) != (facts["centroids"][1], facts["adapters"][1]):
             raise FactError(f"arms.{arm}: the allocation was decided on other centroids or adapters")
+        unknown = set(allocation["allocation"]) - set(facts["centroids"][0]["clusters"])
+        if unknown:
+            raise FactError(f"arms.{arm}: the allocation names clusters the centroids do not have: {sorted(unknown)}")
     return facts
 
 
