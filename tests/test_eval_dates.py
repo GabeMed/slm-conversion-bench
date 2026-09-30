@@ -67,7 +67,7 @@ FAR = "1999-12-31"  # far from today: the machine's clock would give another yea
     # the keywords' own functions, called by a quoted name, read the current moment too
     ('SELECT "current_date"(), [current_timestamp](), `current_time`()', ("1999-12-31", "1999-12-31 00:00:00", "00:00:00")),
     # SQLite reads 'now' as C text: from a blob, and up to a NUL
-    ("SELECT date(CAST('now' AS BLOB)), date(x'6e6f77'), date('now' || char(0))", ("1999-12-31",) * 3),
+    ("SELECT date(CAST('now' AS BLOB)), date(x'6e6f77'), date('now' || char(0)), date(x'6e6f7700')", ("1999-12-31",) * 4),
     # and the time values 'subsec' / 'subsecond' as now, with fractional seconds
     ("SELECT datetime('subsec'), datetime('SUBSECOND', '+1 day')", ("1999-12-31 00:00:00.000", "2000-01-01 00:00:00.000")),
     ("SELECT datetime('now', 'localtime')", ("1999-12-31 00:00:00",)),

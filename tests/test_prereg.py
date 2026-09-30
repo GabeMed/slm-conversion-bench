@@ -148,6 +148,17 @@ def test_analysis_code_the_commit_would_not_hold_is_refused(repo, ignored):
         register("config.yaml", root=repo)
 
 
+def test_ignored_bytecode_beside_the_analysis_code_is_not_a_refusal(repo):
+    """Every checkout that imported bench.judge has an ignored __pycache__: that is not unregistered code."""
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore bytecode")
+    cache = repo / "bench" / "judge" / "__pycache__"
+    cache.mkdir()
+    (cache / "j4.cpython-311.pyc").write_bytes(b"\0")
+    assert register("config.yaml", root=repo)["hash"]
+
+
 def test_register_refuses_without_the_analysis_code(repo):
     git(repo, "rm", "-q", "bench/evaluate.py")
     git(repo, "commit", "-q", "-m", "drop the evaluator")
