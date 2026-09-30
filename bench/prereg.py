@@ -14,9 +14,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
+
 from bench import barrier, paths
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError
+from bench.data import DataError, pilot_sample
 from bench.judge import j4
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -33,18 +35,53 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _git_ok(root: Path, *args: str) -> bool:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True).returncode == 0
+
+
+def _config_chain(config_file: Path) -> List[Path]:
+    """The configuration and every file it `extends`, followed as bench/contracts/config.py does."""
+    chain = []
+    path: Optional[Path] = config_file
+    while path is not None and path not in chain:
+        chain.append(path)
+        if not path.is_file():
+            break
+        parent = (yaml.safe_load(path.read_text()) or {}).get("extends")
+        path = (path.parent / parent).resolve() if parent else None
+    return chain
+
+
+def _check_committed(root: Path, chain: List[Path]) -> None:
+    """Every file of the chain must be what the registration commit holds."""
+    for path in chain:
+        if not path.is_relative_to(root):
+            raise PreregError(f"{path.name} is outside the repository: the commit cannot hold the configuration")
+        rel = path.relative_to(root).as_posix()
+        if not _git_ok(root, "ls-files", "--error-unmatch", "--", rel):
+            raise PreregError(f"{rel} is not tracked: the commit would not hold the configuration")
+        if _git_ok(root, "check-ignore", "-q", "--no-index", "--", rel):
+            raise PreregError(f"{rel} is ignored by git: a configuration file must not be")
+        if not _git_ok(root, "diff", "--quiet", "HEAD", "--", rel):
+            raise PreregError(f"{rel} has uncommitted changes")
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def delta_rule(config: Dict[str, Any]) -> Dict[str, Any]:
-    """The rule J4 applies (bench/judge/j4.py), in words and parameters, and the code that applies it."""
+def delta_rule(config: Dict[str, Any], calib: List[str]) -> Dict[str, Any]:
+    """The rule J4 applies (bench/judge/j4.py), in words and parameters, the pilot it takes d from,
+    and the code that applies it."""
     implementation = Path(j4.__file__).resolve()
+    size, seed = config["stats"]["pilot_size"], config["seeds"]["calib_split"]
     return {
         "formula": "delta = (z_0.95 + z_0.80) * sqrt(d / n)",
         "z": {"one_sided_confidence": j4.CONFIDENCE, "power": j4.POWER},
         "d": "paired discordance, the fraction of questions exactly one of the two arms gets right, "
-             "measured on the pilot (~50 calibration questions)",
+             "measured on the pilot",
+        "pilot": {"rule": "the stats.pilot_size calibration ids with the smallest sha256('<seeds.calib_split>:pilot:<id>')",
+                  "size": size, "ids": pilot_sample(calib, size, seed)},
         "n": "the number of paired test questions (498)",
         "cap_pp": config["thresholds"]["delta_cap_pp"],
         "above_cap": "not testable with this n: reported as descriptive only",
@@ -75,12 +112,15 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     config_file = (root / config_path).resolve()
     if not config_file.is_relative_to(root):
         raise PreregError(f"the configuration must be inside the repository, so the commit holds it: {config_path}")
+    _check_committed(root, _config_chain(config_file))
     config = load_config(config_file)
-    if not isinstance((config.get("stats") or {}).get("n_boot"), int):
-        raise PreregError("the configuration has no stats.n_boot: the delta rule needs the bootstrap size")
+    for key in ("n_boot", "pilot_size"):
+        if not isinstance((config.get("stats") or {}).get(key), int):
+            raise PreregError(f"the configuration has no stats.{key}: the delta rule needs it")
+    calib = json.loads((root / barrier.REGISTERED["splits_sha256"]).read_text()).get("calib") or []
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in barrier.REGISTERED.items()},
-                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config)}
+                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text())

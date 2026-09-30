@@ -11,7 +11,7 @@ import yaml
 from bench import paths
 from bench.barrier import prereg_published
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError
+from bench.data import DataError, pilot_sample
 from bench.evaluate import evaluate, evaluate_per_call
 from bench.judge import j4
 from bench.prereg import PreregError, register
@@ -41,7 +41,7 @@ def repo(tmp_path):
     root = tmp_path / "clone"
     (root / "data").mkdir(parents=True)
     (root / "SPEC.md").write_text("protocol\n")
-    (root / "data" / "splits.json").write_text('{"test": ["9"]}\n')
+    (root / "data" / "splits.json").write_text(json.dumps({"calib": [str(i) for i in range(100, 160)], "test": ["9"]}) + "\n")
     (root / "data" / "MANIFEST.json").write_text('{"databases": {}}\n')
     (root / "config.yaml").write_text(yaml.safe_dump(CONFIG))
     init_published(root, tmp_path / "origin.git")
@@ -63,6 +63,9 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
     assert (rule["cap_pp"], rule["bootstrap"]["n_boot"], rule["bootstrap"]["seed"]) == \
         (CONFIG["thresholds"]["delta_cap_pp"], CONFIG["stats"]["n_boot"], CONFIG["seeds"]["bootstrap"])
     assert rule["implementation"] == {"path": "bench/judge/j4.py", "sha256": sha256(j4.__file__)}
+    calib = [str(i) for i in range(100, 160)]
+    assert rule["pilot"]["ids"] == pilot_sample(calib, 50, CONFIG["seeds"]["calib_split"])
+    assert (rule["pilot"]["size"], len(rule["pilot"]["ids"])) == (CONFIG["stats"]["pilot_size"], 50)
     assert git(repo, "rev-parse", "HEAD^") == before and git(repo, "status", "--porcelain") == ""
     assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == ["prereg/HASH", "prereg/manifest.json"]
     assert "not on origin/main" in prereg_published(CONFIG, repo)  # publishing is the author's act
@@ -107,6 +110,40 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
         register("config.yaml", root=repo)
 
 
+def commit_config(repo, name, text):
+    (repo / name).write_text(text)
+    git(repo, "add", "-f", name)
+    git(repo, "commit", "-q", "-m", f"add {name}")
+
+
+def test_register_refuses_an_extends_chain_that_the_commit_does_not_hold(repo, tmp_path):
+    # untracked because ignored: the tree looks clean, but the commit would not hold the parent
+    (repo / ".gitignore").write_text("local.yaml\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore local.yaml")
+    (repo / "local.yaml").write_text(yaml.safe_dump(CONFIG))
+    commit_config(repo, "via-ignored.yaml", "extends: local.yaml\n")
+    assert git(repo, "status", "--porcelain") == ""
+    with pytest.raises(PreregError, match="local.yaml is not tracked"):
+        register("via-ignored.yaml", root=repo)
+    # tracked, but matched by .gitignore (force-added): refused as well
+    git(repo, "add", "-f", "local.yaml")
+    git(repo, "commit", "-q", "-m", "force-add local.yaml")
+    with pytest.raises(PreregError, match="local.yaml is ignored"):
+        register("via-ignored.yaml", root=repo)
+    # a parent outside the repository
+    (tmp_path / "outside.yaml").write_text(yaml.safe_dump(CONFIG))
+    commit_config(repo, "via-outside.yaml", "extends: ../outside.yaml\n")
+    with pytest.raises(PreregError, match="outside the repository"):
+        register("via-outside.yaml", root=repo)
+    assert not (repo / "prereg").exists()
+
+
+def test_register_accepts_a_tracked_extends_chain(repo):
+    commit_config(repo, "child.yaml", "extends: config.yaml\n")
+    assert register("child.yaml", root=repo)["new"] is True
+
+
 # ---------------------------------------------------------------- the test split, through a published registration
 
 @pytest.fixture
@@ -116,7 +153,9 @@ def published(tmp_path, monkeypatch, tmp_path_factory):
     (paths.RAW / "mini_dev.json").write_text(json.dumps([{"question_id": 9, "db_id": "tiny", "difficulty": "challenging"}]))
     raw = yaml.safe_load(config_path.read_text())
     raw["data"]["mini_dev"]["sha256"] = sha256(paths.RAW / "mini_dev.json")
+    raw["stats"]["pilot_size"] = 1  # the synthetic calibration split has a single id
     config_path.write_text(yaml.safe_dump(raw))
+    paths.SPLITS.write_text(json.dumps({"train": ["1", "2"], "calib": ["3"], "test": ["9"], "excluded": []}))
     (root / "SPEC.md").write_text("protocol\n")
     (root / ".gitignore").write_text("runs/\ndata/raw/\ndata/bird_dev/\n")
     init_published(root, tmp_path_factory.mktemp("remote") / "origin.git")
