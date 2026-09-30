@@ -134,5 +134,7 @@ def test_only_a_done_b0_run_is_replayed_and_the_barrier_holds(monkeypatch, repo,
     manifest_path = paths.RUNS / source / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest_path.write_text(json.dumps({**manifest, "split": "test"}))
-    with pytest.raises(TestSplitLocked):
+    runs = set(paths.RUNS.iterdir())
+    with pytest.raises(TestSplitLocked, match="origin/main|prereg"):  # the barrier itself, not the registry
         replay(str(repo), source, engine="production_llm")
+    assert set(paths.RUNS.iterdir()) == runs

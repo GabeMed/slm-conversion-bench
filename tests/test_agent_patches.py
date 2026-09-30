@@ -286,6 +286,9 @@ def test_the_gold_never_enters_the_agents_state(monkeypatch, repo):
         assert all(GOLD not in m["content"] for m in call["prompt_messages"])
     leaked = [p for p in run_dir.rglob("*") if p.is_file() and GOLD in p.read_text(errors="ignore")]
     assert leaked == []  # not in questions.json, not in CHESS's own logs
+    (history,) = run_dir.glob("chess/**/1_tiny.json")  # the selector tools still log their runs (CHESS drops
+    logged = {step.get("tool_name") for step in json.loads(history.read_text())}  # the entry if its update raises)
+    assert {"filter_column", "select_tables", "select_columns"} <= logged
 
 
 @pytest.fixture(scope="module")
