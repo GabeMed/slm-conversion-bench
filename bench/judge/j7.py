@@ -1,0 +1,164 @@
+"""J7 · S6, the allocation of B5 (SPEC §4 S6, §6.4; D15), written as the `allocation` fact.
+
+Per cluster of the centroids, **the cheapest engine that passes on calib**, else the production LLM:
+- the calls of a cluster that have gold (SQL generation and repair) pass by **non-inferiority with
+  margin Δ/2** (J4, the question as the unit), when J4 finds them testable and they number at
+  least `allocation.min_calls`: J4's lower confidence bound on the engine's EX minus the teacher's
+  is at least −Δ/2, with J4's Δ;
+- the calls without gold pass by **agreement with the teacher** of at least
+  `thresholds.concordance_min`, over at least `allocation.min_calls` calls: a proxy, declared as
+  such (D15), which supports no claim per cluster;
+- a cluster whose calls mix both must pass both; a cluster with no calib call, or without enough
+  of them, stays with `production_llm` (SPEC S6).
+
+The engines are `cheap_alt` (a replay of the teacher's calib inputs on it) and `slm`, the cluster's
+adapter (a replay routed as B4, so each call went to the adapter of the cluster the router assigned
+it). **The cluster of a calib call is the router's own assignment**, as the B4 replay recorded it in
+C1, never recomputed: it is the one B5 will make. The cheap_alt replay is grouped by the same
+assignment, invocation by invocation.
+
+**Cheapest**, per cluster: the mean cost per invocation on that cluster's calib calls, retries
+included: J3's `standard` price for cheap_alt; J8's cost per request for the SLM, at the lowest
+utilization of `cost.utilizations` (the most expensive SLM, so the SLM is preferred only when it is
+cheaper even there).
+"""
+from typing import Any, Callable, Dict, List, Optional
+
+from bench.contracts.facts import read_fact, write_fact
+from bench.judge import j2, j3
+from bench.judge.base import (Identity, JudgmentError, calls_of, invocations, read_result, reference, require_done,
+                              result_reference, write_result)
+
+JUDGMENT = "J7"
+ENGINES = ("cheap_alt", "slm")
+NonInferiority = Callable[..., Dict[str, Any]]
+
+
+def plain(value: Any) -> Any:
+    """J4's output as plain JSON values (a numpy scalar has `.item()`)."""
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    return value.item() if hasattr(value, "item") else value
+
+
+def passes(entry: Optional[Dict[str, Any]], noninferiority: NonInferiority, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether one engine passes on one cluster, and why."""
+    if entry is None:
+        return {"passes": False, "why": "no calib call in this cluster"}
+    verdict: Dict[str, Any] = {"passes": True, "why": []}
+    if entry["gold"]:
+        gold = entry["gold"]
+        test = plain(noninferiority(gold["by_question"]["teacher"], gold["by_question"]["replay"],
+                                    settings["delta_cap_pp"], settings["seed"], settings["n_boot"]))
+        ok = gold["n"] >= settings["min_calls"] and test["testable"] and test["ci_low"] >= -test["delta"] / 2
+        verdict["gold"] = {"n": gold["n"], "ex_engine": gold["ex_replay"], "ex_teacher": gold["ex_teacher"],
+                           "j4": test, "passes": bool(ok)}
+        if not ok:
+            verdict["why"].append("gold: fewer calls than allocation.min_calls" if gold["n"] < settings["min_calls"] else
+                                  "gold: not testable" if not test["testable"] else "gold: not non-inferior at Δ/2")
+    if entry["agreement"]:
+        agreement = entry["agreement"]
+        ok = agreement["n"] >= settings["min_calls"] and agreement["rate"] is not None \
+            and agreement["rate"] >= settings["concordance_min"]
+        verdict["agreement"] = {"n": agreement["n"], "rate": agreement["rate"], "passes": bool(ok), "proxy": True}
+        if not ok:
+            verdict["why"].append("agreement: fewer calls than allocation.min_calls" if agreement["n"] < settings["min_calls"]
+                                  else "agreement: below thresholds.concordance_min")
+    verdict["passes"] = not verdict["why"]
+    verdict["why"] = "; ".join(verdict["why"]) or "passes"
+    return verdict
+
+
+def allocate(clusters: List[str], evidence: Dict[str, Dict[str, Dict[str, Any]]], costs: Dict[str, Dict[str, float]],
+             noninferiority: NonInferiority, settings: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """{cluster: {"engine", "order", "evidence"}}; `evidence` is {engine: J2 compare by cluster},
+    `costs` is {cluster: {engine: mean cost per invocation}}."""
+    out = {}
+    for cluster in sorted(clusters):
+        order = sorted(costs.get(cluster, {}), key=lambda e: (costs[cluster][e], e))
+        verdicts = {engine: passes(evidence[engine].get(cluster), noninferiority, settings) for engine in ENGINES}
+        chosen = next((engine for engine in order if verdicts[engine]["passes"]), "production_llm")
+        out[cluster] = {"engine": chosen, "order": order, "costs": costs.get(cluster, {}), "evidence": verdicts}
+    return out
+
+
+# ---------------------------------------------------------------- reading the executions
+
+def router_clusters(b4_calls: List[dict], clusters: List[str]) -> Dict[Identity, str]:
+    assigned = {}
+    for identity, attempts in invocations(b4_calls).items():
+        cluster = attempts[0]["cluster"]
+        if cluster not in clusters:
+            raise JudgmentError(f"the B4 replay assigned {identity} to {cluster!r}, not a cluster of the centroids")
+        assigned[identity] = cluster
+    return assigned
+
+
+def mean_costs(calls: List[dict], cluster_of: Dict[Identity, str], prices: Dict[str, Any],
+               slm_per_request: Optional[float]) -> Dict[str, float]:
+    by_cluster: Dict[str, List[dict]] = {}
+    for identity, attempts in invocations(calls).items():
+        if identity in cluster_of:
+            by_cluster.setdefault(cluster_of[identity], []).append(attempts)
+    out = {}
+    for cluster, groups in by_cluster.items():
+        flat = [a for attempts in groups for a in attempts]
+        if slm_per_request is not None:
+            out[cluster] = slm_per_request * len(flat) / len(groups)
+        else:
+            out[cluster] = j3.price_calls(flat, prices)["api"]["standard"] / len(groups)
+    return out
+
+
+def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teacher_eval_run_id: str,
+        j8_path: str, config: Dict[str, Any], noninferiority: Optional[NonInferiority] = None):
+    """`replays` is {"cheap_alt": (replay run, per-call eval run), "slm": (B4 replay run, per-call eval run)}.
+    Returns (result path, fact path)."""
+    if set(replays) != set(ENGINES):
+        raise JudgmentError(f"J7 needs a calib replay of each of {ENGINES}")
+    if config["allocation"].get("min_calls") is None:
+        raise JudgmentError("allocation.min_calls is not set: 'enough evidence' must be pre-registered")
+    if noninferiority is None:
+        from bench.judge.j4 import noninferiority  # F2's J4
+    centroids, centroids_sha = read_fact(centroids_path, "centroids")
+    adapters, adapters_sha = read_fact(adapters_path, "adapters")
+    if adapters["centroids"] != centroids_sha or set(adapters["adapters"]) != set(centroids["clusters"]):
+        raise JudgmentError("the adapters were not trained on these centroids, one per cluster")
+    clusters = sorted(centroids["clusters"])
+
+    b4_run, _ = replays["slm"]
+    b4 = require_done(b4_run, type="replay", arm="B4", split="calib")
+    recorded = b4.get("facts") or {}
+    if recorded and (recorded.get("centroids"), recorded.get("adapters")) != (centroids_sha, adapters_sha):
+        raise JudgmentError(f"{b4_run} was routed with other centroids or adapters than these")
+    cluster_of = router_clusters(calls_of(b4_run), clusters)
+    group = lambda identity, attempts: cluster_of.get(identity)  # noqa: E731
+
+    j8 = read_result(j8_path, "J8")["result"]
+    lowest = j3.utilization_label(min(config["cost"]["utilizations"]))
+    evidence, costs, reads = {}, {}, {"teacher_eval": reference(teacher_eval_run_id), "j8": result_reference(j8_path)}
+    for engine in ENGINES:
+        replay_run, eval_run = replays[engine]
+        run_reads, teacher, replay, replay_eval, teacher_eval, found = j2.replay_inputs(replay_run, eval_run, teacher_eval_run_id)
+        if found.get("split") != "calib":
+            raise JudgmentError(f"{replay_run} is on {found.get('split')!r}: S6 allocates on calib only")
+        if engine == "cheap_alt" and found.get("engine") != "cheap_alt":
+            raise JudgmentError(f"{replay_run} did not run on cheap_alt")
+        missing = set(invocations(teacher)) - set(cluster_of)
+        if missing:
+            raise JudgmentError(f"the B4 replay did not route {len(missing)} teacher invocations, e.g. {sorted(missing)[:2]}")
+        evidence[engine] = j2.compare(teacher, replay, replay_eval, teacher_eval, group)
+        for cluster, cost in mean_costs(replay, cluster_of, config["prices"],
+                                        j8["cost_per_request"][lowest] if engine == "slm" else None).items():
+            costs.setdefault(cluster, {})[engine] = cost
+        reads[engine] = run_reads
+    settings = {"delta_cap_pp": config["thresholds"]["delta_cap_pp"], "seed": config["seeds"]["bootstrap"],
+                "n_boot": config["noninferiority"]["n_boot"], "min_calls": config["allocation"]["min_calls"],
+                "concordance_min": config["thresholds"]["concordance_min"]}
+    decided = allocate(clusters, evidence, costs, noninferiority, settings)
+    fact = write_fact(JUDGMENT, "allocation", {"centroids": centroids_sha, "adapters": adapters_sha,
+                                                "allocation": {c: d["engine"] for c, d in decided.items()}})
+    result = {"allocation": {c: d["engine"] for c, d in decided.items()}, "clusters": decided,
+              "centroids": centroids_sha, "adapters": adapters_sha, "allocation_fact": {"sha256": fact.parent.name},
+              "slm_cost_utilization": lowest, "settings": settings}
+    return write_result(JUDGMENT, reads, result), fact
