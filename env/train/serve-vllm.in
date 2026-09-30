@@ -1,0 +1,4 @@
+# The vLLM serving image (modal_apps/serve_vllm.py), Linux x86_64 only. vLLM pins its torch; the lock pins the
+# rest, transformers above all (it renders the chat template the server applies).
+#   uv pip compile --python-platform x86_64-manylinux_2_28 --python-version 3.12 env/train/serve-vllm.in -o env/train/serve-vllm.lock
+vllm==0.30.0

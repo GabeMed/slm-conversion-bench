@@ -51,7 +51,8 @@ def make_repo(tmp_path: Path, monkeypatch, base_config: str = "configs/smoke-loc
     dev = [{"question_id": q, "db_id": "tiny", "question": "How many gas stations in CZE are Premium?",
             "evidence": None, "difficulty": "simple", "SQL": GOLD} for q in (1, 2, 3)]
     test = [{"question_id": "9", "db_id": "tiny", "question": "?", "evidence": "", "SQL": "SELECT 9"}]
-    for name, items in (("bird_dev_questions", dev), ("plat_sql_test", test)):
+    mini_dev = [{"question_id": 9, "db_id": "tiny", "difficulty": "simple"}]  # the test ids' difficulty
+    for name, items in (("bird_dev_questions", dev), ("plat_sql_test", test), ("mini_dev", mini_dev)):
         path = paths.RAW / f"{name}.json"
         path.write_text(json.dumps(items))
         config["data"][name]["sha256"] = sha256(path)

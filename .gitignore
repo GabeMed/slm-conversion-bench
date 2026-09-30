@@ -16,4 +16,9 @@ data/models
 
 # run outputs (facts); test-split registry entries are committed explicitly
 runs/
+
+# S5: adapters (weights, ~100 MB each) and their datasets (teacher outputs: whether they may be published is
+# the author's call)
+train/adapters/
+train/datasets/
 *.egg-info/

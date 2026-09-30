@@ -62,6 +62,8 @@ class SystemState(BaseModel):
             Dict[str, Any]: A dictionary with the status of missing tables and columns.
         """
         ground_truth_sql = self.task.SQL
+        if ground_truth_sql is None:  # PATCH 13 (slm-conversion-bench): the gold never enters the agent's state
+            return {}
         correct_columns = DatabaseManager().get_sql_columns_dict(sql=ground_truth_sql)
         missing_tables = []
         missing_columns = []

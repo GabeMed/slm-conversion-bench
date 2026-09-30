@@ -18,20 +18,34 @@ roles:
     params: {max_tokens: 4096, timeout_s: 600}
   slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
     # served under `name` (--served-model-name); adapters under their own served names
+    # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
+    # `chat_template_kwargs`: how the template renders, the same when serving and training (thinking off);
+    # `endpoint.headers_env`: each header sent with the value of its environment variable (Modal proxy auth);
+    # `endpoint.api_key_env`: vLLM's own key, the second layer (the value stored as VLLM_API_KEY in the Modal secret)
     - name: qwen3-8b
       base: Qwen3-8B
-      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      hf: {repo: Qwen/Qwen3-8B, revision: b968826d9c46dd6066d109eabc6255188de91218}
+      chat_template_kwargs: {enable_thinking: false}
+      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
+                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
     - name: granite-4.2-8b
       base: Granite-4.2-8B
-      endpoint: {kind: vllm, base_url: null, api_key_env: null}
+      hf: {repo: ibm-granite/granite-4.2-8b, revision: f8de16cdcdbc6c779ca517604e050d82cc119e44}
+      chat_template_kwargs: {enable_thinking: false}
+      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
+                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
       params: {max_tokens: 4096, timeout_s: 600}
   slm_reserve: [Nemotron-3-Nano-4B]
+  slm_reserve_hf:              # F3: its weights, pinned; a hybrid (Mamba) model with no gate_proj, so
+                               # promoting it needs its own train.lora.target_modules (bench train refuses a module it lacks)
+    Nemotron-3-Nano-4B: {repo: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16, revision: dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f}
 
 # CHESS IR -> SS -> CG, as published (run/configs/CHESS_IR_SS_CG.yaml), with every engine routed
 # by C4. Temperatures live in `call_sites`, never here.
 agent:
   setting_name: CHESS_IR_SS_CG
+  max_workers: 8               # LLM calls of one step in flight at once (patch 9); published: unbounded
   # the order the agents run in (CHESS takes it from the order of team_agents, which a serializer
   # may sort; it is explicit here, and part of the configuration's identity)
   team_order: [information_retriever, schema_selector, candidate_generator]
@@ -89,11 +103,15 @@ call_sites:                    # CHESS published temperatures, per call site
 
 retries:
   parse_max_attempts: 2        # CHESS published 12 identical retries; every attempt is logged (C1)
+  http_max_attempts: 6         # patch 5b: 429, 5xx, timeouts and connection errors, retried with backoff;
+  http_backoff_s: {base: 2, max: 60}  # wait: random in [1/2, 1] x min(max, base * 2^(n-1)); one attempt
+                                      # counter with the parse retries, every attempt logged (C1)
 
 seeds:
   calib_split: 20260930
   schema_shuffle: 20260930
   bootstrap: 20260930
+  few_shot: 20260930           # B1's examples (arms.B1.few_shot)
 
 splits:
   calib_size: 200
@@ -112,6 +130,9 @@ embeddings:                    # retrieval inside CHESS (not an LLM call)
   entity_model: text-embedding-3-small
   context_model: text-embedding-3-large
   fake_size: 64
+  local:                       # provider `local` (patch 10b): sentence-transformers on CPU, pinned
+    model: sentence-transformers/all-MiniLM-L6-v2
+    revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
 
 preprocess:                    # CHESS run/run_preprocess.sh, as published
   signature_size: 100
@@ -130,15 +151,89 @@ data:
   plat_sql_test:               # Arcwise-Plat-SQL, 498 questions, used as in the file (D14)
     url: https://raw.githubusercontent.com/uiuc-kang-lab/text_to_sql_benchmarks/fe766045c55b6875a43b30e9ac7683df5582f8cf/data/arcwise_plat_sql_only_with_diff.json
     sha256: e7bf76408f99266506ea558d84982c69422e5db3dfecab5f08a3a8d3900e8395
+  mini_dev:                    # BIRD Mini-Dev (SQLite), 500 questions: only the difficulty of the test ids (F2)
+    url: https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/f65faf4ae3b638c1fa6df1d3370c8d92c8366301/data/mini_dev_sqlite-00000-of-00001.json
+    sha256: 88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2
 
 eval:
   timeout_s: 60
-  fixed_date: null             # F2: pre-registered date substituted for 'now' in pred and gold
+  fixed_date: "2026-09-30"     # F2: 'now' in pred and gold is this date at 00:00 UTC (quoted: a YAML date breaks the hash)
+
+stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are in thresholds and seeds
+  n_boot: 10000                # paired-bootstrap resamples for the one-sided lower bound
+  pilot_size: 50               # calibration ids that measure d before the test (bench.data.pilot_sample)
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
+  B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
+    few_shot: {k: 3, source_run: null}  # k teacher examples per call site from a done B0 run on train (run id); before runs
   B3: {choice: null}           # J6 (S4)
   B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
   B5: {choice: null, centroids: null, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
+
+# F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
+# bench/preflight.py). Values are proposals; the author confirms them before runs.
+modal:
+  gpu_prices:                  # modal.com/pricing, per GPU-second; the manifests' cost = seconds x price
+    as_of: "2026-09-30"
+    usd_per_s: {L40S: 0.000542, H100: 0.001097}
+  volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
+  secrets:
+    vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
+    proxy_auth: slm-bench-proxy-auth       # holds the variables the candidates' headers_env names (a Modal proxy auth token),
+                                           # for the load client that runs in Modal
+    hf_token: null                         # the pinned candidates are ungated
+  apps: {serve: slm-bench-serve, train: slm-bench-train, loadtest: slm-bench-loadtest}
+
+serving:                       # vLLM, one candidate per server, its adapters beside it (modal_apps/serve_vllm.py)
+  vllm_version: 0.30.0
+  base_image: nvidia/cuda:13.0.3-devel-ubuntu24.04   # CUDA 13, as vLLM 0.30's wheels
+  gpu: L40S
+  cpu: 8
+  max_model_len: 32768
+  gpu_memory_utilization: 0.90
+  prefix_caching: true         # SPEC 6.6: the load test runs with the prefix cache on
+  generation_config: vllm      # only the request's parameters apply, never the model's sampling defaults
+  max_concurrent_requests: 256 # per container; above it the Modal proxy answers 503
+  # min_containers and scaledown_window_s change no output: they live in modal_apps/deploy.yaml (and env
+  # overrides), so they can change after `bench prereg` without touching this file
+  startup_timeout_s: 1800
+  download_timeout_s: 3600
+  warmup_timeout_s: 600
+  unauthenticated: false       # Modal proxy auth (the candidates' headers_env); the server refuses to start with neither
+                               # proxy auth nor a VLLM_API_KEY
+
+train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
+  gpu: L40S
+  timeout_s: 21600
+  seed: 20260930
+  precision: bf16              # on a GPU; a CPU run trains in float32
+  lora: {r: 16, alpha: 32, dropout: 0.05,
+         target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]}
+  sft:
+    learning_rate: 2.0e-4
+    num_train_epochs: 2
+    max_steps: null            # set only to cut a run short (the CPU acceptance run)
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    max_length: 32768          # = serving.max_model_len; a longer row is refused, never truncated
+    lr_scheduler_type: cosine
+    warmup_steps: 0.03         # a fraction of the steps
+    gradient_checkpointing: true
+    logging_steps: 10
+
+loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's input
+  aiperf_version: 0.13.0
+  concurrency: [1, 4, 8, 16, 32]   # one run per level
+  request_count: 500           # per level: that many calls, each level its own (no prompt replayed twice,
+  warmup_request_count: 20     # so the prefix cache holds only what real traffic would share); warm-up calls apart
+  stream: false                # the agent does not stream (bench/agent/hooks.py): latency is the whole request
+  request_timeout_s: 600
+  ready_timeout_s: 1800        # a cold server loads its weights before the first answer
+  client: {cpu: 4, timeout_s: 7200}   # the Modal container that runs AIPerf beside the server
+
+preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
+  lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
+  schedule: {train_hours_max: 12}   # all adapters must train overnight (SPEC 7.3, Day 1 night)
 
 # ---------------------------------------------------------------- F4: S2, S3, the judgments, the report
 # (bench/curate.py, bench/embed.py, bench/judge/j2-j8, bench/report.py). `prices.table` above is read

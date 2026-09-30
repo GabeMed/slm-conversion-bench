@@ -6,8 +6,10 @@ must have parsed), in this order, with the count of each step, overall and per c
 
 1. **Success filter, with a production signal, never the gold.** SQL generation and repair: the SQL
    the agent took from the output runs without error on the question's database (read-only, with a
-   timeout) and returns at least one row. Every other call site: the output parsed, which is the
-   agent's own format check (C1 `parsed_ok`).
+   timeout, through the evaluator's own `execute`) and returns at least one row. The date it runs at
+   is the pre-registered `eval.fixed_date` of the source's configuration, the one the evaluator
+   substitutes for 'now', so a query about "today" means the same day in curation and in scoring.
+   Every other call site: the output parsed, which is the agent's own format check (C1 `parsed_ok`).
 2. **Masking of sensitive data** by the regular expressions of `config.yaml › curation.mask`, in the
    prompt and in the completion alike, with the number of detections per pattern. Applied after the
    filter, so the SQL that is executed is the one the agent executed. A SQL completion that masking
@@ -211,6 +213,7 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
     settings = config["curation"]
     calls: List[dict] = []
     databases: Dict[str, Path] = {}  # question id -> the pinned SQLite file of its database
+    days = set()  # the pre-registered date the SQL runs at
     seen_questions: set = set()
     for run_id in source_run_ids:
         found = require_done(run_id, type="agent", arm="B0", split="train")
@@ -219,6 +222,9 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
             raise CurationError(f"the configuration snapshot of {run_id} does not match its manifest")
         _teacher_may_train(snapshot)
         barrier.ensure_split_allowed("train", snapshot)
+        if not (snapshot.get("eval") or {}).get("fixed_date"):
+            raise CurationError(f"{run_id}'s configuration has no eval.fixed_date: the SQL has no pre-registered day to run at")
+        days.add(snapshot["eval"]["fixed_date"])
         overlap = seen_questions & set(found["question_ids"])
         if overlap:
             raise CurationError(f"{run_id} repeats questions of another source: {sorted(overlap, key=int)[:5]}")
@@ -233,10 +239,14 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
             data.check_database(snapshot, db_id)
         databases.update({q: paths.sqlite_path(snapshot, questions[q]["db_id"]) for q in found["question_ids"]})
 
+    if len(days) > 1:
+        raise CurationError(f"the sources were run under different fixed dates {sorted(days)}")
+    day = days.pop()
     from bench.evaluate import execute
 
     def run_sql(question_id: str, sql: str):
-        return execute(databases[question_id], sql, settings["sql_timeout_s"])
+        rows, error, _ = execute(databases[question_id], sql, settings["sql_timeout_s"], day)
+        return rows, error
 
     started = datetime.now(timezone.utc)
     examples, counts = curate(calls, settings, run_sql)

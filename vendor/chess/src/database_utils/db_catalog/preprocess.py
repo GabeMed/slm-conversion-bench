@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import logging
-from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain.schema.document import Document
 from langchain_google_vertexai import VertexAIEmbeddings
@@ -11,7 +10,7 @@ import vertexai
 
 from database_utils.db_catalog.csv_utils import load_tables_description
 
-load_dotenv(override=True)
+# PATCH 14 (slm-conversion-bench): no .env is loaded; the harness alone sets the environment
 
 GCP_PROJECT = os.getenv("GCP_PROJECT")
 GCP_REGION = os.getenv("GCP_REGION")
@@ -67,6 +66,7 @@ def make_db_context_vec_db(db_directory_path: str, **kwargs) -> None:
 
     vector_db_path.mkdir(exist_ok=True)
 
-    Chroma.from_documents(docs, hooks.embeddings("context"), persist_directory=str(vector_db_path))
+    Chroma.from_documents(docs, hooks.embeddings("context"), persist_directory=str(vector_db_path),
+                          client_settings=hooks.chroma_settings(vector_db_path))  # PATCH 14: no .env
 
     logging.info(f"Context vector database created at {vector_db_path}")

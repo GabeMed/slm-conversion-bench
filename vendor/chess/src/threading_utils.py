@@ -2,6 +2,8 @@ import queue
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
+from bench.agent import hooks  # PATCH 9 (slm-conversion-bench): bounded concurrency from the configuration
+
 def _threaded(func):
     """
     A function that adds threading capabilities to a function.
@@ -36,7 +38,8 @@ def ordered_concurrent_function_calls(call_list: list) -> list:
         list: A list of results from the functions.
     """
     result_queue = queue.Queue()
-    with ThreadPoolExecutor(max_workers=len(call_list)) as executor:
+    # PATCH 9: at most `agent.max_workers` calls in flight, and never a pool of size 0
+    with ThreadPoolExecutor(max_workers=max(1, min(len(call_list), hooks.max_workers()))) as executor:
         for idx, call in enumerate(call_list):
             func = _threaded(call['function'])
             kwargs = call['kwargs']

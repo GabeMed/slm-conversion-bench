@@ -75,9 +75,13 @@ def test_exhausted_retries_raise_and_empty_output_is_not_a_fallback(run):
 
 
 def test_invocation_error_is_logged_then_raised(run):
+    import httpx
+    import openai
     model, calls_path, _ = run
-    model.script = [TimeoutError("read timed out")]
-    with pytest.raises(TimeoutError):
+    rejected = openai.BadRequestError("context length exceeded", body=None,
+                                      response=httpx.Response(400, request=httpx.Request("POST", "http://x")))
+    model.script = [rejected]  # the engine rejects this request: the model's failure (a closed set, F1 5b)
+    with pytest.raises(openai.BadRequestError):
         hooks.invoke_tool_call("filter_column", "schools.County", [HumanMessage(content="q")], JsonOutputParser())
     (line,) = read_calls(calls_path)
     assert line["response_text"] is None and line["usage"]["source"] == "missing"
@@ -203,8 +207,10 @@ def test_openai_embeddings_without_a_key_are_refused(monkeypatch):
 
 def test_model_error_text_is_scrubbed_of_local_paths(run):
     model, calls_path, _ = run
-    model.script = [OSError(f"cannot open {paths.ROOT}/secret/file")]
-    with pytest.raises(OSError):
+    model.script = [OSError(f"cannot open {paths.ROOT}/secret/file")]  # unrecognised: the harness's failure
+    with pytest.raises(hooks.HarnessError):
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     (line,) = read_calls(calls_path)
     assert str(paths.ROOT) not in line["error"] and "<repo>/secret/file" in line["error"]
+    (recorded,) = hooks.take_harness_errors()
+    assert str(paths.ROOT) not in recorded and "<repo>/secret/file" in recorded

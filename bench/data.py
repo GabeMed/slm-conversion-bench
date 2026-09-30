@@ -1,11 +1,15 @@
 """`bench data`: download the pinned inputs, check their sha256, and write the hashes and splits.
 
 Facts produced (committed): `data/MANIFEST.json` (the hash of every input and of every database
-file) and `data/splits.json` (train, calib, test, excluded). The inputs themselves stay out of git.
+file; `gold_check`, the golds that fail with an execution error on those databases, which
+reproduces on any machine and is guarded; `gold_observed`, what the recording machine saw, never
+compared) and `data/splits.json` (train, calib, test, excluded). The inputs themselves stay out of git. The test questions carry the difficulty of
+the Mini-Dev, which Arcwise-Plat-SQL does not have.
 """
 import hashlib
 import json
 import shutil
+import sqlite3
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -16,6 +20,7 @@ from bench import barrier, paths
 SPLIT_NAMES = ("train", "calib", "test")
 BIRD_DEV_SIZE = 1534
 MINI_DEV_SIZE = 500
+DIFFICULTIES = ("simple", "moderate", "challenging")
 
 
 class DataError(RuntimeError):
@@ -98,15 +103,54 @@ def _dev_questions(config: dict) -> List[dict]:
 
 
 def _test_questions(config: dict) -> List[dict]:
-    """The raw test file. Only `bench data` reads it directly (for the ids of the splits); every
-    execution goes through `questions_for`, which applies the test barrier."""
-    return _read_pinned(config, "plat_sql_test")
+    """The raw test file, with the Mini-Dev difficulty. Only `bench data` reads it directly (for the
+    ids of the splits and the gold check); every execution goes through `questions_for`, which
+    applies the test barrier."""
+    return attach_difficulty(_read_pinned(config, "plat_sql_test"), _read_pinned(config, "mini_dev"))
+
+
+def attach_difficulty(test: List[dict], mini_dev: List[dict]) -> List[dict]:
+    """Each test question with the difficulty the Mini-Dev gives its id (BIRD dev's own label
+    differs for some ids, so the source is pinned)."""
+    difficulty = {q["question_id"]: q["difficulty"] for q in mini_dev}
+    missing = [q["question_id"] for q in test if q["question_id"] not in difficulty]
+    if missing:
+        raise DataError(f"test ids with no Mini-Dev difficulty: {missing[:10]}")
+    return [{**q, "difficulty": difficulty[q["question_id"]]} for q in test]
+
+
+def check_mini_dev(test: List[dict], excluded: List[str], mini_dev: List[dict]) -> None:
+    """The test ids plus the exclusions are exactly the Mini-Dev ids (`build_splits` checks there
+    are 500 of them), on the same databases."""
+    ids = [q["question_id"] for q in mini_dev]
+    if len(set(ids)) != len(ids):
+        raise DataError("duplicate ids in the Mini-Dev")
+    expected = {q["question_id"] for q in test} | set(excluded)
+    if set(ids) != expected:
+        raise DataError(f"test ids plus exclusions differ from the Mini-Dev ids: only in the Mini-Dev "
+                        f"{sorted(set(ids) - expected)[:10]}, only in test or exclusions {sorted(expected - set(ids))[:10]}")
+    mini_db = {q["question_id"]: q["db_id"] for q in mini_dev}
+    mismatched = [q["question_id"] for q in test if mini_db[q["question_id"]] != q["db_id"]]
+    if mismatched:
+        raise DataError(f"db_id differs between the Mini-Dev and the test set for ids {mismatched[:10]}")
+    unknown = sorted({q["difficulty"] for q in mini_dev} - set(DIFFICULTIES))
+    if unknown:
+        raise DataError(f"unknown difficulty in the Mini-Dev: {unknown}")
 
 
 def calib_sample(pool: List[str], size: int, seed: int) -> List[str]:
     """The calibration ids: the `size` ids of the pool with the smallest sha256("<seed>:<id>").
     Independent of the Python version, unlike `random.sample`."""
     ranked = sorted(pool, key=lambda q: hashlib.sha256(f"{seed}:{q}".encode()).hexdigest())
+    return sorted(ranked[:size], key=int)
+
+
+def pilot_sample(calib: List[str], size: int, seed: int) -> List[str]:
+    """The pilot (SPEC 6.4: the calibration questions that measure d before the test): the `size`
+    calibration ids with the smallest sha256("<seed>:pilot:<id>"), a draw of its own."""
+    if not 0 < size <= len(calib):
+        raise DataError(f"a pilot of {size} ids needs that many calibration ids, there are {len(calib)}")
+    ranked = sorted(calib, key=lambda q: hashlib.sha256(f"{seed}:pilot:{q}".encode()).hexdigest())
     return sorted(ranked[:size], key=int)
 
 
@@ -161,12 +205,42 @@ def run(config: dict) -> dict:
             changed = sorted(db for db in set(recorded) | set(db_hashes) if recorded.get(db) != db_hashes.get(db))
             raise DataError(f"database files differ from data/MANIFEST.json: {changed} "
                             f"(delete {paths.bird_root(config)} and run `bench data` again)")
-    splits = build_splits(config, _dev_questions(config), _test_questions(config))
+    from bench.evaluate import check_golds, fixed_date  # evaluate imports this module
+    dev, test = _dev_questions(config), _test_questions(config)
+    splits = build_splits(config, dev, test)
+    check_mini_dev(test, config["splits"]["excluded"], _read_pinned(config, "mini_dev"))
     check_splits_unchanged(splits)
-    manifest = {"inputs": inputs, "databases": db_hashes}
+    by_id = {q["question_id"]: q for q in dev}
+    questions = {"train": [by_id[q] for q in splits["train"]], "calib": [by_id[q] for q in splits["calib"]],
+                 "test": sorted(test, key=lambda q: int(q["question_id"]))}
+    check = check_golds(questions, lambda db_id: paths.sqlite_path(config, db_id),
+                        config["eval"]["timeout_s"], fixed_date(config))
+    registered, observed = check["registered"], check["observed"]
+    recorded = json.loads(paths.DATA_MANIFEST.read_text()) if paths.DATA_MANIFEST.exists() else {}
+    if "gold_check" in recorded:
+        if _gold_identity(recorded["gold_check"]) != _gold_identity(registered):
+            then = (recorded.get("gold_observed") or {}).get("sqlite_version")
+            raise DataError(f"the gold check differs from data/MANIFEST.json: (fixed date, golds checked, golds failing "
+                            f"with an execution error) {_gold_identity(recorded['gold_check'])} recorded, "
+                            f"{_gold_identity(registered)} now; SQLite {then} then, {sqlite3.sqlite_version} now. "
+                            f"data/MANIFEST.json is left as recorded. If the SQLite here lacks what the golds use, "
+                            f"use another; if the data changed on purpose, remove gold_check and gold_observed to "
+                            f"record them anew: the pre-registration hashes this file")
+        # the same fact: keep the file byte for byte (an error's wording and this machine's observations may differ)
+        registered, observed = recorded["gold_check"], recorded.get("gold_observed", observed)
+    manifest = {"inputs": inputs, "databases": db_hashes, "gold_check": registered, "gold_observed": observed}
     paths.DATA_MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     paths.SPLITS.write_text(json.dumps(splits, indent=1) + "\n")
-    return {"databases": len(db_hashes), **{k: len(splits[k]) for k in SPLIT_NAMES}}
+    return {"databases": len(db_hashes), **{k: len(splits[k]) for k in SPLIT_NAMES},
+            "gold_errors": len(registered["errors"]),  # this machine's observations, as it ran:
+            "gold_timeouts": len(check["observed"]["timeouts"]), "gold_empty": len(check["observed"]["empty"])}
+
+
+def _gold_identity(gold_check: dict) -> tuple:
+    """What the gold check registers: the date, the counts, and which golds fail with an error."""
+    errors = gold_check.get("errors")
+    return (gold_check.get("fixed_date"), gold_check.get("checked"),
+            None if errors is None else sorted((e["split"], e["question_id"]) for e in errors))
 
 
 def load_splits() -> dict:

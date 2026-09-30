@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from database_utils.execution import execute_sql
 from database_utils.db_info import get_db_schema
 from database_utils.schema import DatabaseSchema, get_primary_keys
+from bench.agent import hooks  # PATCH 8 (slm-conversion-bench): the shuffling seed from the configuration
 
 class DatabaseSchemaGenerator:
     """
@@ -321,9 +322,12 @@ class DatabaseSchemaGenerator:
             str: The generated schema string.
         """
         ddl_commands = self._extract_create_ddl_commands()
+        # PATCH 8: seeded, and one generator per call, so the order depends neither on the global
+        # random state nor on which thread asked first
+        rng = random.Random(hooks.config()["seeds"]["schema_shuffle"])
         if shuffle_tables:
             ddl_tables = list(ddl_commands.keys())
-            random.shuffle(ddl_tables)
+            rng.shuffle(ddl_tables)
             ddl_commands = {table_name: ddl_commands[table_name] for table_name in ddl_tables}
             # ddl_commands = dict(random.sample(ddl_commands.items(), len(ddl_commands)))
         for table_name, ddl_command in ddl_commands.items():
@@ -337,7 +341,7 @@ class DatabaseSchemaGenerator:
             schema_lines = [f"CREATE TABLE {table_name}", "("]
             definitions = DatabaseSchemaGenerator._separate_column_definitions(column_definitions)
             if shuffle_cols:
-                definitions = random.sample(definitions, len(definitions))
+                definitions = rng.sample(definitions, len(definitions))
             for column_def in definitions:
                 column_def = column_def.strip()
                 if any(keyword in column_def.lower() for keyword in ["foreign key", "primary key"]):
