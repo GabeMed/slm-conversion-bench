@@ -66,6 +66,13 @@ def replay(source: List[dict], run_id: str, engine: str, quality: float, *, role
     return out
 
 
+def trained_on(config: Dict[str, Any], slm: str = "qwen3-8b") -> Dict[str, Any]:
+    """What an adapters fact records it was trained on: the candidate's pinned base and chat template (the
+    router refuses adapters trained on anything else)."""
+    candidate = next(c for c in config["roles"]["slm_candidates"] if c["name"] == slm)
+    return {"base_revision": candidate["hf"]["revision"], "chat_template_kwargs": candidate["chat_template_kwargs"]}
+
+
 def gold_correct(run_id_seed: str, quality: float) -> Callable[[dict], bool]:
     return lambda c: unit("gold", run_id_seed, c["question_id"], c["call_site"], c["invocation_key"]) < quality
 

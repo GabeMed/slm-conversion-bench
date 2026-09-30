@@ -8,7 +8,7 @@ from bench.judge import j7
 from bench.judge.base import JudgmentError, read_result, reference, relative, write_result
 from bench.judge.j4 import margin, noninferiority
 from fixtures.fake import repo, write_run
-from fixtures.world import GOLD_SITES, gold_correct, per_call_eval, replay, teacher
+from fixtures.world import GOLD_SITES, gold_correct, per_call_eval, replay, teacher, trained_on
 
 SETTINGS = {"delta_cap_pp": 5, "seed": 1, "n_boot": 2000, "min_calls": 5, "concordance_min": 0.95, "n_test": 400}
 
@@ -150,7 +150,7 @@ def allocation_world(tmp_path, monkeypatch):
     centroids = facts.write_fact("J5", "centroids", {"embedding": embedding, "clusters": {"c0": [1.0, 0.0], "c1": [0.0, 1.0]}})
     choice = facts.write_fact("J6", "choice", {"slm": "qwen3-8b"})
     adapters = facts.write_fact("S5", "adapters", {
-        "slm": "qwen3-8b", "choice": choice.parent.name, "centroids": centroids.parent.name,
+        "slm": "qwen3-8b", "choice": choice.parent.name, "centroids": centroids.parent.name, **trained_on(config),
         "adapters": {c: {"served_name": f"qwen3-8b-{c}", "sha256": c[1] * 64} for c in ("c0", "c1")}})
     t = teacher("agent-B0-calib", "calib", QUESTIONS)
     write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib"}, t)

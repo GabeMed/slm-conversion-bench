@@ -126,7 +126,7 @@ prices:
   table: {}
 
 embeddings:                    # retrieval inside CHESS (not an LLM call)
-  provider: openai             # recommendation; the author decides before runs
+  provider: openai             # decided by the author (2026-09-30)
   entity_model: text-embedding-3-small
   context_model: text-embedding-3-large
   fake_size: 64

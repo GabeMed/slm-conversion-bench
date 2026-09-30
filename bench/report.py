@@ -162,11 +162,28 @@ def _expected_facts(plan: Dict[str, Any], judged: Dict[str, Any]) -> Dict[str, s
     return expected
 
 
+def registration_in_force(split: str) -> Optional[str]:
+    """For a test report, the pre-registration in force (prereg/HASH), once the analysis code reading the
+    test is known to be the registered one (bench.prereg.check_registered_analysis_code): the readings
+    of SPEC §5 cannot change after the test without changing the registration."""
+    if split != "test":
+        return None
+    from bench import barrier
+    from bench.prereg import PreregError, check_registered_analysis_code
+    try:
+        check_registered_analysis_code(paths.ROOT)
+        return (paths.ROOT / barrier.PREREG_HASH).read_text().strip()
+    except (PreregError, OSError) as e:
+        raise JudgmentError(f"a test report is read only with the pre-registered analysis code: {e}") from e
+
+
 def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any], judged: Dict[str, Any],
-                       reads: Dict[str, Any], pilot_plan: Dict[str, str], expected: Dict[str, str]) -> Optional[List[str]]:
+                       reads: Dict[str, Any], pilot_plan: Dict[str, str], expected: Dict[str, str],
+                       in_force: Optional[str]) -> Optional[List[str]]:
     """A test report is bound to what the test registry recorded (SPEC 6.1, REQ-013):
-    - every arm's run, and the per-call evaluation's replay, is a `done` entry, and each
-      configuration's registered runs are all known (several of one configuration: no verdict);
+    - every arm's run, and the per-call evaluation's replay, is a `done` entry made under the
+      pre-registration in force (`in_force`), and each configuration's registered runs are all
+      known (several of one configuration: no verdict);
     - every trained arm's run (and the replay routed as B4) recorded the facts the plan's judgments
       name, and a plan without them is refused, never unchecked;
     - the per-call evaluation replays the plan's B0 run;
@@ -187,6 +204,9 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
         if entry is None or entry["status"] != "done":
             raise JudgmentError(f"{label}'s run {run_id} is not a done entry of the test registry "
                                 f"({'not registered' if entry is None else entry['status']})")
+        if entry["prereg_hash"] != in_force:
+            raise JudgmentError(f"{label}'s run {run_id} ran under pre-registration {entry['prereg_hash']}, not the one "
+                                f"in force ({in_force}): it is reported, never read for a verdict")
         key = (entry["type"], entry["arm"], entry["engine"], entry["prereg_hash"])
         same = sorted(r["run_id"] for r in registry["runs"] if (r["type"], r["arm"], r["engine"], r["prereg_hash"]) == key)
         return entry, (same if len(same) > 1 else None)
@@ -279,7 +299,9 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     if per_call and (per_call.get("mode"), per_call.get("arm"), per_call.get("split")) != ("replay", "B4", split):
         raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
     registry = test_registry()
-    replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged))
+    in_force = registration_in_force(split) if registry["available"] else None  # no registry: refused below
+    replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged),
+                                        in_force)
     coverage = None if not per_call else per_call.get("call_sites")
     uncovered = sorted(set(ROUTINE + GOLD_SITES) - set(coverage)) if coverage is not None else []
 
