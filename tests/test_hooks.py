@@ -259,7 +259,10 @@ def test_the_agent_package_switches_tracing_off_and_runs_drop_chroma_servers(mon
     importlib.reload(bench.agent)
     assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
     for name in ("DB_ROOT_PATH", "INDEX_SERVER_PORT", "ANONYMIZED_TELEMETRY", *runner.TRACING_OFF):
-        monkeypatch.setenv(name, os.environ.get(name, ""))  # restored after the test, whatever _prepare_chess sets
+        value = os.environ.get(name)  # restored after the test, whatever _prepare_chess sets; unset stays unset
+        monkeypatch.setenv(name, value if value is not None else "unset")
+        if value is None:
+            monkeypatch.delenv(name)
     monkeypatch.setattr(hooks, "_config", hooks._config)
     monkeypatch.setenv("CHROMA_SERVER_HOST", "vectors.example.com")
     monkeypatch.setenv("chroma_server_ssl_enabled", "true")  # Chroma reads its variables in any case

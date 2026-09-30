@@ -215,6 +215,9 @@ def test_what_is_committed_never_carries_a_header_credential(monkeypatch):
         "proxy refused <redacted> / <redacted>"
     used = runner.used_key_envs(config, ["slm:qwen3-8b+lora:c0-aa"], retrieval=False)
     assert set(used) == {"SLM_VLLM_API_KEY", "SLM_MODAL_KEY", "SLM_MODAL_SECRET"}
+    monkeypatch.setenv("SLM_MODAL_KEY", "wk-modal-key-0001")
+    monkeypatch.setenv("SLM_MODAL_SECRET", "wk-modal-key-0001-and-more")  # one value containing another
+    assert registry.redact("secret wk-modal-key-0001-and-more", config) == "secret <redacted>"
     monkeypatch.setenv("SLM_MODAL_SECRET", "short")
     with pytest.raises(barrier.TestSplitLocked, match="SLM_MODAL_SECRET"):
         registry.check_keys(used)

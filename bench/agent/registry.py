@@ -47,10 +47,9 @@ def redact(text: str, config: Dict[str, Any]) -> str:
     `credential_envs`), and anything shaped like a key (provider error bodies sometimes echo a
     masked one)."""
     from bench.contracts.config import credential_envs
-    for name in credential_envs(config):
-        value = os.environ.get(name)
-        if value and len(value) >= SECRET_MIN_LENGTH:
-            text = text.replace(value, "<redacted>")
+    values = {os.environ.get(name) for name in credential_envs(config)}
+    for value in sorted((v for v in values if v and len(v) >= SECRET_MIN_LENGTH), key=len, reverse=True):
+        text = text.replace(value, "<redacted>")  # the longest first: one value may contain another
     return _KEY_LIKE.sub("<redacted>", text)
 
 

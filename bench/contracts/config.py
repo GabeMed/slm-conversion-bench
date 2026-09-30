@@ -111,14 +111,16 @@ def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
     retries = config["retries"]
     if not number(retries.get("http_max_attempts"), 1, integer=True):
         errors.append("retries.http_max_attempts must be an integer >= 1")
-    backoff = retries.get("http_backoff_s") or {}
-    if not (number(backoff.get("base"), 0) and number(backoff.get("max"), 0)):
+    backoff = retries.get("http_backoff_s")
+    if not (isinstance(backoff, dict) and number(backoff.get("base"), 0) and number(backoff.get("max"), 0)):
         errors.append("retries.http_backoff_s needs base and max, numbers >= 0")
     if not number(config["agent"].get("max_workers"), 1, integer=True):
         errors.append("agent.max_workers must be an integer >= 1")
     if "few_shot" not in config["seeds"]:
         errors.append("seeds.few_shot is required")
-    few_shot = ((config.get("arms") or {}).get("B1") or {}).get("few_shot") or {}
+    b1 = (config.get("arms") or {}).get("B1")
+    few_shot = b1.get("few_shot") if isinstance(b1, dict) else None
+    few_shot = few_shot if isinstance(few_shot, dict) else {}
     if not number(few_shot.get("k"), 0, integer=True):
         errors.append("arms.B1.few_shot.k must be an integer >= 0")
     if few_shot.get("source_run") is not None and not isinstance(few_shot["source_run"], str):

@@ -61,6 +61,8 @@ def test_extends_cycle(tmp_path):
     lambda c: c["retries"].update(http_max_attempts=0),
     lambda c: c["seeds"].pop("few_shot"),
     lambda c: c["arms"]["B1"]["few_shot"].update(k=-1),
+    lambda c: c["arms"]["B1"].update(few_shot=3),
+    lambda c: c["retries"].update(http_backoff_s=2),
     lambda c: c["roles"]["slm_candidates"][0]["endpoint"].update(headers_env={"Modal-Key": ""}),
 ])
 def test_invalid_configs(mutate):
