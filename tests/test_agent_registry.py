@@ -185,10 +185,12 @@ def test_a_manifest_the_registry_cannot_commit_fails_the_run(repo, monkeypatch):
 
 
 def test_the_registry_is_pushed_by_what_a_fetch_finds_not_by_a_local_ref(repo):
-    """origin/main moved locally (or left ahead of a rewound remote) must not make a record look pushed."""
+    """origin/main moved locally (or left ahead of a rewound remote) must not make a record look pushed. In a
+    clone whose refspec does not map main no fetch corrects that ref, so only the fetched commit tells."""
     root, config_path = repo
     register(root, config_path)
     registry.registry_pushed()
+    git(root, "config", "--unset-all", "remote.origin.fetch")
     (root / "registry" / "test").mkdir(parents=True, exist_ok=True)
     (root / "registry" / "test" / "local-only.intent.json").write_text("{}\n")
     git(root, "add", "registry")
