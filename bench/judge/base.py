@@ -98,12 +98,6 @@ def final(attempts: List[dict]) -> dict:
     return attempts[-1]
 
 
-def parsed(attempts: List[dict]) -> Optional[dict]:
-    """The last attempt that parsed, which is the output the agent acted on; None when none did."""
-    ok = [a for a in attempts if a["parsed_ok"]]
-    return ok[-1] if ok else None
-
-
 def question_order(identity: Identity) -> Tuple[int, str, str]:
     question_id, call_site, key = identity
     return (int(question_id) if question_id.isdigit() else 0, call_site, key)

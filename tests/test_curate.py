@@ -197,3 +197,17 @@ def test_datasets_follow_the_s3_clusters_in_trl_shape(tmp_path, monkeypatch):
                                                                "clusters": ["c0"], "centroids": {"sha256": "cd" * 32}})
     with pytest.raises(CurationError, match="exactly the curated"):
         write_datasets(curated, str(wrong), str(config_path))
+
+
+def test_run_curate_refuses_overlapping_sources_and_a_changed_snapshot(tmp_path, monkeypatch):
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    first = b0_train_run(teacher_config(config), "agent-B0-train-a")
+    second = b0_train_run(teacher_config(config), "agent-B0-train-b")  # the same questions 1-3
+    with pytest.raises(CurationError, match="repeats questions"):
+        run_curate([first, second], str(config_path))
+    snapshot = paths.RUNS / first / "config.json"
+    changed = json.loads(snapshot.read_text())
+    changed["splits"]["calib_size"] = 7
+    snapshot.write_text(json.dumps(changed))
+    with pytest.raises(CurationError, match="does not match its manifest"):
+        run_curate([first], str(config_path))
