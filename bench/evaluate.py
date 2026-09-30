@@ -265,7 +265,8 @@ def check_golds(questions: Dict[str, List[dict]], db_path: Callable[[str], Path]
 def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, dict]]:
     """The run to score, its configuration snapshot and the gold of its split, after every check
     both kinds of eval share: the snapshot is the one the run hashed, the barrier opens for that
-    snapshot, a test run ran under the registration in force, and the run is `done`."""
+    snapshot, a test run ran under the registration in force, the run is `done`, and a test run
+    is scored by the analysis code that was registered."""
     source = paths.RUNS / source_run_id
     run_manifest = json.loads((source / "manifest.json").read_text())
     config = json.loads((source / "config.json").read_text())  # the run's own snapshot, not today's config.yaml
@@ -281,6 +282,13 @@ def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[st
     if run_manifest["status"] != "done":
         raise data.DataError(f"run {source_run_id} is {run_manifest['status']!r}, not 'done': "
                              f"an incomplete or failed run is never scored")
+    if split == "test":  # the run is scored by the analysis code that was registered, not by today's
+        from bench.prereg import analysis_code
+        registered = json.loads((paths.ROOT / barrier.PREREG_MANIFEST).read_text()).get("analysis_code") or {}
+        now = analysis_code(paths.ROOT)
+        changed = sorted(rel for rel in set(registered) | set(now) if registered.get(rel) != now.get(rel))
+        if changed:
+            raise data.DataError(f"the analysis code differs from the pre-registered one: {', '.join(changed[:10])}")
     return run_manifest, config, data.questions_for(config, split)
 
 

@@ -23,7 +23,10 @@ from bench.judge import j4
 
 # The analysis code the registration hashes, so no reading of the results changes without changing
 # prereg/HASH: every tracked file under these paths (bench/report.py once it exists).
-ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py")
+# every file whose code can change a score, a judgment or a verdict: the contracts too (agreement,
+# the C1 reader, the facts, the configuration) and the paths they resolve
+ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py", "bench/contracts",
+                 "bench/paths.py")
 REQUIRED_ANALYSIS = ("bench/judge/j4.py", "bench/evaluate.py", "bench/data.py")
 
 

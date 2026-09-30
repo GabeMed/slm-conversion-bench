@@ -52,6 +52,11 @@ def arm_facts(arm: str, config: Dict[str, Any]) -> Dict[str, tuple]:
             raise FactError(f"arms.{arm}: the adapters were trained on other centroids")
         if set(adapters["adapters"]) != set(centroids["clusters"]):
             raise FactError(f"arms.{arm}: the adapters' clusters are not the centroids' clusters")
+        candidate = next((c for c in config["roles"].get("slm_candidates") or [] if c["name"] == adapters["slm"]), {})
+        pinned = ((candidate.get("hf") or {}).get("revision"), candidate.get("chat_template_kwargs") or {})
+        trained = (adapters.get("base_revision"), adapters.get("chat_template_kwargs") or {})
+        if "base_revision" in adapters and trained != pinned:  # facts written before F3 carry no base identity
+            raise FactError(f"arms.{arm}: the adapters were trained on {trained}, the candidate is pinned to {pinned}")
     if "allocation" in facts:
         allocation = facts["allocation"][0]
         if (allocation["centroids"], allocation["adapters"]) != (facts["centroids"][1], facts["adapters"][1]):

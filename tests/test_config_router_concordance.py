@@ -290,3 +290,16 @@ def test_unparsed_never_agrees_and_gold_sites_refuse():
     for site in ("generate_candidate", "revise"):
         with pytest.raises(ValueError):
             agree(site, {"SQL": "x"}, {"SQL": "x"})
+
+
+def test_adapters_trained_on_other_weights_or_template_are_refused(arms, fact_root):
+    config, adapters = arms
+    candidate = next(c for c in config["roles"]["slm_candidates"] if c["name"] == "qwen3-8b")
+    pinned = {"base_revision": candidate["hf"]["revision"], "chat_template_kwargs": candidate["chat_template_kwargs"]}
+    same = _write("S5", "adapters", {**adapters, **pinned})[0]
+    alloc = _with(config, "B4", adapters=same)
+    assert route("B4", "select_tables", MSG, alloc).engine.startswith("slm:qwen3-8b+lora:")
+    for stale in ({**pinned, "base_revision": "0" * 40}, {**pinned, "chat_template_kwargs": {"enable_thinking": True}}):
+        path = _write("S5", "adapters", {**adapters, **stale})[0]
+        with pytest.raises(facts.FactError, match="pinned to"):
+            route("B4", "select_tables", MSG, _with(config, "B4", adapters=path))

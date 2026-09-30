@@ -288,15 +288,24 @@ def test_the_modal_key_holds_the_gpu_and_the_code_but_not_the_price_or_commit(tm
     assert len(code_sha256()) == 64
 
 
-def test_the_code_identity_changes_with_any_shipped_file(tmp_path):
+def test_the_code_identity_follows_the_training_code_only(tmp_path):
+    """A change to what a training runs trains again; a change elsewhere (a merge of the load test or the
+    report) must not make a detached training's result uncollectable and bill a second training."""
     from bench.train import code_sha256
 
-    for rel_path in ("bench/a.py", "modal_apps/b.py", "env/train/requirements.lock"):
+    for rel_path in ("bench/train.py", "bench/contracts/facts.py", "modal_apps/train.py", "modal_apps/common.py",
+                     "env/train/requirements.lock", "bench/loadtest.py", "bench/report.py", "modal_apps/serve_vllm.py"):
         (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel_path).write_text("x")
     before = code_sha256(tmp_path)
-    (tmp_path / "modal_apps/b.py").write_text("y")
-    assert code_sha256(tmp_path) != before
+    for unrelated in ("bench/loadtest.py", "bench/report.py", "modal_apps/serve_vllm.py"):
+        (tmp_path / unrelated).write_text("y")
+    assert code_sha256(tmp_path) == before
+    for training in ("bench/train.py", "bench/contracts/facts.py", "modal_apps/train.py", "modal_apps/common.py",
+                     "env/train/requirements.lock"):
+        (tmp_path / training).write_text("changed")
+        assert code_sha256(tmp_path) != before
+        before = code_sha256(tmp_path)
 
 
 def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monkeypatch):

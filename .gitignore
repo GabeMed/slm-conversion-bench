@@ -22,3 +22,6 @@ runs/
 train/adapters/
 train/datasets/
 *.egg-info/
+
+# generated reports (bench report): regenerated from judgments, never edited by hand
+reports/

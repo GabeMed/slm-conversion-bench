@@ -59,6 +59,8 @@ def _prepare_chess(config: Dict[str, Any], db_root: Path):
     os.environ.update(TRACING_OFF)
     for name in REDIRECTING_ENV:
         os.environ.pop(name, None)
+    for name in [n for n in os.environ if n.startswith("CHROMA_")]:  # e.g. CHROMA_SERVER_HOST: a remote vector DB
+        os.environ.pop(name)
     src = str(paths.VENDOR_CHESS / "src")
     if src not in sys.path:
         sys.path.insert(0, src)

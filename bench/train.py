@@ -11,7 +11,7 @@ trains with TRL/PEFT (`train_lora`: the same code on a local CPU and in the Moda
                                              was not redeployed answers 404 instead of serving the old adapter
 
 On Modal the run is detached and its result stored on the adapters volume under `modal_key` (the plan, the
-GPU and the code: every file of bench/ and modal_apps/ and the lock), so re-running the same command collects
+GPU and the training code with its lock), so re-running the same command collects
 it; changing any of that code in between trains again.
     train/adapters/<cluster>/manifest.json   base and revision, hyper-parameters, dataset sha256, the facts it
                                              was trained on, where it ran, GPU-seconds and cost
@@ -385,10 +385,17 @@ def plan_id(plan: Dict[str, Any]) -> str:
     return sha256_bytes(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode())
 
 
+# The code a training runs (bench.train and what it imports, the Modal training app and its shared module)
+# and the lock it installs. Only these: an edit elsewhere (the load test, the report, a merge of another
+# front) must not make a detached training's result uncollectable and bill a second training.
+TRAINING_CODE = ("bench/__init__.py", "bench/train.py", "bench/paths.py", "bench/contracts/*.py",
+                 "modal_apps/__init__.py", "modal_apps/common.py", "modal_apps/train.py", "env/train/requirements.lock")
+
+
 def code_sha256(root: Path = SOURCE_ROOT) -> str:
-    """The identity of the code and image a Modal training runs: every source file shipped to the image
-    (bench/, modal_apps/) and the lock it installs, by content (a dirty tree is not its commit)."""
-    files = sorted([*root.glob("bench/**/*.py"), *root.glob("modal_apps/**/*.py"), root / "env" / "train" / "requirements.lock"])
+    """The identity of the code and image a Modal training runs (TRAINING_CODE), by content (a dirty tree
+    is not its commit)."""
+    files = sorted({file for pattern in TRAINING_CODE for file in root.glob(pattern)})
     digest = hashlib.sha256()
     for file in files:
         digest.update(f"{file.relative_to(root).as_posix()}\0{sha256_bytes(file.read_bytes())}\n".encode())
@@ -496,7 +503,7 @@ def cli(args) -> int:
     print(result["manifest"].relative_to(paths.ROOT))
     if result["modal_key"]:
         print(f"stored on the adapters volume under {result['modal_key']}: the same command collects it only with "
-              "the same plan, GPU and code (any change to bench/, modal_apps/ or the lock trains again)")
+              "the same plan, GPU and code (a change to the training code or its lock trains again)")
     if result["fact"]:
         print(f"adapters fact: {result['fact'].relative_to(paths.ROOT)} (point arms.B4.adapters and arms.B5.adapters at it)")
     else:

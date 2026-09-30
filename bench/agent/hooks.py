@@ -93,33 +93,9 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def check_settings(config: Dict[str, Any]) -> None:
-    """The keys this front added to C2 (`config.yaml`), which the frozen validator does not know."""
-    errors = []
-
-    def number(value, minimum, integer=False):
-        kinds = (int,) if integer else (int, float)
-        return isinstance(value, kinds) and not isinstance(value, bool) and value >= minimum
-    retries = config["retries"]
-    if not number(retries.get("http_max_attempts"), 1, integer=True):
-        errors.append("retries.http_max_attempts must be an integer >= 1")
-    backoff = retries.get("http_backoff_s") or {}
-    if not (number(backoff.get("base"), 0) and number(backoff.get("max"), 0)):
-        errors.append("retries.http_backoff_s needs base and max, numbers >= 0")
-    if not number(config["agent"].get("max_workers"), 1, integer=True):
-        errors.append("agent.max_workers must be an integer >= 1")
-    if "few_shot" not in config["seeds"]:
-        errors.append("seeds.few_shot is required")
-    few_shot = ((config.get("arms") or {}).get("B1") or {}).get("few_shot") or {}
-    if not number(few_shot.get("k"), 0, integer=True):
-        errors.append("arms.B1.few_shot.k must be an integer >= 0")
-    if few_shot.get("source_run") is not None and not isinstance(few_shot["source_run"], str):
-        errors.append("arms.B1.few_shot.source_run must be a run id or null")
-    if config["embeddings"]["provider"] == "local":
-        local = config["embeddings"].get("local") or {}
-        if not isinstance(local.get("model"), str) or not local["model"]:
-            errors.append("embeddings.local.model is required with provider local")
-        if not isinstance(local.get("revision"), str) or not _COMMIT.match(local["revision"]):
-            errors.append("embeddings.local.revision must be a 40-hex commit")
+    """The agent's settings, validated by C2 itself (bench.contracts.config.validate_config)."""
+    from bench.contracts.config import agent_settings_errors
+    errors = agent_settings_errors(config)
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -255,6 +231,11 @@ def chat_model(engine: str, temperature: float):
                     raise HarnessError(f"engine {engine}: environment variable {api_key_env} is not set")
             else:
                 api_key = "EMPTY"  # local servers (llama.cpp, vLLM) accept any key
+            headers = {}
+            for header, variable in (endpoint.get("headers_env") or {}).items():
+                headers[header] = os.environ.get(variable)
+                if not headers[header]:
+                    raise HarnessError(f"engine {engine}: environment variable {variable} ({header}) is not set")
             _models[key] = ChatOpenAI(
                 model=spec["model"],
                 openai_api_base=endpoint["base_url"],
@@ -263,6 +244,7 @@ def chat_model(engine: str, temperature: float):
                 max_tokens=params.pop("max_tokens", None),
                 timeout=params.pop("timeout_s"),
                 max_retries=0,  # every attempt is visible in C1; no hidden client retry
+                default_headers=headers or None,
                 model_kwargs=params,
             )
         return _models[key]
@@ -395,6 +377,9 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
             parsed, parsed_ok = None, False
             error = f"{type(exception).__name__}: {exception}"
             outcome = {"transport": "transport", "model": "failed", "harness": "harness"}[classify(exception)]
+        elif not isinstance(output.content, str):  # content parts, not text: nothing here can read them
+            parsed, parsed_ok, outcome, exception = None, False, "harness", None
+            error, output = f"the engine answered {type(output.content).__name__} content, not text", None
         else:
             parsed, parsed_ok, error, outcome, exception = interpret(output)
         _harness(call_site, lambda: _record(

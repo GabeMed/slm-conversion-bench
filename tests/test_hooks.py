@@ -1,5 +1,7 @@
 """The patched call layer (hooks): what reaches the model, one C1 line per attempt, bounded retry,
 no fallback, harness failures surfaced. Agent environment only."""
+import os
+
 import pytest
 
 pytest.importorskip("langchain_core")
@@ -214,3 +216,47 @@ def test_model_error_text_is_scrubbed_of_local_paths(run):
     assert str(paths.ROOT) not in line["error"] and "<repo>/secret/file" in line["error"]
     (recorded,) = hooks.take_harness_errors()
     assert str(paths.ROOT) not in recorded and "<repo>/secret/file" in recorded
+
+
+# ---------------------------------------------------------------- integration: headers, content, environment
+
+def test_headers_env_are_sent_and_a_missing_one_is_a_harness_error(monkeypatch):
+    config = load_config(SMOKE)
+    config["roles"]["production_llm"]["endpoint"]["headers_env"] = {"Modal-Key": "BENCH_TEST_MODAL_KEY"}
+    hooks.configure(config)
+    monkeypatch.delenv("BENCH_TEST_MODAL_KEY", raising=False)
+    with pytest.raises(hooks.HarnessError, match="BENCH_TEST_MODAL_KEY"):
+        hooks.chat_model("production_llm", 0.0)
+    monkeypatch.setenv("BENCH_TEST_MODAL_KEY", "k-123")
+    assert hooks.chat_model("production_llm", 0.0).default_headers == {"Modal-Key": "k-123"}
+
+
+def test_headers_env_must_map_header_names_to_variables():
+    from bench.contracts.config import validate_config
+    config = load_config(SMOKE)
+    for bad in ({"Modal-Key": ""}, ["Modal-Key"], {"": "VAR"}):
+        config["roles"]["production_llm"]["endpoint"]["headers_env"] = bad
+        assert any("headers_env" in e for e in validate_config(config))
+
+
+def test_content_that_is_not_text_is_a_harness_failure_with_its_line(run):
+    model, calls_path, _ = run
+    model.script = []
+    model.invoke = lambda messages: AIMessage(content=[{"type": "text", "text": "{}"}],
+                                              response_metadata={"token_usage": USAGE})
+    with pytest.raises(hooks.HarnessError, match="list content"):
+        hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+    (line,) = read_calls(calls_path)
+    assert line["response_text"] is None and "not text" in line["error"] and validate_calls([line]) == []
+
+
+def test_the_agent_package_switches_tracing_off_and_runs_drop_chroma_servers(monkeypatch, tmp_path):
+    import importlib
+    import bench.agent
+    from bench.agent import runner
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    importlib.reload(bench.agent)
+    assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
+    monkeypatch.setenv("CHROMA_SERVER_HOST", "vectors.example.com")
+    runner._prepare_chess(load_config(SMOKE), tmp_path)
+    assert "CHROMA_SERVER_HOST" not in os.environ

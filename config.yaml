@@ -107,11 +107,11 @@ retries:
   http_backoff_s: {base: 2, max: 60}  # wait: random in [1/2, 1] x min(max, base * 2^(n-1)); one attempt
                                       # counter with the parse retries, every attempt logged (C1)
 
-seeds:
-  calib_split: 20260930
-  schema_shuffle: 20260930
-  bootstrap: 20260930
-  few_shot: 20260930           # B1's examples (arms.B1.few_shot)
+seeds:                         # distinct values, so a seed read for another's purpose shows
+  calib_split: 20260930        # defines data/splits.json and the pilot: never change after `bench data`
+  schema_shuffle: 20260931
+  bootstrap: 20260932
+  few_shot: 20260933           # B1's examples (arms.B1.few_shot)
 
 splits:
   calib_size: 200

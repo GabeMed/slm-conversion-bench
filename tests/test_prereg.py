@@ -17,8 +17,9 @@ from bench.evaluate import evaluate, evaluate_per_call
 from bench.prereg import PreregError, register
 from synthetic import make_repo, sha256
 
-# distinct seeds, so reading one seed key for another shows (config.yaml gives all three one value)
-CONFIG = {**load_config(paths.ROOT / "config.yaml"), "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303}}
+# distinct seeds, so reading one seed key for another shows
+CONFIG = {**load_config(paths.ROOT / "config.yaml"),
+          "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404}}
 
 
 def git(cwd, *args):
@@ -282,3 +283,16 @@ def test_the_command_registers_and_refuses_through_the_cli(repo, monkeypatch, ca
     (repo / "notes.txt").write_text("x\n")
     assert main(["prereg", "--config", str(repo / "config.yaml")]) == 2
     assert "uncommitted" in capsys.readouterr().err
+
+
+def test_a_test_run_is_not_scored_with_analysis_code_other_than_the_registered(published):
+    config, prereg_hash = published
+    j4 = paths.ROOT / "bench" / "judge" / "j4.py"  # the synthetic repository's copy
+    j4.write_text(j4.read_text() + "\n# a verdict rule changed after the pre-registration\n")
+    with pytest.raises(DataError, match="analysis code differs from the pre-registered one: bench/judge/j4.py"):
+        evaluate(test_run(config, prereg_hash))
+
+
+def test_the_contracts_are_registered_analysis_code():
+    from bench.prereg import ANALYSIS_CODE
+    assert "bench/contracts" in ANALYSIS_CODE and "bench/paths.py" in ANALYSIS_CODE

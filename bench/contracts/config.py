@@ -6,6 +6,7 @@ configuration is the sha256 of its merged, canonical JSON, which is what manifes
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -16,6 +17,7 @@ from bench.contracts.calls import CALL_SITES
 ENDPOINT_KINDS = ("api", "vllm", "llamacpp", "fake")
 EMBEDDING_PROVIDERS = ("openai", "local", "fake")
 SINGLE_MODEL_ROLES = ("production_llm", "cheap_alt")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED = ("version", "roles", "agent", "call_sites", "retries", "seeds", "splits",
             "thresholds", "prices", "embeddings", "preprocess", "data", "eval", "arms")
 
@@ -66,6 +68,10 @@ def _check_endpoint(where: str, endpoint: Any) -> List[str]:
     for key in ("base_url", "api_key_env"):
         if endpoint.get(key) is not None and not isinstance(endpoint.get(key), str):
             errors.append(f"{where}.endpoint.{key} must be a string or null")
+    headers = endpoint.get("headers_env")  # {header: environment variable holding its value}, e.g. Modal proxy auth
+    if headers is not None and not (isinstance(headers, dict) and all(
+            isinstance(h, str) and h and isinstance(v, str) and v for h, v in headers.items())):
+        errors.append(f"{where}.endpoint.headers_env must map header names to environment variable names")
     return errors
 
 
@@ -92,6 +98,37 @@ def _agent_engines(node: Any, where: str = "agent") -> List[str]:
     elif isinstance(node, list):
         for i, value in enumerate(node):
             errors += _agent_engines(value, f"{where}[{i}]")
+    return errors
+
+
+def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """The agent's own settings: retries, concurrency, the B1 few-shot and local embeddings (F1)."""
+    errors = []
+
+    def number(value, minimum, integer=False):
+        kinds = (int,) if integer else (int, float)
+        return isinstance(value, kinds) and not isinstance(value, bool) and value >= minimum
+    retries = config["retries"]
+    if not number(retries.get("http_max_attempts"), 1, integer=True):
+        errors.append("retries.http_max_attempts must be an integer >= 1")
+    backoff = retries.get("http_backoff_s") or {}
+    if not (number(backoff.get("base"), 0) and number(backoff.get("max"), 0)):
+        errors.append("retries.http_backoff_s needs base and max, numbers >= 0")
+    if not number(config["agent"].get("max_workers"), 1, integer=True):
+        errors.append("agent.max_workers must be an integer >= 1")
+    if "few_shot" not in config["seeds"]:
+        errors.append("seeds.few_shot is required")
+    few_shot = ((config.get("arms") or {}).get("B1") or {}).get("few_shot") or {}
+    if not number(few_shot.get("k"), 0, integer=True):
+        errors.append("arms.B1.few_shot.k must be an integer >= 0")
+    if few_shot.get("source_run") is not None and not isinstance(few_shot["source_run"], str):
+        errors.append("arms.B1.few_shot.source_run must be a run id or null")
+    if config["embeddings"]["provider"] == "local":
+        local = config["embeddings"].get("local") or {}
+        if not isinstance(local.get("model"), str) or not local["model"]:
+            errors.append("embeddings.local.model is required with provider local")
+        if not isinstance(local.get("revision"), str) or not _COMMIT.match(local["revision"]):
+            errors.append("embeddings.local.revision must be a 40-hex commit")
     return errors
 
 
@@ -134,6 +171,7 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     for name, pin in config["data"].items():
         if not isinstance(pin, dict) or not pin.get("url") or not pin.get("sha256"):
             errors.append(f"data.{name} needs url and sha256")
+    errors += agent_settings_errors(config)
     return errors
 
 
