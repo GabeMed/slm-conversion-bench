@@ -210,7 +210,7 @@ def pipeline(tmp_path, monkeypatch):
     # load test and S6 on calib
     for concurrency, p95, rps in ((1, 300, 3.0), (8, 800, 12.0), (32, 2500, 20.0)):
         write_run(f"loadtest-{concurrency}", {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
-                                              "prefix_cache": True},
+                                              "prefix_cache": True, "sweep_id": "sweep-qwen3-8b"},
                   files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
                                                          "request_throughput": {"unit": "requests/sec", "avg": rps}}})
     j8_path = j8.run(["loadtest-1", "loadtest-8", "loadtest-32"], config)
