@@ -138,10 +138,17 @@ data:
   plat_sql_test:               # Arcwise-Plat-SQL, 498 questions, used as in the file (D14)
     url: https://raw.githubusercontent.com/uiuc-kang-lab/text_to_sql_benchmarks/fe766045c55b6875a43b30e9ac7683df5582f8cf/data/arcwise_plat_sql_only_with_diff.json
     sha256: e7bf76408f99266506ea558d84982c69422e5db3dfecab5f08a3a8d3900e8395
+  mini_dev:                    # BIRD Mini-Dev (SQLite), 500 questions: only the difficulty of the test ids (F2)
+    url: https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/f65faf4ae3b638c1fa6df1d3370c8d92c8366301/data/mini_dev_sqlite-00000-of-00001.json
+    sha256: 88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2
 
 eval:
   timeout_s: 60
-  fixed_date: null             # F2: pre-registered date substituted for 'now' in pred and gold
+  fixed_date: "2026-09-30"     # F2: 'now' in pred and gold is this date at 00:00 UTC (quoted: a YAML date breaks the hash)
+
+stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are in thresholds and seeds
+  n_boot: 10000                # paired-bootstrap resamples for the one-sided lower bound
+  pilot_size: 50               # calibration ids that measure d before the test (bench.data.pilot_sample)
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:

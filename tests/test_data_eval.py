@@ -11,8 +11,8 @@ import pytest
 from bench import data, paths
 from bench.agent.runner import final_sql, run_agent
 from bench.barrier import TestSplitLocked
-from bench.contracts.config import config_sha256, load_config  # noqa: F401
-from bench.data import DataError, build_splits, calib_sample
+from bench.contracts.config import config_sha256, load_config
+from bench.data import DataError, build_splits, calib_sample, pilot_sample
 from bench.evaluate import evaluate, execute, score
 from synthetic import GOLD, make_repo
 
@@ -47,6 +47,21 @@ def test_calib_sample_does_not_depend_on_python_random():
     expected = sorted(sorted(pool, key=lambda q: hashlib.sha256(f"7:{q}".encode()).hexdigest())[:5], key=int)
     assert calib_sample(pool, 5, 7) == expected
     assert calib_sample(list(reversed(pool)), 5, 7) == expected
+
+
+def test_the_pilot_is_the_calibration_ids_with_the_smallest_seeded_hash():
+    calib = [str(i) for i in range(60)]
+    expected = sorted(sorted(calib, key=lambda q: hashlib.sha256(f"7:pilot:{q}".encode()).hexdigest())[:5], key=int)
+    assert pilot_sample(calib, 5, 7) == pilot_sample(list(reversed(calib)), 5, 7) == expected
+    assert pilot_sample(calib, 5, 7) != calib_sample(calib, 5, 7)  # its own draw, not the calibration's
+    with pytest.raises(DataError, match="pilot"):
+        pilot_sample(calib[:3], 5, 7)
+
+
+def test_the_committed_splits_have_a_pilot_of_the_configured_size():
+    calib = json.loads(paths.SPLITS.read_text())["calib"]
+    pilot = pilot_sample(calib, CONFIG["stats"]["pilot_size"], CONFIG["seeds"]["calib_split"])
+    assert CONFIG["stats"]["pilot_size"] == 50 and len(pilot) == 50 and set(pilot) <= set(calib)
 
 
 def test_the_committed_splits():
@@ -93,7 +108,7 @@ def test_pairing_is_by_id_not_by_position(db):
     gold = {q: {"question_id": q, "db_id": "t", "SQL": f"SELECT v FROM t WHERE id = {q}"} for q in ("9", "1", "10")}
     predictions = {"10": "SELECT v FROM t WHERE id = 10", "1": "SELECT v FROM t WHERE id = 1",
                    "9": "SELECT v FROM t WHERE id = 8"}
-    results = {r["question_id"]: r for r in score(predictions, gold, lambda _: db, 5)}
+    results = {r["question_id"]: r for r in score(predictions, gold, lambda _: db, 5, "2026-09-30")}
     assert {q: r["correct"] for q, r in results.items()} == {"1": True, "9": False, "10": True}
     assert all(r["gold_sql"] == gold[q]["SQL"] for q, r in results.items())
 
@@ -101,15 +116,15 @@ def test_pairing_is_by_id_not_by_position(db):
 def test_rows_compare_as_sets_and_missing_prediction_is_wrong(db):
     gold = {"1": {"db_id": "t", "SQL": "SELECT v FROM t WHERE id < 3 ORDER BY id"},
             "2": {"db_id": "t", "SQL": "SELECT 1"}}
-    results = score({"1": "SELECT v FROM t WHERE id < 3 ORDER BY id DESC", "2": None}, gold, lambda _: db, 5)
+    results = score({"1": "SELECT v FROM t WHERE id < 3 ORDER BY id DESC", "2": None}, gold, lambda _: db, 5, "2026-09-30")
     assert [r["correct"] for r in results] == [True, False]
     assert results[1]["pred_error"] == "no prediction"
 
 
 def test_timeout_and_read_only(db):
     endless = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
-    assert execute(db, endless, 0.2) == (None, "timeout")
-    rows, error = execute(db, "DELETE FROM t", 5)
+    assert execute(db, endless, 0.2, "2026-09-30") == (None, "timeout", False)
+    rows, error, _ = execute(db, "DELETE FROM t", 5, "2026-09-30")
     assert rows is None and "readonly" in error
 
 
@@ -120,15 +135,15 @@ def repo(tmp_path, monkeypatch):
     return make_repo(tmp_path, monkeypatch)
 
 
-def _finished_run(repo, split="train", status="done", predictions=None, question_ids=None):
-    _, _, config = repo
+def _finished_run(repo, split="train", status="done", predictions=None, question_ids=None, config=None):
+    config = config or repo[2]
     predictions = predictions if predictions is not None else {"1": GOLD, "2": "SELECT 0"}
     run_dir = paths.RUNS / f"agent-B0-{split}-x"
     run_dir.mkdir(parents=True)
     (run_dir / "predictions.json").write_text(json.dumps(predictions))
     (run_dir / "config.json").write_text(json.dumps(config))
     (run_dir / "manifest.json").write_text(json.dumps({
-        "run_id": run_dir.name, "split": split, "status": status, "commit": "c",
+        "run_id": run_dir.name, "arm": "B0", "split": split, "status": status, "commit": "c",
         "question_ids": question_ids or sorted(predictions), "config_path": "config.yaml",
         "config_sha256": config_sha256(config)}))
     return run_dir.name
@@ -139,7 +154,19 @@ def test_evaluate_scores_a_finished_run(repo):
     results = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
     assert [(r["question_id"], r["correct"]) for r in results] == [("1", True), ("2", False)]
     recorded = json.loads(paths.DATA_MANIFEST.read_text())["databases"]["tiny"]["sqlite"]
-    assert json.loads((out / "manifest.json").read_text())["databases"] == {"tiny": recorded}
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["databases"] == {"tiny": recorded}
+    assert (manifest["arm"], manifest["split"], manifest["per_call"] if "per_call" in manifest else False) == ("B0", "train", False)
+    assert manifest["fixed_date"] == repo[2]["eval"]["fixed_date"] and manifest["sqlite_version"] == sqlite3.sqlite_version
+
+
+def test_evaluate_records_the_engine_of_a_single_call_run(repo):
+    run_id = _finished_run(repo)
+    manifest_path = paths.RUNS / run_id / "manifest.json"
+    manifest_path.write_text(json.dumps({**json.loads(manifest_path.read_text()), "arm": "B2", "mode": "single_call",
+                                         "engine": "cheap_alt"}))
+    manifest = json.loads((evaluate(run_id) / "manifest.json").read_text())
+    assert (manifest["arm"], manifest["engine"], manifest["mode"]) == ("B2", "cheap_alt", "single_call")
 
 
 def test_evaluate_uses_the_runs_configuration_not_todays(repo):
@@ -152,6 +179,13 @@ def test_evaluate_uses_the_runs_configuration_not_todays(repo):
     snapshot.write_text(json.dumps(tampered))
     with pytest.raises(DataError, match="snapshot"):
         evaluate(run_id)
+
+
+def test_evaluate_refuses_a_snapshot_without_a_fixed_date(repo):
+    undated = {**repo[2], "eval": {**repo[2]["eval"], "fixed_date": None}}
+    with pytest.raises(DataError, match="fixed_date"):
+        evaluate(_finished_run(repo, config=undated))
+    assert not any(paths.RUNS.glob("eval-*"))  # no fallback to today, and nothing written
 
 
 def test_evaluate_refuses_a_changed_database(repo):
