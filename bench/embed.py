@@ -9,16 +9,20 @@ J5 then writes into the centroids fact). For each invocation of the source it em
   action.
 
 The source is a `curate` execution (the curated training examples) or an `agent` / `replay`
-execution (e.g. the teacher on `calib`, for the assignment rate and the allocation). Texts are
+execution (e.g. the teacher on `calib`, for the assignment rate and the allocation). For a curate
+source the texts are the **unmasked** originals, looked up by call id in the executions it curated:
+the router embeds the prompt as the agent sends it, so the centroids must live in that space;
+masking is for the training data only. Texts are
 embedded `clustering.batch_size` at a time; the default, 1, is how the router embeds (one prompt per
 call), so both get the same vectors, with no padding in between. Every text's length in the
 model's tokens is recorded, and whether it was longer than `max_seq_length` and so cut
 (`truncation` says which end is kept): the report gives the fraction cut.
 
 Writes `runs/embed-<ts>/`: `prompt.npy` and `prompt_action.npy` (float32, one unit row per text),
-`index.jsonl` (per invocation: `call_id`, `question_id`, its rows, its token counts; never the call
-site, which S3 must not see) and the manifest.
+`index.jsonl` (per invocation: `call_id`, `question_id`, its rows, its token counts and the sha256
+of each text it embedded; never the call site, which S3 must not see) and the manifest.
 """
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,11 +44,17 @@ def texts_of(source_run_id: str) -> Texts:
     found = run_manifest(source_run_id)
     if found.get("type") == "curate":
         require_done(source_run_id)
+        originals = {c["call_id"]: c for source in found["sources"] for c in calls_of(source["run_id"])}
         rows = []
         for example in read_jsonl(paths.RUNS / source_run_id / "examples.jsonl"):
+            original = originals.get(example["call_id"])
+            if original is None:
+                raise JudgmentError(f"{source_run_id}: example {example['call_id']} is in none of the executions it curated")
+            messages = original["prompt_messages"]
             rows.append({"call_id": example["call_id"], "question_id": example["question_id"],
-                         "prompt": clusters.prompt_text(example["prompt"]),
-                         "action": clusters.prompt_text(example["prompt"] + example["completion"])})
+                         "prompt": clusters.prompt_text(messages),
+                         "action": clusters.prompt_text(messages + [{"role": "assistant",
+                                                                     "content": original["response_text"]}])})
         return rows
     require_done(source_run_id, type=("agent", "replay"))
     rows = []
@@ -104,14 +114,19 @@ def run_embed(source_run_id: str, config_path: str = "config.yaml", embed_fn=Non
     run_id = f"embed-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
     out = paths.RUNS / run_id
     out.mkdir(parents=True)
-    np.save(out / "prompt.npy", np.asarray(prompt_vectors, dtype=np.float32))
-    np.save(out / "prompt_action.npy", np.asarray(action_vectors, dtype=np.float32).reshape(len(actions), -1))
+    prompt_matrix = np.asarray(prompt_vectors, dtype=np.float32)
+    np.save(out / "prompt.npy", prompt_matrix)
+    action_matrix = np.asarray(action_vectors, dtype=np.float32) if actions else \
+        np.zeros((0, prompt_matrix.shape[1]), dtype=np.float32)  # no invocation parsed: no action to embed
+    np.save(out / "prompt_action.npy", action_matrix)
     index, action_row = [], 0
     for row_number, (row, tokens) in enumerate(zip(rows, prompt_tokens)):
         entry = {"call_id": row["call_id"], "question_id": row["question_id"], "prompt_row": row_number,
-                 "prompt_tokens": tokens, "action_row": None, "action_tokens": None}
+                 "prompt_tokens": tokens, "prompt_sha256": hashlib.sha256(row["prompt"].encode()).hexdigest(),
+                 "action_row": None, "action_tokens": None, "action_sha256": None}
         if row["action"] is not None:
-            entry.update(action_row=action_row, action_tokens=action_tokens[action_row])
+            entry.update(action_row=action_row, action_tokens=action_tokens[action_row],
+                         action_sha256=hashlib.sha256(row["action"].encode()).hexdigest())
             action_row += 1
         index.append(entry)
     write_jsonl(out / "index.jsonl", index)

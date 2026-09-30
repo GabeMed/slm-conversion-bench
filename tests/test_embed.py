@@ -65,3 +65,25 @@ def test_refuses_an_unfinished_source(tmp_path, monkeypatch):
     with pytest.raises(JudgmentError, match="not 'done'"):
         run_embed("agent-f", str(config_path), embed_fn=fake_embed, count_tokens=fake_tokens)
     assert not any(p.name.startswith("embed-") for p in paths.RUNS.iterdir())
+
+
+def test_a_curated_example_is_embedded_as_the_router_sees_it_unmasked(tmp_path, monkeypatch):
+    config_path, _ = repo(tmp_path, monkeypatch)
+    original = example("1", "select_tables")
+    curate_run("curate-m", [original], masked={"topic": "[MASKED]"})
+    shown = read_jsonl(paths.RUNS / "curate-m" / "examples.jsonl")[0]
+    assert "[MASKED]" in shown["prompt"][0]["content"]  # the training data is masked
+    out = run_embed("curate-m", str(config_path), embed_fn=fake_embed, count_tokens=fake_tokens)
+    text = clusters.prompt_text(original["prompt"])
+    assert np.allclose(np.load(out / "prompt.npy")[0], fake_embed([text], None)[0])
+    index = read_jsonl(out / "index.jsonl")[0]
+    assert index["prompt_sha256"] == __import__("hashlib").sha256(text.encode()).hexdigest()
+
+
+def test_a_source_with_no_parsed_action_writes_an_empty_action_matrix(tmp_path, monkeypatch):
+    config_path, _ = repo(tmp_path, monkeypatch)
+    write_run("agent-n", {"type": "agent", "arm": "B0", "split": "calib"},
+              [call("agent-n", "1", "select_tables", response="?", parsed_ok=False)])
+    out = run_embed("agent-n", str(config_path), embed_fn=fake_embed, count_tokens=fake_tokens)
+    assert np.load(out / "prompt_action.npy").shape == (0, 64)
+    assert json.loads((out / "manifest.json").read_text())["tokens"]["prompt_action"]["n"] == 0

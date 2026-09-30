@@ -8,7 +8,9 @@ the `embed` execution of the teacher on `calib`. Writes the `centroids` fact and
   vectors (so Euclidean distance orders like cosine), with the number of clusters chosen
   automatically as the one of highest cosine silhouette in `[k_min, k_max]` (seeded; the
   silhouette on a seeded sample). `cluster()` receives the vectors and nothing else: the call site
-  never reaches it (SPEC S3). K-means rather than a density method because every training example
+  never reaches it (SPEC S3), **nor does their order**: curate writes its examples call site by call
+  site, and k-means' seeded start depends on row order, so the rows are ordered by the sha256 of the
+  text embedded for each example before clustering. K-means rather than a density method because every training example
   needs a cluster (S5 trains one adapter per cluster), and a density method leaves noise out.
 - **Centroids for assignment** live in the **prompt-only** space the router embeds in: the unit
   mean of the members' prompt vectors. The fact's `embedding` block is the embed execution's, so
@@ -113,8 +115,11 @@ def judge(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[st
     embedded, index, prompts, actions = load_embed(embed_run_id)
     if embedded["source"]["run_id"] != curate_run_id:
         raise JudgmentError(f"{embed_run_id} embedded {embedded['source']['run_id']}, not {curate_run_id}")
-    if [row["call_id"] for row in index] != [e["call_id"] for e in examples] or any(r["action_row"] is None for r in index):
+    if sorted(row["call_id"] for row in index) != sorted(e["call_id"] for e in examples) \
+            or any(r["action_row"] is None for r in index):
         raise JudgmentError(f"{embed_run_id} does not cover every curated example with its action")
+    index = sorted(index, key=lambda r: (r["action_sha256"], r["call_id"]))  # an order the call site cannot set
+    site_of = {e["call_id"]: e["call_site"] for e in examples}
     embedding = embedded["embedding"]
 
     calib = None
@@ -140,7 +145,7 @@ def judge(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[st
                  for c in ids}
     action_centres = {rename[label]: raw_centres[label] for label in rename}  # k-means' own, in PA space
 
-    sites = [e["call_site"] for e in examples]  # read here, after clustering, for validation only
+    sites = [site_of[r["call_id"]] for r in index]  # read here, after clustering, for validation only
     composition = {c: {} for c in ids}
     for c, site in zip(found, sites):
         composition[c][site] = composition[c].get(site, 0) + 1
@@ -158,10 +163,12 @@ def judge(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[st
 
     result = {
         "method": "k-means on unit prompt+action vectors, k by cosine silhouette",
+        "parameters": {"seed": settings["seed"], "n_init": settings["n_init"], "k_range": [settings["k_min"], settings["k_max"]],
+                       "silhouette_sample": settings["silhouette_sample"], "row_order": "sha256 of the embedded text"},
         "k": len(ids), "silhouette": {str(k): s for k, s in sorted(silhouettes.items())},
         "clusters": ids, "sizes": {c: found.count(c) for c in ids}, "composition": composition,
         "ari_call_sites": adjusted_rand(sites, found),
-        "members": {e["call_id"]: c for e, c in zip(examples, found)},
+        "members": {r["call_id"]: c for r, c in zip(index, found)},
         "assignment": {"train_in_sample": sum(a == b for a, b in zip(in_sample, found)) / len(found), "calib": calib},
         "embedding": embedding, "truncation": embedded["tokens"],
         "centroids": {"path": relative(fact), "sha256": fact.parent.name},

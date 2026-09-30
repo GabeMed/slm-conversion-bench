@@ -96,9 +96,25 @@ def example(question_id: str, site: str, key: str = "single", detail: str = "", 
             "completion": [{"role": "assistant", "content": f"{site} answer {answer} {question_id}"}]}
 
 
-def curate_run(run_id: str, examples: List[Dict[str, Any]]) -> Path:
-    return write_run(run_id, {"type": "curate", "split": "train", "n": len(examples),
-                              "counts": {"total": {"kept": len(examples)}}}, files={"examples.jsonl": examples})
+def curate_run(run_id: str, examples: List[Dict[str, Any]], masked: Optional[Dict[str, str]] = None,
+               originals_of: Optional[List[Dict[str, Any]]] = None) -> Path:
+    """A curate execution and the teacher execution it curated, whose calls are the examples'
+    originals (same call id; `originals_of` when the examples' own labels are not the calls').
+    `masked` replaces text in the examples only, as masking would."""
+    source = f"{run_id}-source"
+    originals = [{**call(source, e["question_id"], e["call_site"], e["invocation_key"], messages=e["prompt"],
+                         response=e["completion"][0]["content"], parsed={}), "call_id": e["call_id"]}
+                 for e in (originals_of or examples)]
+    write_run(source, {"type": "agent", "arm": "B0", "split": "train"}, originals)
+
+    def mask(text: str) -> str:
+        for old, new in (masked or {}).items():
+            text = text.replace(old, new)
+        return text
+    shown = [{**e, "prompt": [{**m, "content": mask(m["content"])} for m in e["prompt"]],
+              "completion": [{**m, "content": mask(m["content"])} for m in e["completion"]]} for e in examples]
+    return write_run(run_id, {"type": "curate", "split": "train", "n": len(examples), "sources": [{"run_id": source}],
+                              "counts": {"total": {"kept": len(examples)}}}, files={"examples.jsonl": shown})
 
 
 # ---------------------------------------------------------------- a repository

@@ -156,10 +156,12 @@ curation:                      # S2 (SPEC §4 S2)
   near_duplicate: {shingle_words: 5, num_perm: 128, threshold: 0.9, template_share: 0.5}
   rule_of_thumb: [10000, 100000]  # examples per task (paper p.9), reported against, not a floor
 clustering:                    # S3 (J5) and the `embed` execution
-  # the embedding J5 writes into the centroids fact, and so the one `assign` uses: 8192 tokens
-  # of context, keeping the end of a longer prompt, where CHESS puts what varies (design §5.1)
-  embedding: {model: BAAI/bge-m3, revision: 5617a9f61b028005a4858fdac845db406aefb181,
-              max_seq_length: 8192, truncation: tail, text: prompt, trust_remote_code: false}
+  # the embedding J5 writes into the centroids fact, and so the one `assign` uses (the orchestrator's
+  # decision, measured on CPU: ~70 ms per prompt, where a long-context model adds minutes per question
+  # to B4/B5 routing): 512 tokens, keeping the end of a longer prompt, where CHESS puts what varies
+  # (design §5.1); the fraction of prompts cut is reported
+  embedding: {model: BAAI/bge-small-en-v1.5, revision: 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a,
+              max_seq_length: 512, truncation: tail, text: prompt, trust_remote_code: false}
   batch_size: 1                # one text per call, as the router embeds: the same vectors
   k_min: 2                     # the number of clusters is chosen by silhouette in [k_min, k_max]
   k_max: 40
