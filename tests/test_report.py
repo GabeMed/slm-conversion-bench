@@ -88,11 +88,11 @@ def test_appendix_b_confirms_only_when_repair_is_worse_and_the_routine_passes():
     routine = per_call({"filter_column": 0.97, "select_tables": 0.99})
     verdict = lambda repair, calls=routine: row(report.claims_map(data_with({}, {}, repair=repair, per_call=calls)),  # noqa: E731
                                                "Appendix B")["verdict"]
-    assert verdict(j4(False, diff=-0.2)) == "confirms"
+    assert verdict(j4(False, diff=-0.2)) == "confirms (the routine by the agreement proxy, which supports no per-cluster claim (D15))"
     assert verdict(j4(True)) == "refutes (the SLM ties on repair)"
     assert verdict(j4(False, diff=-0.02)) == "inconclusive"
     assert verdict(j4(pilot=None)) == "no verdict (no pilot d)"
-    assert verdict(j4(False, diff=-0.2), per_call({"filter_column": 0.90})) == "refutes (the SLM loses on the routine)"
+    assert verdict(j4(False, diff=-0.2), per_call({"filter_column": 0.90})).startswith("refutes (the SLM loses on the routine;")
 
 
 def test_the_steps_table_reads_the_judgments():
@@ -217,7 +217,7 @@ def pipeline(tmp_path, monkeypatch):
     per_call_eval("eval-cheap-calib", "replay-cheap-calib", cheap_calib, lambda c: teacher_ok(c) and unit("cheap", c["question_id"]) < 0.8)
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap-calib", "eval-cheap-calib"),
                                                                 "slm": ("replay-B4-calib", "eval-B4-calib")},
-                                 "eval-B0-calib-per-call", str(j8_path), config, fake_noninferiority)
+                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, fake_noninferiority)
     allocated = facts.read_fact(str(allocation), "allocation")[0]["allocation"]
 
     # the arms on test
@@ -236,7 +236,7 @@ def pipeline(tmp_path, monkeypatch):
             b5 += replay([c], "agent-B5-test", "slm:qwen3-8b+lora:c" if engine == "slm" else "cheap_alt", 1.0,
                          cluster_of=assigned)
     arms_calls["B5"] = b5
-    plan = {"split": "test", "arms": {}, "format": {}, "pilot": {"arms": {}}}
+    plan = {"split": "test", "arms": {}, "format": {}, "pilot": {}}
     b0_ok = {q: unit("B0", q) < 0.8 for q in TEST_IDS + CALIB_IDS}
 
     def evaluation(eval_run_id, source_run_id, arm, split, ids):
@@ -251,8 +251,9 @@ def pipeline(tmp_path, monkeypatch):
         calls = [{**c, "run_id": run_id} for c in calls]
         run(run_id, {"type": "agent", "arm": arm.split("-")[0], "split": "test", "question_ids": TEST_IDS}, calls)
         evaluation(f"eval-{arm}", run_id, arm, "test", TEST_IDS)
-        evaluation(f"eval-{arm}-pilot", f"agent-{arm}-pilot", arm, "calib", CALIB_IDS)  # the pilot, on calib
-        plan["pilot"]["arms"][arm] = f"eval-{arm}-pilot"
+        if arm in ("B0", "B3"):  # the pilot: the zero-shot SLM against the production LLM, on calib
+            evaluation(f"eval-{arm}-pilot", f"agent-{arm}-pilot", arm, "calib", CALIB_IDS)
+            plan["pilot"][arm] = f"eval-{arm}-pilot"
         has_slm = any(c["model_role"] == "slm" for c in calls)
         cost = j3.run(run_id, f"eval-{arm}", str(j8_path) if has_slm else None, config)
         plan["arms"][arm] = {"eval": f"eval-{arm}", "cost": relative(cost)}
@@ -265,13 +266,20 @@ def pipeline(tmp_path, monkeypatch):
     per_call_eval("eval-B0-test-per-call", "agent-B0-test", b0, gold_correct("teacher-test", 0.9))
     per_call_eval("eval-B4-test-per-call", "replay-B4-test", b4_replay, gold_correct("teacher-test", 0.9))
     reads, result = j2.judge_replay("replay-B4-test", "eval-B4-test-per-call", "eval-B0-test-per-call")
-    calib_reads, calib_result = j2.judge_replay("replay-B4-calib", "eval-B4-calib", "eval-B0-calib-per-call")
-    plan["pilot"]["per_call"] = relative(write_result("J2", calib_reads, calib_result))
     plan.update(per_call=relative(write_result("J2", reads, result)), j5=relative(j5_path), j6=relative(j6_path),
                 j7=relative(j7_path), j8=relative(j8_path),
                 teacher_train_cost=relative(j3.run("agent-B0-train", None, None, config)))
     plan_path = tmp_path / "plan.yaml"
     plan_path.write_text(yaml.safe_dump(plan))
+    # the test registry, as F1 commits it
+    for args in (("init", "-q"), ("config", "user.email", "t@example.org"), ("config", "user.name", "t")):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    (tmp_path / "registry" / "test").mkdir(parents=True)
+    for arm in arms_calls:
+        (tmp_path / "registry" / "test" / f"agent-{arm}-test.manifest.json").write_text(json.dumps(
+            {"type": "agent", "arm": arm.split("-")[0], "status": "done", "commit": "c" * 40, "prereg_hash": "d" * 64}))
+    subprocess.run(["git", "-C", str(tmp_path), "add", "registry"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "registry"], check=True, capture_output=True)
     return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path}
 
 
@@ -294,7 +302,12 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     # every margin came from the pilot: no comparison is left without a verdict
     assert all(t["margin_from"] == "pilot" for t in data["tests"].values()) and data["repair_test"]["d_pilot"] is not None
     assert "no verdict" not in markdown
+    assert data["d_pilot"] == data["tests"]["B0|B4"]["d_pilot"] == data["tests"]["B0|B1"]["d_pilot"]  # one pilot
+    assert [r["run_id"] for r in data["registry"]["runs"]] == sorted(f"agent-{arm}-test" for arm in QUALITY)
     assert data["arms"]["B5"]["replaceable_fraction"] is not None
+    assert [data["arms"][a]["slm_cost_basis"] for a in ("B3", "B4", "B5")] == [
+        "measured", "extrapolated from per-adapter load tests", "extrapolated from per-adapter load tests"]
+    assert "SLM cost extrapolated from per-adapter load tests" in markdown
     j5 = read_result(pipeline["j5"], "J5")["result"]
     assert f"ARI {j5['ari_call_sites']:.3f}" in markdown
     svg = ET.fromstring((out / "ex_cost.svg").read_text())
@@ -306,6 +319,23 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     assert set(manifest["clusters"]) == set(j5["clusters"])
     # re-running gives the same report
     assert report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority) == out
+
+
+def test_a_test_report_needs_the_registry(pipeline):
+    import shutil
+    shutil.rmtree(paths.ROOT / ".git")
+    with pytest.raises(JudgmentError, match="registry"):
+        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority)
+
+
+def test_without_a_pilot_no_comparison_gets_a_verdict(pipeline):
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    del plan["pilot"]
+    pipeline["plan"].write_text(yaml.safe_dump(plan))
+    data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary,
+                                  fake_noninferiority) / "report.json").read_text())
+    assert all(t["noninferior"] is None for t in data["tests"].values())
+    assert report.v1_verdict(data["tests"]["B0|B4"], data["tests"]["B0|B5"]) == "no verdict (no pilot d)"
 
 
 def test_report_refuses_an_eval_of_another_arm(pipeline):

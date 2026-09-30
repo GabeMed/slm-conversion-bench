@@ -93,3 +93,17 @@ def test_run_reads_the_execution_its_eval_and_j8(tmp_path, monkeypatch):
     other = write_result("J8", {}, {"engine": "slm:granite-4.2-8b", "cost_per_request": SLM})
     with pytest.raises(JudgmentError, match="measured"):
         j3.run("agent-B4", "eval-B4", str(other), config)
+
+
+def test_slm_cost_through_adapters_is_labelled_extrapolated(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {"prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}}})
+    for run_id, engine in (("agent-B3", "slm:qwen3-8b"), ("agent-B4x", "slm:qwen3-8b+lora:c0")):
+        write_run(run_id, {"type": "agent", "arm": run_id[6:8], "split": "test", "question_ids": ["1"]},
+                  [call(run_id, "1", "select_tables", parsed={}, role="slm", engine=engine, model="m", use=usage(10, 0, 1))])
+    base = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": SLM,
+                                   "combined": {"rule": "r", "engines": ["slm:qwen3-8b"], "loadtests": ["lt"]}})
+    b3 = read_result(j3.run("agent-B3", None, str(base), config), "J3")["result"]
+    b4 = read_result(j3.run("agent-B4x", None, str(base), config), "J3")["result"]
+    assert b3["slm_cost_basis"]["basis"] == "measured"
+    assert b4["slm_cost_basis"]["basis"] == "extrapolated from per-adapter load tests"
+    assert b4["slm_cost_basis"]["call_engines"] == ["slm:qwen3-8b+lora:c0"]

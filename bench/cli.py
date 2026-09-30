@@ -108,7 +108,7 @@ def _f4(args) -> int:
             from bench.judge import j7
             replays = {engine: next(iter(_pairs([value]).items())) for engine, value in
                        (("cheap_alt", args.cheap_alt), ("slm", args.slm))}
-            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, config), sep="\n")
+            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
         elif args.judgment == "j8":
             from bench.judge import j8
             print(j8.run(args.loadtest, config))
@@ -166,6 +166,7 @@ def f4_commands(sub) -> None:
     p.add_argument("--slm", required=True, metavar="REPLAY=EVAL", help="the calib replay routed as B4")
     p.add_argument("--teacher-eval", required=True)
     p.add_argument("--j8", required=True)
+    p.add_argument("--j6", required=True, help="the J6 result: its chosen candidate's zero-shot replay is the pilot")
     p = judgments.add_parser("j8", help="load: SLM cost per request at each utilization")
     p.add_argument("--loadtest", action="append", required=True)
     for p in judgments.choices.values():

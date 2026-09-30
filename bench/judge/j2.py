@@ -132,6 +132,8 @@ def site_score(entry: Dict[str, Any]) -> Optional[float]:
 
 def per_call_eval(eval_run_id: str, source_run_id: str) -> Dict[Identity, bool]:
     found = require_done(eval_run_id, type="eval")
+    if not found.get("per_call"):
+        raise JudgmentError(f"{eval_run_id} is an end-to-end evaluation: J2 needs the per-call one (bench eval --per-call)")
     if found.get("source_run_id") != source_run_id:
         raise JudgmentError(f"{eval_run_id} evaluated {found.get('source_run_id')}, not {source_run_id}")
     return eval_index(read_jsonl(run_dir(eval_run_id) / "results.jsonl"))

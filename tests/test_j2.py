@@ -90,3 +90,6 @@ def test_judge_replay_reads_the_executions_and_writes_a_result(tmp_path, monkeyp
     assert read_result(path, "J2")["result"]["per_call_site"]["filter_column"]["agreement"]["n"] == 2 * len(QUESTIONS)
     with pytest.raises(JudgmentError, match="evaluated"):
         j2.judge_replay("replay-cheap", "eval-t", "eval-t")
+    write_run("eval-e2e", {"type": "eval", "source_run_id": "replay-cheap", "status": None}, files={"results.jsonl": []})
+    with pytest.raises(JudgmentError, match="per-call"):
+        j2.judge_replay("replay-cheap", "eval-e2e", "eval-t")

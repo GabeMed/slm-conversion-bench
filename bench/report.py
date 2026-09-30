@@ -5,7 +5,7 @@ of (no number goes in it):
 
     split: test
     arms:       {<arm>: {eval: <eval execution>, cost: <its J3 result>}}      # B0, B1, B2-production, B2-cheap, B3, B4, B5
-    pilot:      {arms: {<arm>: <eval execution on calib>}, per_call: <J2 result of the calib replay routed as B4>}
+    pilot:      {B0: <eval execution on calib>, B3: <eval execution on calib>}   # the same pilot questions
     format:     {B0: <J2 result, format validity of its run>, B4: <...>}
     per_call:   <J2 result of the test inputs replayed as B4>
     j5: <J5 result>   j6: <J6 result>   j7: <J7 result>   j8: <J8 result>
@@ -13,9 +13,13 @@ of (no number goes in it):
 
 Every figure is read from a judgment or computed by one: J1's per-question table and summary
 (`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
-second), run here through F2's functions. **Each J4 margin comes from the pilot** (SPEC §6.4): its
-`d_pilot` is the discordance J4 measures between the same two arms on the pilot's calib questions;
-a comparison with no pilot gets no verdict (J4 returns `noninferior: None`), never a pass. The test
+second), run here through F2's functions. **Every J4 margin comes from the pilot** (SPEC §6.4,
+§7.3), measured on calib before training, between the SLM and the production LLM: `d_pilot` is the
+discordance J4 measures between B3 (the zero-shot SLM) and B0 on the pilot's questions, one number
+for every end-to-end comparison; for repair, between the zero-shot candidate S4 chose and the
+teacher on calib's repair calls (J6's result). A comparison with no pilot gets no verdict (J4
+returns `noninferior: None`), never a pass. The plan names the pilot's executions; that their
+questions are the pre-registered pilot sample is not checked here. The test
 registry is read from git as F1 records it: `registry/test/<run_id>.intent.json` before a test
 execution starts and `<run_id>.manifest.json` when it ends, as committed at HEAD; an intent with no
 manifest is an interrupted execution.
@@ -33,7 +37,8 @@ shared by every row: no pilot (no verdict), not testable (Δ above the cap), non
   number, so the row is descriptive.
 - Appendix B: on the per-call-site evaluation of B4 on the test inputs. The routine (the call sites
   the paper assigns to SLMs: keywords, column filter, table and column selection) passes when each
-  agrees with the teacher at `thresholds.concordance_min` or more (a proxy). Refutes when the
+  agrees with the teacher at `thresholds.concordance_min` or more: the agreement proxy, which D15
+  says supports no per-cluster claim, so the verdict says it rests on it. Refutes when the
   routine fails, or when repair is non-inferior (a tie: the partition is conservative); confirms
   when repair is worse and the routine passes; otherwise repair's outcome says why not.
 - A5: format validity per call site (SPEC §6.3), B4 against B0: confirms when B4 is at least B0's
@@ -55,6 +60,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import paths
+from bench.provenance import scrub
 from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
                               run_dir)
 
@@ -106,16 +112,17 @@ def correct_of(rows: List[Dict[str, Any]]) -> Dict[str, bool]:
     return {str(r["question_id"]): bool(r["correct"]) for r in rows}
 
 
-def pilot_d(pilot: Dict[str, Dict[str, bool]], candidate: str, reference_arm: str, noninferiority: Callable,
-            settings: tuple) -> Optional[float]:
-    """The discordance J4 measures between two arms on the pilot's questions (both answered)."""
-    if candidate not in pilot or reference_arm not in pilot:
+def pilot_d(pilot_evals: Dict[str, str], ex_table: Callable, noninferiority: Callable, settings: tuple) -> Optional[float]:
+    """The pilot's discordance: J4's d between B3 (the zero-shot SLM) and B0 on the same calib questions."""
+    if not pilot_evals:
         return None
-    shared = sorted(set(pilot[candidate]) & set(pilot[reference_arm]))
-    if not shared:
-        return None
-    return plain(noninferiority({q: pilot[candidate][q] for q in shared}, {q: pilot[reference_arm][q] for q in shared},
-                                *settings))["d"]
+    if set(pilot_evals) != {"B0", "B3"}:
+        raise JudgmentError("the pilot is the zero-shot SLM (B3) against the production LLM (B0) on calib: name those two")
+    rows = per_arm(pilot_evals, "calib", ex_table)
+    b0, b3 = correct_of(rows["B0"]), correct_of(rows["B3"])
+    if set(b0) != set(b3):
+        raise JudgmentError("the pilot's B0 and B3 executions did not answer the same questions")
+    return plain(noninferiority(b3, b0, *settings))["d"]
 
 
 def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_summary: Callable,
@@ -125,8 +132,7 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     specs = plan.get("arms") or {}
     rows = per_arm({arm: spec["eval"] for arm, spec in specs.items()}, split, ex_table)
     pilot_plan = plan.get("pilot") or {}
-    pilot_rows = per_arm(pilot_plan["arms"], "calib", ex_table) if pilot_plan.get("arms") else {}
-    sources: Dict[str, Any] = {"arms": {}, "pilot": {arm: reference(e) for arm, e in (pilot_plan.get("arms") or {}).items()}}
+    sources: Dict[str, Any] = {"arms": {}, "pilot": {arm: reference(e) for arm, e in pilot_plan.items()}}
     arms, correct = {}, {}
     for arm, spec in specs.items():
         j3 = read_result(spec["cost"], "J3")
@@ -138,17 +144,17 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
                      "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
                      "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(j3["result"]),
                      "cost_label": j3["result"]["label"], "lower_bound": j3["result"].get("lower_bound", False),
+                     "slm_cost_basis": (j3["result"].get("slm_cost_basis") or {}).get("basis"),
                      "failed_unbilled": j3["result"]["failed_unbilled"], "prices_as_of": j3["result"]["prices_as_of"],
                      "calls": j3["result"]["calls"], "replaceable_fraction": j3["result"]["replaceable_fraction"]}
         sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
     settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
-    pilot = {arm: correct_of(r) for arm, r in pilot_rows.items()}
+    d_pilot = pilot_d(pilot_plan, ex_table, noninferiority, settings)
     tests = {}
     for candidate, reference_arm in PAIRS:
         if candidate in correct and reference_arm in correct:
-            d = pilot_d(pilot, candidate, reference_arm, noninferiority, settings)
             tests[f"{reference_arm}|{candidate}"] = plain(noninferiority(correct[candidate], correct[reference_arm],
-                                                                         *settings, d_pilot=d))
+                                                                         *settings, d_pilot=d_pilot))
 
     judged = {}
     for key, judgment in (("j5", "J5"), ("j6", "J6"), ("j7", "J7"), ("j8", "J8"), ("per_call", "J2"),
@@ -169,20 +175,19 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     repair = None
     revise = (judged["per_call"] or {}).get("per_call_site", {}).get("revise")
     if revise and revise["gold"]:
-        d = None
-        if pilot_plan.get("per_call"):
-            calib = read_result(pilot_plan["per_call"], "J2")["result"]
-            if (calib.get("arm"), calib.get("split")) != ("B4", "calib"):
-                raise JudgmentError("the pilot's per-call evaluation must be a calib replay routed as B4")
-            gold = (calib["per_call_site"].get("revise") or {}).get("gold")
-            if gold:
-                d = plain(noninferiority(gold["by_question"]["replay"], gold["by_question"]["teacher"], *settings))["d"]
-            sources["pilot_per_call"] = result_reference(pilot_plan["per_call"])
+        d = None  # the repair pilot: J6's chosen candidate, zero-shot, against the teacher on calib's repair calls
+        zeroshot = ((judged["j6"] or {}).get("per_call_site") or {}).get((judged["j6"] or {}).get("choice"), {})
+        gold = (zeroshot.get("revise") or {}).get("gold")
+        if gold:
+            d = plain(noninferiority(gold["by_question"]["replay"], gold["by_question"]["teacher"], *settings))["d"]
         repair = plain(noninferiority(revise["gold"]["by_question"]["replay"], revise["gold"]["by_question"]["teacher"],
                                       *settings, d_pilot=d))
-    return {"split": split, "arms": arms, "tests": tests, "repair_test": repair, "formats": formats,
+    registry = test_registry()
+    if split == "test" and not registry["available"]:
+        raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
+    return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "repair_test": repair, "formats": formats,
             "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
-            "v3_min_ratio": config["claims"]["v3_min_ratio"], "registry": test_registry(), "sources": sources}
+            "v3_min_ratio": config["claims"]["v3_min_ratio"], "registry": registry, "sources": sources}
 
 
 def plain(value: Any) -> Any:
@@ -343,12 +348,13 @@ def _appendix_b(data) -> Dict[str, str]:
     repaired = outcome(repair)
     result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])} from the {repair['margin_from']}), "
               f"{repaired}; routine agreement: " + ", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())))
+    proxy = "the routine by the agreement proxy, which supports no per-cluster claim (D15)"
     if not passes_routine:
-        verdict = "refutes (the SLM loses on the routine)"
+        verdict = f"refutes (the SLM loses on the routine; {proxy})"
     elif repaired == "non-inferior":
         verdict = "refutes (the SLM ties on repair)"
     elif repaired == "worse":
-        verdict = "confirms"
+        verdict = f"confirms ({proxy})"
     else:
         verdict = _why_not([repaired])
     return {**row, "result": result, "verdict": verdict}
@@ -408,7 +414,7 @@ def test_registry(root: Optional[Path] = None) -> Dict[str, Any]:
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
     listed = git("ls-tree", "-r", "--name-only", "HEAD", REGISTRY_DIR)
     if listed.returncode != 0:
-        return {"available": False, "reason": (listed.stderr.strip() or "git failed")[:200], "runs": []}
+        return {"available": False, "reason": scrub(listed.stderr.strip() or "git failed")[:200], "runs": []}
     files = {Path(line).name for line in listed.stdout.splitlines()}
     run_ids = sorted({name.rsplit(".", 2)[0] for name in files if name.endswith((".intent.json", ".manifest.json"))})
     runs = []
@@ -527,6 +533,7 @@ def render(data: Dict[str, Any]) -> str:
             costs = ", ".join(f"{u + ': ' if u else ''}{_usd(c)}" for u, c in
                               sorted(a["cost_per_correct"].items(), key=lambda kv: float(kv[0].rstrip("%") or 0)))
             usage = a["cost_label"] + (f", lower bound ({a['failed_unbilled']} failed calls unpriced)" if a["lower_bound"] else "")
+            usage += f"; SLM cost {a['slm_cost_basis']}" if a.get("slm_cost_basis") else ""
             rows.append([arm, a["n"], _pct(a["ex"])] + [_pct(a["by_difficulty"].get(d)) for d in difficulties]
                         + [costs, usage])
     parts += [_table(["arm", "n", "EX"] + [f"EX {d}" for d in difficulties] + ["cost per correct query (standard prices)", "usage"], rows), ""]

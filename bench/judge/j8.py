@@ -17,6 +17,13 @@ J8 gives the cost **per request**. The load test replays the agent's real calls,
 one SLM call: J3 prices each SLM call of an execution at this cost, which makes the cost per question
 the execution's SLM calls per question times it. That holds as far as the load test's mix of calls
 is the execution's (F3 replays a source execution's calls; the manifest records which).
+
+**One engine per load test** (F3): the base (`slm:<candidate>`, B3's traffic) or one adapter
+(`slm:<candidate>+lora:<name>`). J8 takes the load tests of one or more engines of **one base on one
+GPU**, judges each engine apart, and combines them by one stated rule: the highest cost per request
+among the engines measured (the conservative one). B4 and B5 spread their calls over several adapters
+on one server, which no single-engine load test measures, so their SLM cost from J8 is an
+**extrapolation**; the result records the engines and load tests it combined, and J3 labels it.
 """
 import json
 from typing import Any, Dict, List
@@ -54,25 +61,32 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any]):
     cost = config["cost"]
     if cost.get("p95_slo_ms") is None:
         raise JudgmentError("cost.p95_slo_ms is not set: sustained throughput needs its pre-registered bound")
-    levels, engines, gpus, reads = [], set(), set(), {}
+    levels, gpus, reads = [], set(), {}
     for run_id in sorted(loadtest_run_ids):
         found = require_done(run_id, type="loadtest")
         if found.get("prefix_cache") is not True:
             raise JudgmentError(f"{run_id} did not run with the prefix cache on (SPEC §6.6)")
-        engines.add(found["engine"])
         gpus.add(found["gpu"])
         export = json.loads((run_dir(run_id) / EXPORT).read_text())
-        levels.append({"run_id": run_id, "concurrency": found["concurrency"], "source_run_id": found.get("source_run_id"),
-                       **level(export)})
+        levels.append({"run_id": run_id, "engine": found["engine"], "concurrency": found["concurrency"],
+                       "source_run_id": found.get("source_run_id"), **level(export)})
         reads[run_id] = reference(run_id)
-    if len(engines) != 1 or len(gpus) != 1:
-        raise JudgmentError(f"the load levels must be one engine on one GPU: {sorted(engines)} on {sorted(gpus)}")
+    engines = sorted({lv["engine"] for lv in levels})
+    bases = {e.split("+lora:")[0] for e in engines}
+    if len(bases) != 1 or len(gpus) != 1:
+        raise JudgmentError(f"the load tests must be engines of one base on one GPU: {engines} on {sorted(gpus)}")
     gpu = gpus.pop()
     prices = (config.get("modal") or {}).get("gpu_prices") or {}
     per_second = (prices.get("usd_per_s") or {}).get(gpu)
     if per_second is None or not prices.get("as_of"):
         raise JudgmentError(f"modal.gpu_prices (F3) has no dated price for {gpu!r}")
-    result = {"engine": engines.pop(), "gpu": gpu, "gpu_prices_as_of": prices["as_of"],
+    per_engine = {engine: judge([lv for lv in levels if lv["engine"] == engine], per_second * 3600,
+                                cost["p95_slo_ms"], cost["utilizations"]) for engine in engines}
+    combined = {u: max(result["cost_per_request"][u] for result in per_engine.values())
+                for u in next(iter(per_engine.values()))["cost_per_request"]}
+    result = {"engine": bases.pop(), "gpu": gpu, "gpu_prices_as_of": prices["as_of"], "price_per_hour": per_second * 3600,
               "source_run_ids": sorted({lv.get("source_run_id") for lv in levels if lv.get("source_run_id")}),
-              **judge(levels, per_second * 3600, cost["p95_slo_ms"], cost["utilizations"])}
+              "engines": per_engine, "cost_per_request": combined,
+              "combined": {"rule": "the highest cost per request among the engines measured", "engines": engines,
+                           "loadtests": sorted(reads)}}
     return write_result(JUDGMENT, {"loadtests": reads}, result)

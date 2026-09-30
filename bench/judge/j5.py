@@ -84,7 +84,8 @@ def nearest_centre(vectors, centres: Dict[str, Any]) -> List[str]:
     ids = sorted(centres)
     matrix = np.asarray([centres[c] for c in ids], dtype=np.float64)
     x = _unit(np.asarray(vectors, dtype=np.float64))
-    distances = ((x[:, None, :] - matrix[None, :, :]) ** 2).sum(axis=2)
+    # ‖x − c‖² = ‖x‖² − 2x·c + ‖c‖², without an array of vectors × centres × dimensions
+    distances = (x * x).sum(axis=1)[:, None] - 2 * x @ matrix.T + (matrix * matrix).sum(axis=1)[None, :]
     return [ids[i] for i in distances.argmin(axis=1)]
 
 

@@ -13,7 +13,10 @@ correct query.
   at all. `estimated` usage is priced and the result is labelled `estimated`.
 - **The SLM** has no token price: each SLM call costs the load test's cost per request (J8) at each
   utilization of `cost.utilizations`, so an arm with SLM calls has one total per API variant and
-  utilization (`standard@50%`).
+  utilization (`standard@50%`). The SLM cost is `measured` only when every SLM call ran on the one
+  engine J8 measured and that engine is the base (B3); calls through adapters (B4, B5) spread over
+  several adapters on one server, which no single-engine load test measures, so their cost is
+  `extrapolated from per-adapter load tests` (`slm_cost_basis`).
 - **Per correct query**: the total over the execution divided by its correct questions, read from
   its `eval` execution (J1's source).
 - **Replaceable fraction** (SPEC §5), for an execution with SLM calls: the share of calls and of
@@ -146,6 +149,10 @@ def judge(calls: List[dict], question_ids: List[str], correct: Optional[Dict[str
 
 # ---------------------------------------------------------------- reading the executions
 
+def engines_used(calls: List[dict]) -> set:
+    return {c["engine"] for c in calls if c["model_role"] == "slm"}
+
+
 def slm_cost_per_request(j8_path: Optional[str], calls: List[dict]) -> Tuple[Optional[Dict[str, float]], Dict[str, Any]]:
     engines = {c["engine"].split("+lora:")[0] for c in calls if c["model_role"] == "slm"}
     if not engines:
@@ -155,7 +162,11 @@ def slm_cost_per_request(j8_path: Optional[str], calls: List[dict]) -> Tuple[Opt
     j8 = read_result(j8_path, "J8")
     if engines != {j8["result"]["engine"].split("+lora:")[0]}:
         raise JudgmentError(f"the load test measured {j8['result']['engine']!r}, the calls used {sorted(engines)}")
-    return j8["result"]["cost_per_request"], {"j8": result_reference(j8_path)}
+    measured = engines_used(calls) == set(j8["result"].get("combined", {}).get("engines") or [j8["result"]["engine"]]) \
+        and not any("+lora:" in e for e in engines_used(calls))
+    basis = {"basis": "measured" if measured else "extrapolated from per-adapter load tests",
+             "call_engines": sorted(engines_used(calls)), "combined": j8["result"].get("combined")}
+    return j8["result"]["cost_per_request"], {"j8": result_reference(j8_path), "slm_cost_basis": basis}
 
 
 def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config: Dict[str, Any]):
@@ -172,8 +183,9 @@ def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config:
         correct = {r["question_id"]: bool(r["correct"]) for r in read_jsonl(run_dir(eval_run_id) / "results.jsonl")}
         reads["eval"] = reference(eval_run_id)
     slm, j8_read = slm_cost_per_request(j8_path, calls)
+    basis = j8_read.pop("slm_cost_basis", None)
     reads.update(j8_read)
     question_ids = found.get("question_ids") or sorted({c["question_id"] for c in calls})
-    result = {"arm": found.get("arm"), "engine": found.get("engine"), "split": found.get("split"),
+    result = {"arm": found.get("arm"), "engine": found.get("engine"), "split": found.get("split"), "slm_cost_basis": basis,
               **judge(calls, question_ids, correct, config["prices"], config["roles"]["production_llm"]["model"], slm)}
     return write_result(JUDGMENT, reads, result)

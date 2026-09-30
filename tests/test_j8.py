@@ -48,7 +48,7 @@ def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
     assert result["result"]["gpu_prices_as_of"] == "2026-09-30"
     assert set(result["reads"]["loadtests"]) == set(runs)
     loadtest("loadtest-other", 4, 500, 5.0, engine="slm:granite-4.2-8b")
-    with pytest.raises(JudgmentError, match="one engine"):
+    with pytest.raises(JudgmentError, match="one base"):
         j8.run(runs + ["loadtest-other"], config)
     loadtest("loadtest-nocache", 2, 500, 5.0, cache=False)
     with pytest.raises(JudgmentError, match="prefix cache"):
@@ -59,3 +59,18 @@ def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
     config["cost"]["p95_slo_ms"] = None
     with pytest.raises(JudgmentError, match="p95_slo_ms"):
         j8.run(runs, config)
+
+
+def test_adapters_are_measured_apart_and_combined_by_the_stated_rule(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_ms": 1000},
+                                             "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}})
+    runs = [loadtest("lt-c0-1", 1, 400, 4.0, engine="slm:qwen3-8b+lora:c0"),
+            loadtest("lt-c0-8", 8, 900, 10.0, engine="slm:qwen3-8b+lora:c0"),
+            loadtest("lt-c1-8", 8, 800, 5.0, engine="slm:qwen3-8b+lora:c1")]
+    result = read_result(j8.run(runs, config), "J8")["result"]
+    assert result["engine"] == "slm:qwen3-8b"
+    assert result["engines"]["slm:qwen3-8b+lora:c0"]["sustained"]["throughput_rps"] == 10.0
+    # combined: the dearer engine's cost per request (c1 sustains 5 rps)
+    assert result["cost_per_request"]["100%"] == pytest.approx(0.8 / (5.0 * 3600))
+    assert result["combined"] == {"rule": "the highest cost per request among the engines measured",
+                                  "engines": ["slm:qwen3-8b+lora:c0", "slm:qwen3-8b+lora:c1"], "loadtests": sorted(runs)}
