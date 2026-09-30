@@ -128,7 +128,7 @@ def _finished_run(repo, split="train", status="done", predictions=None, question
     (run_dir / "predictions.json").write_text(json.dumps(predictions))
     (run_dir / "config.json").write_text(json.dumps(config))
     (run_dir / "manifest.json").write_text(json.dumps({
-        "run_id": run_dir.name, "split": split, "status": status, "commit": "c",
+        "run_id": run_dir.name, "arm": "B0", "split": split, "status": status, "commit": "c",
         "question_ids": question_ids or sorted(predictions), "config_path": "config.yaml",
         "config_sha256": config_sha256(config)}))
     return run_dir.name
@@ -139,7 +139,10 @@ def test_evaluate_scores_a_finished_run(repo):
     results = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
     assert [(r["question_id"], r["correct"]) for r in results] == [("1", True), ("2", False)]
     recorded = json.loads(paths.DATA_MANIFEST.read_text())["databases"]["tiny"]["sqlite"]
-    assert json.loads((out / "manifest.json").read_text())["databases"] == {"tiny": recorded}
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["databases"] == {"tiny": recorded}
+    assert (manifest["arm"], manifest["split"], manifest["per_call"] if "per_call" in manifest else False) == ("B0", "train", False)
+    assert manifest["fixed_date"] == repo[2]["eval"]["fixed_date"] and manifest["sqlite_version"] == sqlite3.sqlite_version
 
 
 def test_evaluate_uses_the_runs_configuration_not_todays(repo):

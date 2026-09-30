@@ -33,6 +33,12 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("eval", help="the eval execution of a run's predictions (paired by question_id)")
     p.add_argument("run_id")
+    p.add_argument("--per-call", action="store_true",
+                   help="score the SQL of every generate_candidate and revise invocation in the run's calls.jsonl")
+
+    p = sub.add_parser("prereg", help="write and commit prereg/manifest.json and prereg/HASH (push to publish)")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--replace", action="store_true", help="register anew over a different registration")
 
     args = parser.parse_args(argv)
     try:
@@ -47,8 +53,16 @@ def main(argv=None) -> int:
             from bench.agent.runner import run_agent
             print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit))
         elif args.command == "eval":
-            from bench.evaluate import evaluate
-            print(evaluate(args.run_id))
+            from bench.evaluate import evaluate, evaluate_per_call
+            print((evaluate_per_call if args.per_call else evaluate)(args.run_id))
+        elif args.command == "prereg":
+            from pathlib import Path
+            from bench.prereg import register
+            registered = register(str(Path(args.config).resolve()), replace=args.replace)
+            if registered["unset"]:
+                print(f"bench prereg: registered with null values: {', '.join(registered['unset'])}", file=sys.stderr)
+            print(f"{registered['hash']} ({'committed' if registered['new'] else 'already registered'} at "
+                  f"{registered['commit'][:12]}; `git push` publishes it)")
     except (TestSplitLocked, ConfigError, DataError, FactError, HarnessError) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2

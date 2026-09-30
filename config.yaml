@@ -138,6 +138,9 @@ eval:
   timeout_s: 60
   fixed_date: "2026-09-30"     # F2: 'now' in pred and gold is this date at 00:00 UTC (quoted: a YAML date breaks the hash)
 
+stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are in thresholds and seeds
+  n_boot: 10000                # paired-bootstrap resamples for the one-sided lower bound
+
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B3: {choice: null}           # J6 (S4)
   B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
