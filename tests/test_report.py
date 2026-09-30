@@ -742,6 +742,7 @@ def test_several_runs_of_b0_reach_every_row_on_its_evidence(pipeline):
     verdicts = {r["claim"].split(":")[0]: r["verdict"] for r in data["map"]}
     assert verdicts["Appendix B"] == f"no verdict (several test runs of one configuration: {runs})"  # B0 is K4's teacher
     assert verdicts["A5"] == f"no verdict (several test runs of one configuration of B0: {runs})"
+    assert verdicts["A4 / A11"] == f"no verdict (several test runs of one configuration of B0: {runs})"
     assert all(t["several_runs"] == ["agent-B0-again", "agent-B0-test"] for t in data["gold_tests"].values())
 
 

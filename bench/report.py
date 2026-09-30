@@ -322,9 +322,9 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         if ids:
             d = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
                                      {q: gold["by_question"]["teacher"][q] for q in ids}, *settings))["d"]
-        several = sorted(set((replay_several or []) + ((arms.get("B0") or {}).get("several_runs") or []))) or None
+        # the replay's several runs, and its teacher's (B0's run), as the registry binding found them
         gold_tests[site] = {**plain(noninferiority(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
-                                                   *settings, d_pilot=d)), "several_runs": several}
+                                                   *settings, d_pilot=d)), "several_runs": replay_several}
     utilizations_cfg = [f"{round(u * 100)}%" for u in config["cost"]["utilizations"]]
     return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int),
             "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"), "per_call_uncovered": uncovered,
