@@ -222,9 +222,11 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
             raise CurationError(f"the configuration snapshot of {run_id} does not match its manifest")
         _teacher_may_train(snapshot)
         barrier.ensure_split_allowed("train", snapshot)
-        if not (snapshot.get("eval") or {}).get("fixed_date"):
-            raise CurationError(f"{run_id}'s configuration has no eval.fixed_date: the SQL has no pre-registered day to run at")
-        days.add(snapshot["eval"]["fixed_date"])
+        from bench.evaluate import fixed_date
+        try:  # the day eval scores at, checked as eval checks it
+            days.add(fixed_date(snapshot))
+        except data.DataError as e:
+            raise CurationError(f"{run_id}'s configuration: {e}: the SQL has no pre-registered day to run at") from e
         overlap = seen_questions & set(found["question_ids"])
         if overlap:
             raise CurationError(f"{run_id} repeats questions of another source: {sorted(overlap, key=int)[:5]}")

@@ -108,9 +108,14 @@ def check_keys(key_envs: List[str]) -> None:
 
 
 def registry_pushed() -> None:
-    """Every earlier registry commit is on origin/main (checked after the barrier's fetch): a record
-    that lives only in a local clone is no record."""
-    result = _git("log", "--oneline", "origin/main..HEAD", "--", "registry/")
+    """Every earlier registry commit is on origin's main as a fetch finds it now (the barrier's
+    `fetch_origin_main`, never a remote-tracking ref that may be stale): a record that lives only in a
+    local clone is no record."""
+    remote_commit, why_not = barrier.fetch_origin_main(paths.ROOT)
+    if remote_commit is None:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: {why_not}: the registry cannot be "
+                                      f"confirmed as pushed")
+    result = _git("log", "--oneline", f"{remote_commit}..HEAD", "--", "registry/")
     if result.returncode != 0:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot compare registry/ with origin/main "
                                       f"({result.stderr.strip()})")
@@ -138,11 +143,6 @@ def registered_call_sites() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------- executions on test
-
-def prereg_hash() -> str:
-    """The `prereg/HASH` an execution on test runs under (the barrier has already checked it)."""
-    return (paths.ROOT / barrier.PREREG_HASH).read_text().strip()
-
 
 def commit_intent(manifest: Dict[str, Any]) -> str:
     """Nothing in the intent comes from a model or a provider: no redaction needed."""

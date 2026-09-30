@@ -117,18 +117,44 @@ def test_the_fetch_never_prompts_and_times_out(repo, monkeypatch):
 
     def run(cmd, **kwargs):
         if "fetch" in cmd:
-            seen.append(kwargs)
+            seen.append((cmd, kwargs))
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
         return real(cmd, **kwargs)
     monkeypatch.setattr(barrier.subprocess, "run", run)
-    assert "could not fetch" in prereg_published(CONFIG, repo)
-    (kwargs,) = seen
-    assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0" and kwargs["timeout"] == barrier.FETCH_TIMEOUT_S
+    for name in ("GIT_TERMINAL_PROMPT", "GIT_SSH_COMMAND"):  # whatever the shell running the tests exports
+        monkeypatch.delenv(name, raising=False)
+    assert "timed out" in prereg_published(CONFIG, repo)
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i my-key")  # a user's own ssh command is kept
+    assert "timed out" in prereg_published(CONFIG, repo)
+    (cmd, first), (_, second) = seen
+    assert first["env"]["GIT_TERMINAL_PROMPT"] == "0" and first["timeout"] == barrier.FETCH_TIMEOUT_S
+    assert first["env"]["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes" and second["env"]["GIT_SSH_COMMAND"] == "ssh -i my-key"
+    assert cmd[-1] == "refs/heads/main"  # the branch in full: a tag called main would win over a short name
 
 
-def test_a_malformed_registration_is_a_refusal_not_a_crash(repo):
+def test_a_failed_fetch_refuses_even_after_one_that_succeeded(repo):
+    """The earlier fetch left a FETCH_HEAD: a failed fetch must not compare with it."""
+    register(repo)
+    assert prereg_published(CONFIG, repo) == ""
+    git(repo, "remote", "set-url", "origin", str(repo.parent / "gone.git"))
+    assert "could not fetch origin/main" in prereg_published(CONFIG, repo)
+
+
+def test_a_fetch_that_leaves_no_commit_refuses(repo, monkeypatch):
+    """An empty FETCH_HEAD (a concurrent fetch had just emptied it) would read as the index, which holds
+    the committed files: the barrier would open. It refuses."""
+    import bench.barrier as barrier
+    register(repo)
+    real = barrier._git
+    monkeypatch.setattr(barrier, "_git", lambda root, *args: subprocess.CompletedProcess(args, 0, "", "")
+                        if "FETCH_HEAD^{commit}" in args else real(root, *args))
+    assert "left no commit to compare with" in prereg_published(CONFIG, repo)
+
+
+@pytest.mark.parametrize("content", ["[not JSON]\n", "[]\n", "1\n"])
+def test_a_malformed_registration_is_a_refusal_not_a_crash(repo, content):
     (repo / "prereg").mkdir()
-    (repo / "prereg" / "manifest.json").write_text("[not an object]\n")
+    (repo / "prereg" / "manifest.json").write_text(content)
     (repo / "prereg" / "HASH").write_text(sha(repo / "prereg" / "manifest.json") + "\n")
     git(repo, "add", "prereg")
     git(repo, "commit", "-q", "-m", "a malformed registration")

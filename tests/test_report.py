@@ -86,6 +86,18 @@ def test_format_claim_compares_each_call_site():
     assert a5["verdict"] == "refutes" and a5["result"].startswith("B4 below B0 on b")
 
 
+def test_a4_states_b5s_own_outcome_and_a5_honours_several_runs():
+    fraction = {"calls": 0.5, "tokens": 0.4, "cost_at_production_price": 0.3}
+    for ok5, diff, said in ((True, -0.01, "non-inferior"), (False, -0.2, "worse"), (False, -0.02, "inconclusive")):
+        data = data_with(j4_results(ok5=ok5, diff=diff), {"B0": {"": 1.0}})
+        data["arms"]["B5"] = {"replaceable_fraction": fraction}
+        assert row(report.claims_map(data), "A4")["result"].endswith(f"B5 against B0: {said}")
+    formats = {"B0": {"a": {"rate": 0.9}}, "B4": {"a": {"rate": 1.0}}}
+    data = data_with({}, {}, formats)
+    data["arms"]["B4"] = {"several_runs": ["b4-a", "b4-b"]}
+    assert row(report.claims_map(data), "A5")["verdict"] == "no verdict (several test runs of one configuration of B4)"
+
+
 def per_call(rates):
     return {"per_call_site": {site: {"agreement": {"rate": rate}} for site, rate in rates.items()}}
 
@@ -263,6 +275,36 @@ def test_the_chart_legend_reads_the_configured_utilizations():
     assert "one point per utilization, 30% (right) to 90% (left)" in report.chart_svg(data)
 
 
+def test_b3s_choice_is_checked_like_every_trained_arms_facts(tmp_path, monkeypatch):
+    from fixtures.fake import repo
+    repo(tmp_path, monkeypatch)
+    arms, judged = {"B3": {"run_id": "b3"}}, {"j6": {"choice_fact": {"sha256": "C"}, "choice": "qwen"}}
+    bind = lambda choice, judged=judged: report._registry_bindings(  # noqa: E731
+        "test", {a: dict(v) for a, v in arms.items()}, registry_of(("b3", "agent", "B3", "done", {"choice": choice})),
+        judged, {}, {}, report._expected_facts({}, judged), "h")
+    bind("C")
+    with pytest.raises(JudgmentError, match="recorded the choice fact"):
+        bind("X")
+    with pytest.raises(JudgmentError, match="cannot be checked: the plan names no j6"):
+        bind("C", {})
+
+
+def test_the_plans_adapters_are_expected_and_must_be_j7s(tmp_path, monkeypatch):
+    from fixtures.fake import repo
+    from fixtures.world import trained_on
+    _, config = repo(tmp_path, monkeypatch)
+    choice = facts.write_fact("J6", "choice", {"slm": "qwen3-8b"})
+    adapters = facts.write_fact("S5", "adapters", {
+        "slm": "qwen3-8b", "choice": choice.parent.name, "centroids": "k" * 64, **trained_on(config),
+        "adapters": {"c0": {"served_name": "qwen3-8b-c0", "sha256": "1" * 64}}})
+    plan = {"adapters": relative(adapters)}
+    assert report._expected_facts(plan, {})["adapters"] == adapters.parent.name
+    j7 = {"adapters": adapters.parent.name, "allocation_fact": {"sha256": "L"}}
+    assert report._expected_facts(plan, {"j7": j7})["adapters"] == adapters.parent.name
+    with pytest.raises(JudgmentError, match="is not the one its J7 allocated on"):
+        report._expected_facts(plan, {"j7": {**j7, "adapters": "a" * 64}})
+
+
 def test_registry_reads_f1s_committed_intents_and_manifests(tmp_path):
     def git(*args):
         subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
@@ -299,22 +341,39 @@ QUALITY = {"B0": 1.0, "B1": 0.7, "B2-production": 0.6, "B2-cheap": 0.5, "B3": 0.
 CODE = Path(__file__).resolve().parent.parent  # this repository, whatever bench.paths points at
 
 
-def register_analysis_code(root):
-    """A copy of the analysis code this repository tracks, committed in `root`, and a pre-registration
-    recording it (prereg/manifest.json and HASH); returns the hash in force."""
+def register_analysis_code(root, config):
+    """A pre-registration of `config` as `bench prereg` writes it: SPEC.md, the configuration, the splits,
+    the data manifest and a copy of the analysis code this repository tracks, committed in `root` and
+    pushed to a bare origin, which the barrier fetches. Returns the hash in force."""
+    from bench.contracts.config import config_sha256
     from bench.prereg import ANALYSIS_CODE, analysis_code
+
+    def git(*args, cwd=root):
+        subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+    def sha(rel):
+        return hashlib.sha256((root / rel).read_bytes()).hexdigest()
     tracked = subprocess.run(["git", "-C", str(CODE), "ls-files", "--", *ANALYSIS_CODE], check=True,
                              capture_output=True, text=True).stdout.split()
     for rel in tracked:
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_bytes((CODE / rel).read_bytes())
-    subprocess.run(["git", "-C", str(root), "add", "bench"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "analysis code"], check=True, capture_output=True)
+    (root / "SPEC.md").write_text("protocol\n")
+    git("add", "bench", "SPEC.md")
+    git("commit", "-q", "-m", "analysis code")
     (root / "prereg").mkdir()
-    manifest = json.dumps({"analysis_code": analysis_code(root)}, sort_keys=True).encode() + b"\n"
+    manifest = json.dumps({"spec_sha256": sha("SPEC.md"), "config_sha256": config_sha256(config),
+                           "splits_sha256": sha("data/splits.json"), "data_manifest_sha256": sha("data/MANIFEST.json"),
+                           "commit": "c", "analysis_code": analysis_code(root)}, sort_keys=True).encode() + b"\n"
     (root / "prereg" / "manifest.json").write_bytes(manifest)
     prereg_hash = hashlib.sha256(manifest).hexdigest()
     (root / "prereg" / "HASH").write_text(prereg_hash + "\n")
+    git("add", "prereg")
+    git("commit", "-q", "-m", "pre-registration")
+    origin = root.parent / f"{root.name}-origin.git"
+    git("init", "-q", "--bare", str(origin), cwd=root.parent)
+    git("remote", "add", "origin", str(origin))
+    git("push", "-q", "origin", "HEAD:main")
     return prereg_hash
 
 
@@ -463,7 +522,7 @@ def pipeline(tmp_path, monkeypatch):
     # the test registry, as F1 commits it, under a pre-registration of the analysis code this repository holds
     for args in (("init", "-q"), ("config", "user.email", "t@example.org"), ("config", "user.name", "t")):
         subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
-    prereg_hash = register_analysis_code(tmp_path)
+    prereg_hash = register_analysis_code(tmp_path, config)
     (tmp_path / "registry" / "test").mkdir(parents=True)
     recorded = {"B3": {"choice": choice.parent.name},
                 "B4": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name},
@@ -484,7 +543,27 @@ def pipeline(tmp_path, monkeypatch):
     subprocess.run(["git", "-C", str(tmp_path), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "registry"], check=True, capture_output=True)
     return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path,
-            "j6": j6_path, "root": tmp_path}
+            "j6": j6_path, "root": tmp_path, "prereg_hash": prereg_hash}
+
+
+def test_a_test_report_is_read_only_under_the_registration_in_force(pipeline):
+    """The configuration every verdict reads (thresholds, seeds, the pilot) is the registered one, and the
+    registration itself is intact: a manifest edited to fit new code, keeping the old HASH, is refused."""
+    import copy
+    run = lambda config: report.run(str(pipeline["plan"]), config, ex_table, ex_summary,  # noqa: E731
+                                    noninferiority, pilot_ids=PILOT)
+    looser = copy.deepcopy(pipeline["config"])
+    looser["thresholds"]["concordance_min"] = 0.5  # Appendix B's routine bar, lowered after the test
+    with pytest.raises(JudgmentError, match="configuration differs from the pre-registered one"):
+        run(looser)
+    root = pipeline["root"]
+    manifest = json.loads((root / "prereg" / "manifest.json").read_text())
+    manifest["analysis_code"]["bench/judge/j4.py"] = "0" * 64
+    (root / "prereg" / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    for args in (("commit", "-q", "-am", "a manifest fitted to new code"), ("push", "-q", "origin", "HEAD:main")):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    with pytest.raises(JudgmentError, match="HASH is not the sha256 of prereg/manifest.json"):
+        run(pipeline["config"])
 
 
 def test_a_test_report_is_read_only_with_the_registered_analysis_code(pipeline):
@@ -648,11 +727,28 @@ def test_a_replay_of_some_call_sites_decides_neither_appendix_b_nor_k4(pipeline)
     assert gold_only  # the teacher had gold calls to replay
 
 
+def test_several_registered_replays_leave_k4_and_appendix_b_without_a_verdict(pipeline):
+    root = pipeline["root"]
+    registered = json.loads((root / "registry" / "test" / "replay-B4-test.manifest.json").read_text())
+    identity = {k: registered[k] for k in ("type", "arm", "engine", "commit", "prereg_hash")}
+    (root / "registry" / "test" / "replay-B4-again.intent.json").write_text(json.dumps(
+        {**identity, "run_id": "replay-B4-again", "split": "test", "started_at": "2026-10-01T10:00:00+00:00"}))
+    (root / "registry" / "test" / "replay-B4-again.manifest.json").write_text(json.dumps({**identity, "status": "failed"}))
+    for args in (("add", "registry"), ("commit", "-q", "-m", "the replay again")):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
+                                  pilot_ids=PILOT) / "report.json").read_text())
+    several = "no verdict (several test runs of one configuration: replay-B4-again, replay-B4-test)"
+    assert data["gold_tests"] and all(t["several_runs"] == ["replay-B4-again", "replay-B4-test"]
+                                      for t in data["gold_tests"].values())
+    assert next(r for r in data["map"] if r["claim"].startswith("Appendix B"))["verdict"] == several
+
+
 def test_several_registered_runs_of_an_arm_leave_its_comparisons_without_a_verdict(pipeline):
     root = pipeline["root"]
     identity = json.loads((root / "registry" / "test" / "agent-B4-test.manifest.json").read_text())
     (root / "registry" / "test" / "agent-B4-again.intent.json").write_text(json.dumps(
-        {"type": "agent", "arm": "B4", "engine": None, "prereg_hash": "d" * 64, "run_id": "agent-B4-again",
+        {"type": "agent", "arm": "B4", "engine": None, "prereg_hash": pipeline["prereg_hash"], "run_id": "agent-B4-again",
          "split": "test", "started_at": "2026-10-01T11:00:00+00:00"}))
     (root / "registry" / "test" / "agent-B4-again.manifest.json").write_text(json.dumps({**identity, "status": "failed"}))
     subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)

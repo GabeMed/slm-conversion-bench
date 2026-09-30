@@ -128,7 +128,10 @@ def check_registered_analysis_code(root: Path) -> None:
     """A test result is produced only by the analysis code that was registered (prereg/manifest.json),
     file by file; a registration that recorded none matches no code. For whatever scores or reads the
     test: bench eval, and the report."""
-    registered = json.loads((root / barrier.PREREG_MANIFEST).read_text()).get("analysis_code") or {}
+    manifest = barrier.read_registered(root)
+    if manifest is None:
+        raise PreregError(f"{barrier.PREREG_MANIFEST} is not a JSON object: no analysis code is registered")
+    registered = manifest.get("analysis_code") or {}
     now = analysis_code(root)
     changed = sorted(rel for rel in set(registered) | set(now) if registered.get(rel) != now.get(rel))
     if changed:
@@ -150,19 +153,23 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     for key in ("n_boot", "pilot_size"):
         if not isinstance((config.get("stats") or {}).get(key), int):
             raise PreregError(f"the configuration has no stats.{key}: the delta rule needs it")
-    calib = json.loads((root / barrier.REGISTERED["splits_sha256"]).read_text()).get("calib") or []
+    inputs = barrier.REGISTERED
+    calib = json.loads((root / inputs["splits_sha256"]).read_text()).get("calib") or []
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
-                **{key: _sha256(root / rel) for key, rel in barrier.REGISTERED.items()},
+                **{key: _sha256(root / rel) for key, rel in inputs.items()},
                 "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib),
                 "analysis_code": analysis_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
     if manifest_path.exists():
-        existing = json.loads(manifest_path.read_text())
-        if {k: v for k, v in existing.items() if k != "commit"} == {k: v for k, v in manifest.items() if k != "commit"}:
+        existing = barrier.read_registered(root)
+        if existing is None and not replace:
+            raise PreregError(f"{barrier.PREREG_MANIFEST} is not a JSON object: pass --replace to register anew")
+        if existing is not None and \
+                {k: v for k, v in existing.items() if k != "commit"} == {k: v for k, v in manifest.items() if k != "commit"}:
             return {"hash": hash_path.read_text().strip(), "commit": _git(root, "rev-parse", "HEAD"), "new": False,
                     "unset": unset(config)}
         if not replace:
-            raise PreregError(f"a different pre-registration is in force ({hash_path.read_text().strip()}); "
+            raise PreregError(f"a different pre-registration is in force ({hash_path.read_text(errors='replace').strip()}); "
                               f"pass --replace to register anew (test runs made under it can no longer be scored)")
     raw = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
     digest = hashlib.sha256(raw).hexdigest()

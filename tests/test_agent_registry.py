@@ -184,6 +184,20 @@ def test_a_manifest_the_registry_cannot_commit_fails_the_run(repo, monkeypatch):
         evaluate(run_dir.name)  # never scored while the registry shows only its intent
 
 
+def test_the_registry_is_pushed_by_what_a_fetch_finds_not_by_a_local_ref(repo):
+    """origin/main moved locally (or left ahead of a rewound remote) must not make a record look pushed."""
+    root, config_path = repo
+    register(root, config_path)
+    registry.registry_pushed()
+    (root / "registry" / "test").mkdir(parents=True, exist_ok=True)
+    (root / "registry" / "test" / "local-only.intent.json").write_text("{}\n")
+    git(root, "add", "registry")
+    git(root, "commit", "-q", "-m", "a record never pushed")
+    git(root, "update-ref", "refs/remotes/origin/main", "HEAD")  # a local ref that says it is
+    with pytest.raises(barrier.TestSplitLocked, match="1 commit\\(s\\) of registry/ are not on origin/main"):
+        registry.registry_pushed()
+
+
 def test_registry_failures_reach_the_cli_as_errors(repo, capsys):
     from bench.cli import main
     assert main(["call-sites", "agent-B0-train-no-such-run"]) == 2

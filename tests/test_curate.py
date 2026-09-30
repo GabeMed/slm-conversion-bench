@@ -214,14 +214,28 @@ def test_run_curate_refuses_overlapping_sources_and_a_changed_snapshot(tmp_path,
 
 
 def test_curation_runs_the_sql_at_the_pre_registered_date(tmp_path, monkeypatch):
+    """The day is the source run's snapshot's `eval.fixed_date`, here one that is neither today's config.yaml
+    nor the day the tests run: a query about "today" keeps its row only on that day."""
     _, config_path, config = make_repo(tmp_path, monkeypatch)
-    today = "SELECT id FROM gas_t WHERE date('now') = '2026-09-30'"  # rows only on the fixed date
-    calls = [call("agent-d", "1", "generate_candidate", "t:0", response=today, parsed={"SQL": today})]
     fixed = teacher_config(config)
-    assert fixed["eval"]["fixed_date"] == "2026-09-30"
+    fixed["eval"]["fixed_date"] = "2031-01-15"
+    assert config["eval"]["fixed_date"] != "2031-01-15"
+    that_day = "SELECT id FROM gas_t WHERE date('now') = '2031-01-15'"  # rows only on the snapshot's day
+    nothing = "-- a comment, no statement"
+    calls = [call("agent-d", "1", "generate_candidate", "t:0", response=that_day, parsed={"SQL": that_day}),
+             call("agent-d", "2", "generate_candidate", "t:0", response=nothing, parsed={"SQL": nothing})]
     out = run_curate([b0_train_run(fixed, "agent-d", calls)], str(config_path))
     assert [e["question_id"] for e in read_jsonl(out / "examples.jsonl")] == ["1"]
+    counts = json.loads((out / "manifest.json").read_text())["counts"]["per_call_site"]["generate_candidate"]
+    assert counts["sql_error"] == 1  # no statement is an error, as eval reads it
     undated = json.loads(json.dumps(fixed))
     undated["eval"]["fixed_date"] = None
-    with pytest.raises(CurationError, match="no eval.fixed_date"):
+    with pytest.raises(CurationError, match="eval.fixed_date must be a pre-registered YYYY-MM-DD"):
         run_curate([b0_train_run(undated, "agent-u", calls)], str(config_path))
+    other_day = json.loads(json.dumps(fixed))
+    other_day["eval"]["fixed_date"] = "2031-01-16"
+    first = b0_train_run(fixed, "agent-a", calls[:1], question_ids=["1"])
+    second = b0_train_run(other_day, "agent-b", [call("agent-b", "2", "generate_candidate", "t:0", response=GOLD,
+                                                      parsed={"SQL": GOLD})], question_ids=["2"])
+    with pytest.raises(CurationError, match="different fixed dates"):
+        run_curate([first, second], str(config_path))

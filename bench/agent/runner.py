@@ -308,7 +308,7 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
         "started_at": started.isoformat(), "finished_at": None, "status": "running",
     }
     if test is not None:
-        manifest.update({"prereg_hash": registry.prereg_hash(), "call_sites_registry_sha256": test["sha256"]})
+        manifest.update({"prereg_hash": barrier.prereg_hash_in_force(config), "call_sites_registry_sha256": test["sha256"]})
         manifest["registry_intent"] = registry.commit_intent(manifest)
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)

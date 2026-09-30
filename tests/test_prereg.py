@@ -164,6 +164,19 @@ def test_ignored_bytecode_beside_the_analysis_code_is_not_a_refusal(repo):
     check_registered_analysis_code(repo)
 
 
+def test_a_malformed_registration_is_replaced_only_on_request(repo):
+    (repo / "prereg").mkdir()
+    (repo / "prereg" / "manifest.json").write_text("[]\n")
+    (repo / "prereg" / "HASH").write_text("x\n")
+    git(repo, "add", "prereg")
+    git(repo, "commit", "-q", "-m", "a malformed registration")
+    with pytest.raises(PreregError, match="not a JSON object: pass --replace"):
+        register("config.yaml", root=repo)
+    with pytest.raises(PreregError, match="not a JSON object: no analysis code is registered"):
+        check_registered_analysis_code(repo)
+    assert register("config.yaml", root=repo, replace=True)["new"]
+
+
 def test_register_refuses_without_the_analysis_code(repo):
     git(repo, "rm", "-q", "bench/evaluate.py")
     git(repo, "commit", "-q", "-m", "drop the evaluator")

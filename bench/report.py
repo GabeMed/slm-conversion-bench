@@ -9,6 +9,7 @@ of (no number goes in it):
     format:     {B0: <J2 result, format validity of its run>, B4: <...>}
     per_call:   <J2 result of the test inputs replayed as B4>
     j5: <J5 result>   j6: <J6 result>   j7: <J7 result>   j8: <J8 result>
+    adapters: <the adapters fact, when the plan has no J7; with J7, it must be J7's>
     teacher_train_cost: <J3 result of the teacher on train>
 
 Every figure is read from a judgment or computed by one: J1's per-question table and summary
@@ -19,8 +20,11 @@ discordance J4 measures between B3 (the zero-shot SLM) and B0 on the pre-registe
 (`bench.data.pilot_sample`), one number for every end-to-end comparison; for repair, between the
 zero-shot candidate S4 chose and the teacher on the pilot questions' repair calls (J6's result).
 J4 then takes Δ at n = the test's pairs. A comparison with no pilot gets no verdict (J4 returns
-`noninferior: None`, `margin_from: "pairs"`), never a pass. **A test report is bound to the test
-registry**: every arm's run is a `done` entry; a configuration (type, arm, engine, pre-registration)
+`noninferior: None`, `margin_from: "pairs"`), never a pass. **A test report is read only under the
+registration in force**, before anything is read: the barrier finds it published, intact and
+matching the configuration given (every threshold, seed and the pilot come from it), and the analysis
+code is the registered one. **A test report is bound to the test registry**: every run it binds ran
+under that registration; every arm's run is a `done` entry; a configuration (type, arm, engine, pre-registration)
 with more than one registered test run gets no verdict, and every run is listed (SPEC §6.1); the
 facts the B3–B5 runs recorded are the ones the plan's J5, J6 and J7 name; the per-call evaluation
 replays the plan's B0 run; and the pilot finished before the first test execution started. The test
@@ -37,8 +41,8 @@ every row: several runs (no verdict), no pilot (no verdict), not testable (Δ ab
 non-inferior (the one-sided 95% lower bound above −Δ), worse (the one-sided 95% **upper** bound
 below −Δ: refuting takes the same standard as confirming) or inconclusive (neither). A cost verdict
 carries the labels of the costs it rests on (estimated, lower bound, upper bound, extrapolated), and
-one that rests on an upper-bound cost is inconclusive; arms priced from price tables of different
-dates are refused.
+one that rests on an upper-bound cost is inconclusive; arms priced from different price tables (by
+date or by content) are refused.
 - V1/A1: confirms if B4 or B5 is non-inferior to B0; refutes if both are worse; otherwise the
   outcomes say why not (no pilot, not testable, inconclusive).
 - A4/A11: the replaceable fraction of B5 by call, token and cost, and whether B5 met
@@ -162,19 +166,21 @@ def _expected_facts(plan: Dict[str, Any], judged: Dict[str, Any]) -> Dict[str, s
     return expected
 
 
-def registration_in_force(split: str) -> Optional[str]:
-    """For a test report, the pre-registration in force (prereg/HASH), once the analysis code reading the
-    test is known to be the registered one (bench.prereg.check_registered_analysis_code): the readings
-    of SPEC §5 cannot change after the test without changing the registration."""
+def registration_in_force(split: str, config: Dict[str, Any]) -> Optional[str]:
+    """For a test report, the pre-registration in force: the barrier's (published, intact, and matching
+    `config`, whose thresholds, seeds and pilot every verdict reads, and the splits, SPEC.md and the data
+    manifest), with the analysis code the registered one (bench.prereg.check_registered_analysis_code).
+    The readings of SPEC §5 cannot change after the test without changing the registration."""
     if split != "test":
         return None
     from bench import barrier
     from bench.prereg import PreregError, check_registered_analysis_code
     try:
+        in_force = barrier.prereg_hash_in_force(config)
         check_registered_analysis_code(paths.ROOT)
-        return (paths.ROOT / barrier.PREREG_HASH).read_text().strip()
-    except (PreregError, OSError) as e:
-        raise JudgmentError(f"a test report is read only with the pre-registered analysis code: {e}") from e
+    except (barrier.TestSplitLocked, PreregError, OSError) as e:
+        raise JudgmentError(f"a test report is read only under the registration in force: {e}") from e
+    return in_force
 
 
 def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any], judged: Dict[str, Any],
@@ -254,6 +260,11 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
            noninferiority: Callable, pilot_ids: List[str]) -> Dict[str, Any]:
     """Every number of the report, each from a judgment."""
     split = plan["split"]
+    registry, in_force = test_registry(), None
+    if split == "test":  # before anything is read: the registry, then the registration in force
+        if not registry["available"]:
+            raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
+        in_force = registration_in_force(split, config)
     specs = plan.get("arms") or {}
     rows = per_arm({arm: spec["eval"] for arm, spec in specs.items()}, split, ex_table)
     pilot_plan = plan.get("pilot") or {}
@@ -298,8 +309,6 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     per_call = judged["per_call"]
     if per_call and (per_call.get("mode"), per_call.get("arm"), per_call.get("split")) != ("replay", "B4", split):
         raise JudgmentError(f"the per-call evaluation must be a replay routed as B4 on {split}")
-    registry = test_registry()
-    in_force = registration_in_force(split) if registry["available"] else None  # no registry: refused below
     replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged),
                                         in_force)
     coverage = None if not per_call else per_call.get("call_sites")
@@ -322,7 +331,7 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         sources.setdefault("format", {})[arm] = result_reference(path)
     gold_tests = {}  # SPEC 7.2 K4: n and Δ per cluster with gold, here each gold call site
     zeroshot = ((judged["j6"] or {}).get("per_call_site") or {}).get((judged["j6"] or {}).get("choice"), {})
-    for site in GOLD_SITES:
+    for site in (GOLD_SITES if not uncovered else ()):
         entry = (per_call or {}).get("per_call_site", {}).get(site)
         if not entry or not entry["gold"]:
             continue
@@ -553,8 +562,12 @@ def _a5(data) -> Dict[str, str]:
     if not sites:
         return {**row, "result": "—", "verdict": "no data"}
     worse = [s for s in sites if b4f[s]["rate"] < b0f[s]["rate"]]
+    several = [arm for arm in ("B0", "B4") if (data["arms"].get(arm) or {}).get("several_runs")]
     result = ("B4 below B0 on " + ", ".join(f"{s} ({_pct(b4f[s]['rate'])} vs {_pct(b0f[s]['rate'])})" for s in worse)
               if worse else f"B4 at least B0 on all {len(sites)} call sites")
+    if several:
+        return {**row, "result": result, "verdict": "no verdict (several test runs of one configuration of "
+                                                    + " and ".join(several) + ")"}
     return {**row, "result": result, "verdict": "refutes" if worse else "confirms"}
 
 

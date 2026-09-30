@@ -77,6 +77,9 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[Li
             raise JudgmentError(f"{run_id} records no sweep_id: J8 takes one sweep per engine")
         levels.append({"run_id": run_id, "engine": found["engine"], "concurrency": found["concurrency"],
                        "sweep_id": found["sweep_id"], "source_run_id": found.get("source_run_id"), **level(export)})
+    unknown = sorted(set(sweeps or []) - {lv["sweep_id"] for lv in levels})
+    if unknown:
+        raise JudgmentError(f"no load test has the named sweep(s) {unknown}")
     kept = []
     for engine in sorted({lv["engine"] for lv in levels}):
         found_sweeps = sorted({lv["sweep_id"] for lv in levels if lv["engine"] == engine})
