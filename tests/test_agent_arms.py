@@ -15,9 +15,9 @@ from bench.contracts import clusters  # noqa: E402
 from bench.contracts.calls import CALL_SITES, read_calls, validate_calls  # noqa: E402
 from bench.contracts.facts import write_fact  # noqa: E402
 from bench.evaluate import evaluate  # noqa: E402
-from synthetic import GOLD, make_repo  # noqa: E402
+from synthetic import GOLD  # noqa: E402
 from test_agent_patches import tiny_sentence_transformer  # noqa: E402,F401  (a fixture)
-from test_agent_wiring import ScriptedChess  # noqa: E402
+from test_agent_wiring import ScriptedChess, make_concurrent_repo  # noqa: E402
 
 BROKEN_SQL = "SELECT no_such_column FROM gas_t"
 
@@ -35,11 +35,11 @@ class Revising(ScriptedChess):
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    root, config_path, config = make_repo(tmp_path, monkeypatch)
+    config_path, _ = make_concurrent_repo(tmp_path, monkeypatch)
+    config = yaml.safe_load(config_path.read_text())
     for candidate in config["roles"]["slm_candidates"]:
         candidate["endpoint"]["base_url"] = "http://slm.example/v1"
     config_path.write_text(yaml.safe_dump(config))
-    runner.preprocess(str(config_path), ["tiny"])
     return config_path
 
 
@@ -262,3 +262,46 @@ def test_b5_leaves_an_unallocated_cluster_with_the_production_llm(monkeypatch, r
     _, manifest, calls = run(monkeypatch, repo, "B5", ("1",))
     assert manifest["status"] == "done" and manifest["few_shot"] is None  # cheap_alt unreachable: no prefix needed
     assert {c["engine"] for c in calls if c["call_site"] != "filter_column"} == {"production_llm"}
+
+
+def test_examples_are_only_the_teachers_successful_answers(monkeypatch, repo):
+    class FirstTablesAnswerUnparseable(Revising):
+        seen = set()
+
+        def answer(self, text):
+            if '"table_names"' in text and text not in self.seen:
+                self.seen.add(text)
+                return "the tables are gas_t"
+            return super().answer(text)
+    source = run(monkeypatch, repo, "B0", ("1", "2"), model=FirstTablesAnswerUnparseable())[0].name
+    from bench.agent import few_shot
+    config = yaml.safe_load(repo.read_text())
+    for seed in range(8):
+        config["seeds"]["few_shot"] = seed
+        config["arms"]["B1"]["few_shot"] = {"k": 2, "source_run": source}
+        prefix, _ = few_shot.build(config)
+        # 2 of the 4 select_tables answers did not parse: over 8 seeds, a draw from all 4 would pick one
+        assert all(m["content"] != "the tables are gas_t" for m in prefix["select_tables"])
+
+
+@pytest.mark.parametrize("field,value", [("arm", "B1"), ("split", "calib"), ("status", "failed"), ("type", "replay")])
+def test_the_examples_come_only_from_a_done_b0_run_on_train(monkeypatch, repo, field, value):
+    source = teacher_run(monkeypatch, repo)
+    manifest_path = paths.RUNS / source / "manifest.json"
+    manifest_path.write_text(json.dumps({**json.loads(manifest_path.read_text()), field: value}))
+    from bench.agent import few_shot
+    config = yaml.safe_load(repo.read_text())
+    config["arms"]["B1"]["few_shot"] = {"k": 1, "source_run": source}
+    with pytest.raises(hooks.HarnessError, match="not a done B0 agent run on train"):
+        few_shot.build(config)  # no calib or test answer can reach a prefix
+
+
+def test_b2_checks_its_template_before_a_run_exists(monkeypatch, repo):
+    config = yaml.safe_load(repo.read_text())
+    generator = config["agent"]["team_agents"]["candidate_generator"]["tools"]["generate_candidate"]["generator_configs"][0]
+    generator["template_name"] = "generate_candidate_two"
+    repo.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    with pytest.raises(runner.data.DataError, match="generate_candidate_one"):
+        runner.run_agent(str(repo), "B2", "train", ids=["1"], engine="production_llm")
+    assert not paths.RUNS.exists() or not any(paths.RUNS.iterdir())

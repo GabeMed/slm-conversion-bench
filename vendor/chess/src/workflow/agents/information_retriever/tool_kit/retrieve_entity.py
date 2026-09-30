@@ -31,11 +31,18 @@ class RetrieveEntity(Tool):
 
     def __init__(self):
         super().__init__()
-        self.embedding_function = hooks.embeddings("entity")  # PATCH 10
+        self._embedding_function = None  # PATCH 10: built at first use, so building the agent touches nothing
         self.edit_distance_threshold = 0.3
         self.embedding_similarity_threshold = 0.6
         
         self.retrieved_entities = []
+
+    @property
+    def embedding_function(self):
+        """PATCH 10: the configured entity embeddings (`hooks.embeddings`), built when first used."""
+        if self._embedding_function is None:
+            self._embedding_function = hooks.embeddings("entity")
+        return self._embedding_function
         
     def _run(self, state: SystemState):
         """

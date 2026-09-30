@@ -80,9 +80,13 @@ def new_outcome() -> Dict[str, Dict]:
     return {"predictions": {}, "failures": {}, "harness_errors": {}, "tool_errors": {}}
 
 
+AGENT_TASK_FIELDS = ("question_id", "db_id", "question", "evidence", "difficulty")
+
+
 def agent_task(question: Dict[str, Any]) -> Dict[str, Any]:
-    """What CHESS receives for a question: never the gold SQL (patch 13)."""
-    return {key: value for key, value in question.items() if key != "SQL"}
+    """What CHESS receives for a question (patch 13): only the fields of its `Task` that are not the
+    gold, named here, so no gold-bearing field (`SQL`, Plat-SQL's `original_SQL`, ...) can pass."""
+    return {key: question[key] for key in AGENT_TASK_FIELDS if key in question}
 
 
 def _answer(question_id: str, hooks, outcome: Dict[str, Dict], answer: Callable[[], Tuple[Optional[str], Dict]]) -> bool:
@@ -147,6 +151,13 @@ def single_call_generator(config: Dict[str, Any]) -> Dict[str, Any]:
     raise data.DataError(f"agent.team_agents.candidate_generator has no {SINGLE_CALL_TEMPLATE} generator")
 
 
+def single_call_prompt(config: Dict[str, Any]):
+    """B2's template and parser, resolved before a run exists (CHESS must be importable)."""
+    from llm.parsers import get_parser
+    from llm.prompts import get_prompt
+    return get_prompt(template_name=SINGLE_CALL_TEMPLATE), get_parser(single_call_generator(config)["parser_name"])
+
+
 def _execute_single_call(config: Dict[str, Any], engine: str, run_id: str, run_dir: Path,
                          dataset: List[Dict[str, Any]], db_root: Path, outcome: Dict[str, Dict],
                          allowed_call_sites: Optional[List[str]] = None) -> None:
@@ -158,11 +169,8 @@ def _execute_single_call(config: Dict[str, Any], engine: str, run_id: str, run_d
     hooks.start_run(run_id, None, run_dir / "calls.jsonl", engine=engine, few_shot={},
                     allowed_call_sites=allowed_call_sites)
     try:
-        from llm.parsers import get_parser
-        from llm.prompts import get_prompt
         from runner.database_manager import DatabaseManager
-        prompt = get_prompt(template_name=SINGLE_CALL_TEMPLATE)
-        parser = get_parser(single_call_generator(config)["parser_name"])
+        prompt, parser = single_call_prompt(config)
         for question in dataset:
             def answer(question=question):
                 manager = DatabaseManager(db_mode="dev", db_id=question["db_id"])
@@ -296,6 +304,8 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     databases = sorted({questions[q]["db_id"] for q in selected})
     if arm == "B2":
         check_engines(config, [engine], embeddings=False)  # no retrieval: no embeddings, no preprocessing
+        _prepare_chess(config, paths.bird_root(config))
+        single_call_prompt(config)
         facts, few_shot, provenance = {}, {}, None
     else:
         from bench.contracts.router import possible_engines
@@ -361,7 +371,14 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
         manifest["unregistered_call_sites"] = outcome.get("unregistered_call_sites", [])
     _write_json(run_dir / "manifest.json", manifest)
     if manifest["split"] == "test":
-        registry.commit_manifest(run_dir)
+        try:
+            registry.commit_manifest(run_dir, config)
+        except registry.RegistryError as e:  # never a `done` run the registry does not show
+            manifest["status"] = "failed"
+            manifest["problems"].append(scrub(f"the manifest could not be committed to the registry: {e}"))
+            _write_json(run_dir / "manifest.json", manifest)
+            if stopped_by is None:  # otherwise the exception that stopped the run goes on
+                raise
 
 
 def preprocess(config_path: str, db_ids: List[str]) -> None:

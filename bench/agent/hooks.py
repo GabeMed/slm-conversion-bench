@@ -59,6 +59,12 @@ class HarnessError(RuntimeError):
                 run.harness_errors.append(scrub(message))
 
 
+class RunAborted(RuntimeError):
+    """A model call refused because its run has already failed (a harness error, recorded once):
+    a failed run spends nothing more, within the question as after it. Not recorded again, and
+    CHESS swallows it like any tool error."""
+
+
 @dataclass
 class _RunState:
     run_id: str
@@ -362,6 +368,10 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
     Returns (output, parsed)."""
     from langchain_core.exceptions import OutputParserException
 
+    run = _require_run()
+    with run.lock:
+        if run.harness_errors:
+            raise RunAborted(f"{call_site}: the run has failed ({run.harness_errors[0][:200]}): no further model call")
     messages = _message_dicts(lc_messages)
     key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
     sent = _harness(call_site, lambda: _prefixed(call_site, chosen.engine, lc_messages))

@@ -102,6 +102,7 @@ def test_a_harness_failure_stops_the_replay(monkeypatch, repo, source):
     monkeypatch.setattr(hooks, "_sleep", lambda s: None)
     _, manifest, calls = replayed(monkeypatch, repo, source, model=Down(), engine="production_llm")
     assert manifest["status"] == "failed" and list(manifest["harness_errors"]) == ["1"]
+    assert manifest["model_failures"] == {}  # the engine being down is not the model's failure
     assert {c["question_id"] for c in calls} == {"1"} and manifest["n_questions_replayed"] == 0
 
 
@@ -138,3 +139,12 @@ def test_only_a_done_b0_run_is_replayed_and_the_barrier_holds(monkeypatch, repo,
     with pytest.raises(TestSplitLocked, match="origin/main|prereg"):  # the barrier itself, not the registry
         replay(str(repo), source, engine="production_llm")
     assert set(paths.RUNS.iterdir()) == runs
+
+
+def test_a_replay_needs_no_retrieval_embeddings(monkeypatch, repo, source):
+    config = yaml.safe_load(repo.read_text())
+    config["embeddings"]["provider"] = "openai"  # the default; nothing is retrieved, so no key is needed
+    repo.write_text(yaml.safe_dump(config))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _, manifest, calls = replayed(monkeypatch, repo, source, engine="slm:qwen3-8b")
+    assert manifest["status"] == "done" and calls

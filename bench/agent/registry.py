@@ -16,11 +16,14 @@ the file is committed with no local change, and any call site outside it aborts 
 """
 import hashlib
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
 from bench import barrier, paths
+from bench.agent.hooks import HarnessError
 from bench.contracts.calls import CALL_SITES
 
 CALL_SITES_FILE = "registry/call_sites.json"
@@ -28,8 +31,25 @@ TEST_DIR = "registry/test"
 SOURCE_SPLITS = ("train", "calib")
 
 
-class RegistryError(RuntimeError):
-    pass
+class RegistryError(HarnessError):
+    """The registry could not be read or written: a failure of the harness."""
+
+
+_KEY_LIKE = re.compile(r"\b(sk|hf)[-_][A-Za-z0-9_\-*.]{6,}")
+
+
+def redact(text: str, config: Dict[str, Any]) -> str:
+    """What is committed to a public repository never carries a key: the values of every
+    `api_key_env` of the configuration, and anything shaped like a key (provider error bodies
+    sometimes echo a masked one)."""
+    roles = config["roles"]
+    specs = [roles["production_llm"], roles["cheap_alt"], *(roles.get("slm_candidates") or [])]
+    for spec in specs:
+        name = ((spec or {}).get("endpoint") or {}).get("api_key_env")
+        value = os.environ.get(name) if name else None
+        if value:
+            text = text.replace(value, "<redacted>")
+    return _KEY_LIKE.sub("<redacted>", text)
 
 
 def _git(*args: str) -> subprocess.CompletedProcess:
@@ -99,6 +119,7 @@ def prereg_hash() -> str:
 
 
 def commit_intent(manifest: Dict[str, Any]) -> str:
+    """Nothing in the intent comes from a model or a provider: no redaction needed."""
     rel = f"{TEST_DIR}/{manifest['run_id']}.intent.json"
     _write(rel, {key: manifest.get(key) for key in
                  ("run_id", "type", "arm", "engine", "split", "source_run_id", "prereg_hash", "commit", "started_at")})
@@ -106,8 +127,8 @@ def commit_intent(manifest: Dict[str, Any]) -> str:
     return rel
 
 
-def commit_manifest(run_dir: Path) -> str:
+def commit_manifest(run_dir: Path, config: Dict[str, Any]) -> str:
     rel = f"{TEST_DIR}/{run_dir.name}.manifest.json"
-    (paths.ROOT / rel).write_bytes((run_dir / "manifest.json").read_bytes())
+    (paths.ROOT / rel).write_text(redact((run_dir / "manifest.json").read_text(), config))
     _commit(rel, f"registry: manifest of test execution {run_dir.name}")
     return rel

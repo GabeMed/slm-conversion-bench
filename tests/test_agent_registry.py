@@ -14,8 +14,7 @@ from bench import barrier, paths  # noqa: E402
 from bench.agent import hooks, registry, runner  # noqa: E402
 from bench.contracts.calls import CALL_SITES, read_calls  # noqa: E402
 from bench.contracts.config import config_sha256  # noqa: E402
-from synthetic import make_repo  # noqa: E402
-from test_agent_wiring import ScriptedChess  # noqa: E402
+from test_agent_wiring import ScriptedChess, make_concurrent_repo  # noqa: E402
 
 
 def git(root, *args):
@@ -32,8 +31,7 @@ def repo(tmp_path, monkeypatch):
     origin, root = tmp_path / "origin.git", tmp_path / "repo"
     git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     root.mkdir()
-    _, config_path, config = make_repo(root, monkeypatch)
-    runner.preprocess(str(config_path), ["tiny"])
+    config_path, config = make_concurrent_repo(root, monkeypatch)
     git(root, "init", "-q", "-b", "main")
     git(root, "config", "user.email", "t@example.com")
     git(root, "config", "user.name", "t")
@@ -107,7 +105,9 @@ def test_a_call_site_outside_the_registered_set_aborts_the_run(repo):
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "failed" and manifest["unregistered_call_sites"] == ["select_columns"]
     assert "REQ-001" in json.dumps(manifest["harness_errors"])
-    assert "select_columns" not in {c["call_site"] for c in read_calls(run_dir / "calls.jsonl")}  # stopped before the call
+    seen = {c["call_site"] for c in read_calls(run_dir / "calls.jsonl")}
+    assert "select_columns" not in seen  # stopped before the call
+    assert not seen & {"agent_cg", "generate_candidate"}  # and nothing after it in that question either
     assert json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))["status"] == "failed"
 
 
@@ -140,3 +140,69 @@ def test_only_done_train_and_calib_runs_register_call_sites(repo):
     (train / "manifest.json").write_text(json.dumps({**manifest, "status": "failed"}))
     with pytest.raises(registry.RegistryError, match="not 'done'"):
         registry.update_call_sites([train.name])
+
+
+def test_the_registry_commits_its_file_and_nothing_else(repo):
+    root, config_path = repo
+    register(root, config_path)
+    (root / "notes.txt").write_text("tracked\n")
+    git(root, "add", "notes.txt")
+    git(root, "commit", "-q", "-m", "notes")
+    (root / "notes.txt").write_text("changed, not committed\n")
+    (root / "staged.txt").write_text("staged, not committed\n")
+    git(root, "add", "staged.txt")
+    before = git(root, "rev-parse", "HEAD").strip()
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert git(root, "diff", "--name-only", before, "HEAD").split() == [
+        f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]
+    status = git(root, "status", "--porcelain", "--", "notes.txt", "staged.txt").splitlines()
+    assert sorted(status) == [" M notes.txt", "A  staged.txt"]  # left exactly as they were
+
+
+def test_a_manifest_the_registry_cannot_commit_fails_the_run(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+
+    def refused(run_dir, config):
+        raise registry.RegistryError("git commit failed: signing required")
+    monkeypatch.setattr(registry, "commit_manifest", refused)
+    with pytest.raises(hooks.HarnessError, match="signing required"):  # a harness error: the CLI reports it
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "failed" and "registry" in manifest["problems"][-1]
+    from bench.data import DataError
+    from bench.evaluate import evaluate
+    with pytest.raises(DataError, match="not 'done'"):
+        evaluate(run_dir.name)  # never scored while the registry shows only its intent
+
+
+def test_registry_failures_reach_the_cli_as_errors(repo, capsys):
+    from bench.cli import main
+    assert main(["call-sites", "agent-B0-train-no-such-run"]) == 2
+    assert "no run agent-B0-train-no-such-run" in capsys.readouterr().err
+
+
+def test_what_is_committed_never_carries_a_key(monkeypatch):
+    config = json.loads(json.dumps(runner.load_config(paths.ROOT / "config.yaml")))
+    config["roles"]["cheap_alt"]["endpoint"]["api_key_env"] = "BENCH_TEST_KEY"
+    monkeypatch.setenv("BENCH_TEST_KEY", "plain-secret-value-123")
+    text = "refused: plain-secret-value-123; Incorrect API key provided: sk-proj-abc1***wxyz; hf_AbCdEf123456"
+    assert registry.redact(text, config) == "refused: <redacted>; Incorrect API key provided: <redacted>; <redacted>"
+
+
+def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):
+    import httpx
+    import openai
+    root, config_path = repo
+    register(root, config_path)
+    body = "Incorrect API key provided: sk-proj-abc1***wxyz"
+
+    class Refusing(ScriptedChess):
+        def invoke(self, messages):
+            raise openai.AuthenticationError(body, response=httpx.Response(401, request=httpx.Request("POST", "http://x")), body=None)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Refusing())
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert "sk-proj-abc1" in (run_dir / "manifest.json").read_text()  # the local record keeps the provider's words
+    committed = git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json")
+    assert "sk-proj" not in committed and "<redacted>" in committed

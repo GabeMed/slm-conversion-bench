@@ -23,8 +23,8 @@ from bench import paths  # noqa: E402
 from bench.agent import hooks, runner  # noqa: E402
 from bench.contracts.calls import read_calls, validate_calls  # noqa: E402
 from bench.contracts.config import ConfigError, load_config  # noqa: E402
-from synthetic import GOLD, make_repo  # noqa: E402
-from test_agent_wiring import ScriptedChess  # noqa: E402
+from synthetic import GOLD  # noqa: E402
+from test_agent_wiring import ScriptedChess, make_concurrent_repo  # noqa: E402
 
 SMOKE = paths.ROOT / "configs" / "smoke-local.yaml"
 USAGE = {"prompt_tokens": 12, "completion_tokens": 3}
@@ -258,9 +258,7 @@ print(os.environ["DB_ROOT_PATH"], os.environ["INDEX_SERVER_PORT"], os.environ.ge
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    root, config_path, config = make_repo(tmp_path, monkeypatch)
-    runner.preprocess(str(config_path), ["tiny"])
-    return config_path, config
+    return make_concurrent_repo(tmp_path, monkeypatch)
 
 
 OTHER_SQL = "SELECT COUNT(id) FROM gas_t WHERE segment = 'Premium' AND country = 'CZE'"
@@ -336,3 +334,43 @@ def test_a_run_with_local_embeddings_uses_its_own_vector_db(monkeypatch, repo, t
     assert "local" not in json.loads((db_dir / "context_vector_db_fake" / "STAMP.json").read_text())  # other stamps unchanged
     run_dir = runner.run_agent(str(repo[0]), "B0", "train", ids=["1"])
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+
+
+def test_only_the_tasks_non_gold_fields_reach_chess():
+    question = {"question_id": 7, "db_id": "d", "question": "q", "evidence": "e", "difficulty": "simple",
+                "SQL": "SELECT 1", "original_SQL": "SELECT 2", "anything_else": "x"}  # Plat-SQL carries original_SQL
+    assert runner.agent_task(question) == {"question_id": 7, "db_id": "d", "question": "q", "evidence": "e",
+                                           "difficulty": "simple"}
+
+
+def test_a_failed_run_makes_no_further_model_call(calls):
+    calls["model"] = ScriptedModel(['{"table_names": ["t"]}'])
+    try:
+        raise hooks.HarnessError("routing failed")
+    except hooks.HarnessError:
+        pass  # swallowed, as CHESS does
+    with pytest.raises(hooks.RunAborted):
+        hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+    with pytest.raises(hooks.RunAborted):
+        hooks.invoke_agent_call("agent_ss", "ss:0", "state", lambda r: {"done": True})
+    assert calls["model"].calls == 0 and read_calls(calls["path"]) == []
+    assert hooks.take_harness_errors() == ["routing failed"]  # recorded once, not once per refused call
+
+
+def test_local_embeddings_load_the_pinned_revision_on_cpu(monkeypatch):
+    import sentence_transformers
+    loaded = []
+
+    class Recorder:
+        def __init__(self, model, **kwargs):
+            loaded.append((model, kwargs))
+
+        def encode(self, texts, **kwargs):
+            import numpy
+            return numpy.ones((len(texts), 2)) / 2 ** 0.5
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", Recorder)
+    config = load_config(SMOKE)
+    config["embeddings"].update(provider="local", local={"model": "org/pinned-model", "revision": "a" * 40})
+    hooks.configure(config)
+    hooks.embeddings("entity").embed_query("x")
+    assert loaded == [("org/pinned-model", {"revision": "a" * 40, "device": "cpu"})]

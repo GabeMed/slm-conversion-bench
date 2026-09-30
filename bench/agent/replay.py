@@ -65,7 +65,8 @@ def readers(config: Dict[str, Any]) -> Callable[[Dict[str, Any]], Callable[[], A
         if site in AGENT_CALL_SITES:
             if [m["role"] for m in messages] != ["user"]:
                 raise data.DataError(f"{record['question_id']} {site} {key}: an agent call is one user message")
-            return lambda: hooks.invoke_agent_call(site, key, messages[0]["content"], agents[site].parse_action)
+            parse = agents[site].parse_action
+            return lambda: hooks.invoke_agent_call(site, key, messages[0]["content"], parse)
         if site == "generate_candidate":
             template = key.split(":")[0]
             if template not in generators:
@@ -73,8 +74,8 @@ def readers(config: Dict[str, Any]) -> Callable[[Dict[str, Any]], Callable[[], A
             parser_name = generators[template]
         else:
             parser_name = parsers[site]
-        lc_messages = hooks._lc_messages(messages)
-        return lambda: hooks.invoke_tool_call(site, key, lc_messages, get_parser(parser_name))
+        lc_messages, parser = hooks._lc_messages(messages), get_parser(parser_name)
+        return lambda: hooks.invoke_tool_call(site, key, lc_messages, parser)
     return reader
 
 
@@ -105,6 +106,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
         engines = possible_engines(arm, config)
         facts = {name: sha for name, (_, sha) in arm_facts(arm, config).items()}
     check_engines(config, engines, embeddings=False)  # nothing is retrieved: the prompts are the source's
+    # (building CHESS's agents below, to read their answers, touches no embedding: patch 10 builds them at first use)
     few_shot, provenance = few_shot_for(config, engines)
     _prepare_chess(config, paths.bird_root(config))
     reader = readers(config)
@@ -161,10 +163,12 @@ def _execute(config, run_id, run_dir, arm, engine, resend, question_ids, few_sho
 
 
 def _attempt(call: Callable[[], Any]) -> Optional[str]:
-    """None when the invocation was answered; the model's failure otherwise (already in C1). A
-    harness failure has recorded itself, and the question loop stops on it."""
+    """The model's failure (already in C1), or None. A harness failure is not the model's: it has
+    recorded itself, the question loop stops on it, and the calls after it are refused."""
     try:
         call()
+        return None
+    except (hooks.HarnessError, hooks.RunAborted):
         return None
     except Exception as e:
         return f"{type(e).__name__}"
