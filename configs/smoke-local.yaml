@@ -15,3 +15,8 @@ roles:
 
 embeddings:
   provider: fake
+
+# serve-local.sh shares one 16k context among its 4 slots (--kv-unified): concurrent prompts of a few
+# thousand tokens overflow it (HTTP 500 "Context size has been exceeded", measured), so one at a time
+agent:
+  max_workers: 1

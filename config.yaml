@@ -91,7 +91,8 @@ call_sites:                    # CHESS published temperatures, per call site
 retries:
   parse_max_attempts: 2        # CHESS published 12 identical retries; every attempt is logged (C1)
   http_max_attempts: 6         # patch 5b: 429, 5xx, timeouts and connection errors, retried with backoff;
-  http_backoff_s: {base: 2, max: 60}  # one attempt counter with the parse retries, every attempt logged (C1)
+  http_backoff_s: {base: 2, max: 60}  # wait: random in [1/2, 1] x min(max, base * 2^(n-1)); one attempt
+                                      # counter with the parse retries, every attempt logged (C1)
 
 seeds:
   calib_split: 20260930

@@ -71,15 +71,21 @@ def test_transport_errors_are_retried_with_backoff_and_every_attempt_is_logged(c
     assert [line["attempt"] for line in lines] == [1, 2, 3, 4] and validate_calls(lines) == []
     assert [line["retry_of"] for line in lines[1:]] == [line["call_id"] for line in lines[:-1]]
     assert [line["error"].split(":")[0] for line in lines[:3]] == ["RateLimitError", "InternalServerError", "APITimeoutError"]
-    assert calls["sleeps"] == [2.0, 4.0, 8.0]  # base * 2^(n-1), config.yaml › retries.http_backoff_s
+    ceilings = [2.0, 4.0, 8.0]  # base * 2^(n-1), config.yaml › retries.http_backoff_s
+    assert all(c / 2 <= s <= c for s, c in zip(calls["sleeps"], ceilings)) and len(calls["sleeps"]) == 3
     assert hooks.take_harness_errors() == []
 
 
-def test_backoff_is_capped():
+def test_backoff_is_capped_and_jittered(monkeypatch):
     config = load_config(SMOKE)
     config["retries"]["http_backoff_s"] = {"base": 2, "max": 5}
     hooks.configure(config)
     assert [hooks.backoff_s(n) for n in (1, 2, 3, 4)] == [2.0, 4.0, 5.0, 5.0]
+    sleeps = []
+    monkeypatch.setattr(hooks, "_sleep", sleeps.append)
+    for _ in range(20):
+        hooks._backoff(3)
+    assert all(2.5 <= s <= 5.0 for s in sleeps) and len(set(sleeps)) > 1  # concurrent retries do not retry together
 
 
 def test_an_engine_that_stays_unreachable_fails_the_harness(calls):

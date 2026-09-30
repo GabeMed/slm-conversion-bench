@@ -21,6 +21,7 @@ call the model from several threads; the writer and the counters are shared unde
 """
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -41,6 +42,7 @@ _models_lock = threading.Lock()
 _embedders: Dict[tuple, Any] = {}
 _embed_lock = threading.Lock()  # one encoder per model, shared by threads
 _sleep = time.sleep  # the backoff between transport retries; tests replace it
+_jitter = random.Random()  # timing only: spreads the retries of concurrent calls, never touches content
 
 
 class HarnessError(RuntimeError):
@@ -336,9 +338,16 @@ def _misconfigured(exception: BaseException) -> bool:
 
 
 def backoff_s(transport_failures: int) -> float:
-    """Seconds to wait after the n-th transport failure of an invocation: base * 2^(n-1), capped."""
+    """The longest wait after the n-th transport failure of an invocation: base * 2^(n-1), capped."""
     backoff = _config["retries"]["http_backoff_s"]
     return float(min(backoff["max"], backoff["base"] * 2 ** (transport_failures - 1)))
+
+
+def _backoff(transport_failures: int) -> None:
+    """Wait between half and all of `backoff_s`, at random: calls that failed together (a server
+    whose shared context the concurrent calls of one step overflowed) must not retry together,
+    or they fail together again, every time."""
+    _sleep(backoff_s(transport_failures) * _jitter.uniform(0.5, 1.0))
 
 
 def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], interpret: Callable,
@@ -381,7 +390,7 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
             if failures["transport"] >= http_max_attempts:
                 raise HarnessError(f"{call_site}: engine {chosen.engine} unreachable after "
                                    f"{failures['transport']} transport failures: {error}") from exception
-            _sleep(backoff_s(failures["transport"]))
+            _backoff(failures["transport"])
         elif outcome == "parse":
             failures["parse"] += 1
             if failures["parse"] >= parse_max_attempts:
