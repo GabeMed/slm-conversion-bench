@@ -10,7 +10,9 @@ import yaml
 from bench import paths, report
 from bench.contracts import clusters, facts
 from bench.judge.base import JudgmentError, read_jsonl, read_result, relative, write_result
-from fixtures.world import fake_ex_summary, fake_ex_table, fake_margin, fake_noninferiority, unit
+from bench.judge.j1 import ex_summary, ex_table
+from bench.judge.j4 import margin, noninferiority
+from fixtures.world import unit
 
 VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute",
               "no verdict")
@@ -221,7 +223,9 @@ def test_registry_reads_f1s_committed_intents_and_manifests(tmp_path):
 
 TEST_IDS = [str(q) for q in range(5000, 5400)]
 CALIB_IDS = [str(q) for q in range(2000, 2060)]
-PILOT = CALIB_IDS[:50]  # stands in for bench.data.pilot_sample
+# the registered draw; 30 of 60 calib ids, so the pilot leaves out some repair questions (with 50, this
+# draw holds all 20 of them, and restricting to the pilot would change nothing the tests could see)
+PILOT = __import__("bench.data", fromlist=["pilot_sample"]).pilot_sample(CALIB_IDS, 30, 20260930)
 QUALITY = {"B0": 1.0, "B1": 0.7, "B2-production": 0.6, "B2-cheap": 0.5, "B3": 0.5, "B4": 0.99, "B5": 0.995}
 
 
@@ -303,8 +307,8 @@ def pipeline(tmp_path, monkeypatch):
     per_call_eval("eval-cheap-calib", "replay-cheap-calib", cheap_calib, lambda c: teacher_ok(c) and unit("cheap", c["question_id"]) < 0.8)
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap-calib", "eval-cheap-calib"),
                                                                 "slm": ("replay-B4-calib", "eval-B4-calib")},
-                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, fake_noninferiority,
-                                 fake_margin, len(TEST_IDS), PILOT)
+                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, noninferiority,
+                                 margin, len(TEST_IDS), PILOT)
     allocated = facts.read_fact(str(allocation), "allocation")[0]["allocation"]
 
     # the arms on test
@@ -330,9 +334,11 @@ def pipeline(tmp_path, monkeypatch):
         """An end-to-end eval execution, as F2 writes it: no status, the arm and engine it scored."""
         engine = {"B2-production": "production_llm", "B2-cheap": "cheap_alt"}.get(arm)
         rows = [{"question_id": q, "difficulty": ("simple", "moderate", "challenging")[int(q) % 3],
-                 "correct": b0_ok[q] if unit(arm, "keep", q) < QUALITY[arm] else not b0_ok[q]} for q in ids]
+                 "correct": b0_ok[q] if unit(arm, "keep", q) < QUALITY[arm] else not b0_ok[q],
+                 "gold_date_substituted": False, "gold_has_limit": False, "gold_error": None} for q in ids]
         write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "arm": arm.split("-")[0], "engine": engine,
-                                "split": split, "n": len(rows), "status": None,
+                                "split": split, "n": len(rows), "status": None, "fixed_date": "2026-09-30",
+                                "timeout_s": 60, "sqlite_version": "3.45.0", "prereg_hash": "d" * 64,
                                 "finished_at": "2026-09-30T12:00:00+00:00" if split == "calib" else "2026-10-02T12:00:00+00:00"},
                   files={"results.jsonl": rows})
     for arm, calls in arms_calls.items():
@@ -382,7 +388,7 @@ def pipeline(tmp_path, monkeypatch):
 
 
 def test_report_end_to_end_on_a_fake_execution(pipeline):
-    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)
+    out = report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
     data = json.loads((out / "report.json").read_text())
     markdown = (out / "report.md").read_text()
     for heading in ("## EX and cost per correct query", "## The SPEC §5 map", "## S1–S6", "## S4 desk triage",
@@ -419,22 +425,22 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     manifest = json.loads((pipeline["datasets"] / "manifest.json").read_text())
     assert set(manifest["clusters"]) == set(j5["clusters"])
     # re-running gives the same report
-    assert report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT) == out
+    assert report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT) == out
 
 
 def test_a_test_report_needs_the_registry(pipeline):
     import shutil
     shutil.rmtree(paths.ROOT / ".git")
     with pytest.raises(JudgmentError, match="registry"):
-        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
 
 def test_without_a_pilot_no_comparison_gets_a_verdict(pipeline):
     plan = yaml.safe_load(pipeline["plan"].read_text())
     del plan["pilot"]
     pipeline["plan"].write_text(yaml.safe_dump(plan))
-    data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary,
-                                  fake_noninferiority, pilot_ids=PILOT) / "report.json").read_text())
+    data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary,
+                                  noninferiority, pilot_ids=PILOT) / "report.json").read_text())
     assert all(t["noninferior"] is None for t in data["tests"].values())
     assert report.v1_verdict(data["tests"]["B0|B4"], data["tests"]["B0|B5"]) == "no verdict (no pilot d)"
 
@@ -444,12 +450,12 @@ def test_report_refuses_an_eval_of_another_arm(pipeline):
     plan["arms"]["B1"]["eval"], plan["arms"]["B3"]["eval"] = plan["arms"]["B3"]["eval"], plan["arms"]["B1"]["eval"]
     pipeline["plan"].write_text(yaml.safe_dump(plan))
     with pytest.raises(JudgmentError, match="is not B1 on test"):
-        report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority, pilot_ids=PILOT)
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
 
 def test_generation_and_repair_get_their_own_tests_with_the_pilot_restricted(pipeline):
-    from fixtures.world import fake_noninferiority as j4_
-    out = report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority,
+    from bench.judge.j4 import noninferiority as j4_
+    out = report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
                      pilot_ids=PILOT)
     data = json.loads((out / "report.json").read_text())
     assert set(data["gold_tests"]) == {"generate_candidate", "revise"} and data["repair_test"] == data["gold_tests"]["revise"]
@@ -481,5 +487,5 @@ def test_the_report_refuses_prices_of_different_dates_and_mismatched_results(pip
         node[key[-1]] = value
         pipeline["plan"].write_text(yaml.safe_dump(changed))
         with pytest.raises(JudgmentError, match=message):
-            report.run(str(pipeline["plan"]), pipeline["config"], fake_ex_table, fake_ex_summary, fake_noninferiority,
+            report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
                        pilot_ids=PILOT)
