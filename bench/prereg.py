@@ -21,7 +21,10 @@ from bench.contracts.config import config_sha256, load_config
 from bench.data import DataError, pilot_sample
 from bench.judge import j4
 
-CODE_ROOT = Path(__file__).resolve().parent.parent
+# The analysis code the registration hashes, so no reading of the results changes without changing
+# prereg/HASH: every tracked file under these paths (bench/report.py once it exists).
+ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py")
+REQUIRED_ANALYSIS = ("bench/judge/j4.py", "bench/evaluate.py", "bench/data.py")
 
 
 class PreregError(DataError):
@@ -69,10 +72,17 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def analysis_code(root: Path) -> Dict[str, str]:
+    """The sha256 of every tracked file of the analysis code, by path."""
+    files = sorted(_git(root, "ls-files", "--", *ANALYSIS_CODE).splitlines())
+    missing = [rel for rel in REQUIRED_ANALYSIS if rel not in files]
+    if missing:
+        raise PreregError(f"the analysis code to register is not tracked: {', '.join(missing)}")
+    return {rel: _sha256(root / rel) for rel in files}
+
+
 def delta_rule(config: Dict[str, Any], calib: List[str]) -> Dict[str, Any]:
-    """The rule J4 applies (bench/judge/j4.py), in words and parameters, the pilot it takes d from,
-    and the code that applies it."""
-    implementation = Path(j4.__file__).resolve()
+    """The rule J4 applies (bench/judge/j4.py), in words and parameters, and the pilot it takes d from."""
     size, seed = config["stats"]["pilot_size"], config["seeds"]["calib_split"]
     return {
         "formula": "delta = (z_0.95 + z_0.80) * sqrt(d / n)",
@@ -86,9 +96,9 @@ def delta_rule(config: Dict[str, Any], calib: List[str]) -> Dict[str, Any]:
         "above_cap": "not testable with this n: reported as descriptive only",
         "noninferior_if": "the one-sided 95% paired-bootstrap lower bound of EX_A - EX_B is above -delta",
         "bootstrap": {"unit": "question", "n_boot": config["stats"]["n_boot"], "seed": config["seeds"]["bootstrap"],
-                      "quantile": "inverted CDF"},
+                      "quantile": "inverted CDF: ci_low the ceil(n_boot/20)-th smallest resample, ci_high the "
+                                  "ceil(n_boot/20)-th largest, from the same resamples"},
         "calibration_margin": "delta / 2 when choosing engines on the calibration split (B5)",
-        "implementation": {"path": implementation.relative_to(CODE_ROOT).as_posix(), "sha256": _sha256(implementation)},
     }
 
 
@@ -117,7 +127,8 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     calib = json.loads((root / barrier.REGISTERED["splits_sha256"]).read_text()).get("calib") or []
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in barrier.REGISTERED.items()},
-                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib)}
+                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib),
+                "analysis_code": analysis_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text())
@@ -135,5 +146,5 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     files = (barrier.PREREG_MANIFEST, barrier.PREREG_HASH)
     _git(root, "add", "--", *files)
     _git(root, "commit", "-q", "-m", f"Pre-registration {digest}\n\nSPEC.md, {manifest['config_path']}, the splits, "
-         f"the data manifest and the delta rule, before the test split is touched. Push to publish.", "--", *files)
+         f"the data manifest, the delta rule and the analysis code, before the test split is touched. Push to publish.", "--", *files)
     return {"hash": digest, "commit": _git(root, "rev-parse", "HEAD"), "new": True, "unset": unset(config)}

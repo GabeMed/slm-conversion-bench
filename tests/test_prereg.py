@@ -3,6 +3,7 @@ configuration and no other, once the author pushes it; and `bench eval` scores a
 the run was made under the registration in force."""
 import hashlib
 import json
+import shutil
 import subprocess
 
 import pytest
@@ -13,7 +14,6 @@ from bench.barrier import prereg_published
 from bench.contracts.config import config_sha256, load_config
 from bench.data import DataError, pilot_sample
 from bench.evaluate import evaluate, evaluate_per_call
-from bench.judge import j4
 from bench.prereg import PreregError, register
 from synthetic import make_repo, sha256
 
@@ -23,6 +23,17 @@ CONFIG = {**load_config(paths.ROOT / "config.yaml"), "seeds": {"calib_split": 10
 
 def git(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+CODE = paths.ROOT  # this repository, taken before any test points bench.paths elsewhere
+ANALYSIS = ["bench/data.py", "bench/evaluate.py", "bench/judge/__init__.py", "bench/judge/j1.py", "bench/judge/j4.py"]
+
+
+def copy_analysis_code(root):
+    """The analysis code the registration hashes, as the repository holds it."""
+    for rel in ANALYSIS:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(CODE / rel, root / rel)
 
 
 def init_published(root, origin):
@@ -45,6 +56,7 @@ def repo(tmp_path):
     (root / "data" / "splits.json").write_text(json.dumps({"calib": [str(i) for i in range(100, 160)], "test": ["9"]}) + "\n")
     (root / "data" / "MANIFEST.json").write_text('{"databases": {}}\n')
     (root / "config.yaml").write_text(yaml.safe_dump(CONFIG))
+    copy_analysis_code(root)
     init_published(root, tmp_path / "origin.git")
     return root
 
@@ -63,7 +75,7 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
     rule = manifest["delta_rule"]
     assert (rule["cap_pp"], rule["bootstrap"]["n_boot"], rule["bootstrap"]["seed"]) == \
         (CONFIG["thresholds"]["delta_cap_pp"], CONFIG["stats"]["n_boot"], CONFIG["seeds"]["bootstrap"])
-    assert rule["implementation"] == {"path": "bench/judge/j4.py", "sha256": sha256(j4.__file__)}
+    assert manifest["analysis_code"] == {rel: sha256(repo / rel) for rel in ANALYSIS}
     calib = [str(i) for i in range(100, 160)]
     assert rule["pilot"]["ids"] == pilot_sample(calib, 50, CONFIG["seeds"]["calib_split"])
     assert (rule["pilot"]["size"], len(rule["pilot"]["ids"])) == (CONFIG["stats"]["pilot_size"], 50)
@@ -111,6 +123,27 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
         register("config.yaml", root=repo)
 
 
+@pytest.mark.parametrize("rel", ANALYSIS + ["bench/report.py"])
+def test_editing_any_analysis_file_changes_the_registration(repo, rel):
+    first = register("config.yaml", root=repo)
+    path = repo / rel
+    path.write_text((path.read_text() if path.exists() else '"""the report"""\n') + "# a reading changed\n")
+    git(repo, "add", rel)
+    git(repo, "commit", "-q", "-m", f"edit {rel}")
+    with pytest.raises(PreregError, match="--replace"):
+        register("config.yaml", root=repo)
+    second = register("config.yaml", root=repo, replace=True)
+    manifest = json.loads((repo / "prereg" / "manifest.json").read_text())
+    assert second["hash"] != first["hash"] and manifest["analysis_code"][rel] == sha256(path)
+
+
+def test_register_refuses_without_the_analysis_code(repo):
+    git(repo, "rm", "-q", "bench/evaluate.py")
+    git(repo, "commit", "-q", "-m", "drop the evaluator")
+    with pytest.raises(PreregError, match="bench/evaluate.py"):
+        register("config.yaml", root=repo)
+
+
 def commit_config(repo, name, text):
     (repo / name).parent.mkdir(parents=True, exist_ok=True)
     (repo / name).write_text(text)
@@ -147,7 +180,6 @@ def test_the_extends_chain_resolves_each_parent_from_its_own_file(repo):
     commit_config(repo, "sub/deeper/mid.yaml", "extends: ../../config.yaml\n")
     commit_config(repo, "sub/child.yaml", "extends: deeper/mid.yaml\n")
     assert register("sub/child.yaml", root=repo)["new"] is True
-    (repo / ".gitignore").write_text("local.yaml\n")
     (repo / "local.yaml").write_text(yaml.safe_dump(CONFIG))
     commit_config(repo, ".gitignore", "local.yaml\n")
     commit_config(repo, "sub/deeper/mid2.yaml", "extends: ../../local.yaml\n")
@@ -175,6 +207,7 @@ def published(tmp_path, monkeypatch, tmp_path_factory):
     paths.SPLITS.write_text(json.dumps({"train": ["1", "2"], "calib": ["3"], "test": ["9"], "excluded": []}))
     (root / "SPEC.md").write_text("protocol\n")
     (root / ".gitignore").write_text("runs/\ndata/raw/\ndata/bird_dev/\n")
+    copy_analysis_code(root)
     init_published(root, tmp_path_factory.mktemp("remote") / "origin.git")
     registered = register(str(config_path.relative_to(root)), root=root)
     git(root, "push", "-q", "origin", "main")
