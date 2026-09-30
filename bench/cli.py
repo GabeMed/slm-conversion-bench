@@ -34,6 +34,24 @@ def main(argv=None) -> int:
     p = sub.add_parser("eval", help="the eval execution of a run's predictions (paired by question_id)")
     p.add_argument("run_id")
 
+    # F3 · training, load test and preflight (bench/train.py, bench/loadtest.py, bench/preflight.py)
+    p = sub.add_parser("train", help="S5: one LoRA adapter for a cluster; registers the adapters fact once every cluster has one")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--cluster", required=True)
+    p.add_argument("--on", required=True, choices=("local", "modal"), help="local: this machine; modal: a Modal GPU")
+    p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3")
+    p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed")
+    p.add_argument("--on", required=True, choices=("local", "modal"), help="where the AIPerf client runs")
+    p.add_argument("--concurrency", type=int, nargs="+", help="levels (default: loadtest.concurrency)")
+    p.add_argument("--tokenizer", help="HF repo of the engine's tokenizer, when the engine is not an SLM candidate")
+    p.add_argument("--tokenizer-revision", help="its 40-hex commit")
+    p = sub.add_parser("preflight", help="the Day-1 preconditions of SPEC 7.1 and P-4, each with its action")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--parity", metavar="CLUSTER", help="run P-4 on this cluster's adapter against the served candidate")
+    p.add_argument("--on", default="modal", choices=("local", "modal"), help="where P-4's HF-PEFT reference runs")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "data":
@@ -49,6 +67,9 @@ def main(argv=None) -> int:
         elif args.command == "eval":
             from bench.evaluate import evaluate
             print(evaluate(args.run_id))
+        elif args.command in ("train", "loadtest", "preflight"):  # F3: each reports its own errors
+            from bench import loadtest, preflight, train
+            return {"train": train.cli, "loadtest": loadtest.cli, "preflight": preflight.cli}[args.command](args)
     except (TestSplitLocked, ConfigError, DataError, FactError, HarnessError) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2
