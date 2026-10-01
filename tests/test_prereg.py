@@ -164,6 +164,37 @@ def test_ignored_bytecode_beside_the_analysis_code_is_not_a_refusal(repo):
     check_registered_analysis_code(repo)
 
 
+def test_a_malformed_registration_is_replaced_only_on_request(repo):
+    (repo / "prereg").mkdir()
+    (repo / "prereg" / "manifest.json").write_text("[]\n")
+    (repo / "prereg" / "HASH").write_text("x\n")
+    git(repo, "add", "prereg")
+    git(repo, "commit", "-q", "-m", "a malformed registration")
+    with pytest.raises(PreregError, match="the registration in prereg/ is broken"):
+        register("config.yaml", root=repo)
+    with pytest.raises(PreregError, match="not a JSON object: no analysis code is registered"):
+        check_registered_analysis_code(repo)
+    assert register("config.yaml", root=repo, replace=True)["new"]
+
+
+@pytest.mark.parametrize("damage", [b"0" * 64 + b"\n", b"\xff\xfe\n", None])  # wrong, not UTF-8, missing
+def test_a_registration_whose_hash_is_not_its_manifests_is_repaired_only_on_request(repo, damage):
+    """`bench prereg` checks both halves, as the barrier does: never "already registered" with a broken HASH."""
+    registered = register("config.yaml", root=repo)
+    hash_path = repo / "prereg" / "HASH"
+    if damage is None:
+        git(repo, "rm", "-q", "prereg/HASH")
+    else:
+        hash_path.write_bytes(damage)
+        git(repo, "add", "prereg/HASH")
+    git(repo, "commit", "-q", "-m", "a damaged HASH")
+    with pytest.raises(PreregError, match="the registration in prereg/ is broken"):
+        register("config.yaml", root=repo)
+    repaired = register("config.yaml", root=repo, replace=True)  # a new registration (it records its own commit), intact
+    manifest_sha = hashlib.sha256((repo / "prereg" / "manifest.json").read_bytes()).hexdigest()
+    assert repaired["new"] and repaired["hash"] == hash_path.read_text().strip() == manifest_sha != registered["hash"]
+
+
 def test_register_refuses_without_the_analysis_code(repo):
     git(repo, "rm", "-q", "bench/evaluate.py")
     git(repo, "commit", "-q", "-m", "drop the evaluator")

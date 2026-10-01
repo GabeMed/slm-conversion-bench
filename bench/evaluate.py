@@ -273,9 +273,8 @@ def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[st
     if config_sha256(config) != run_manifest["config_sha256"]:  # validated when the run loaded it
         raise data.DataError(f"the configuration snapshot of {source_run_id} does not match its manifest")
     split = run_manifest["split"]
-    barrier.ensure_split_allowed(split, config)
     if split == "test":
-        in_force = (paths.ROOT / barrier.PREREG_HASH).read_text().strip()
+        in_force = barrier.prereg_hash_in_force(config)
         if run_manifest.get("prereg_hash") != in_force:
             raise data.DataError(f"run {source_run_id} ran under pre-registration {run_manifest.get('prereg_hash')}, "
                                  f"not the one in force ({in_force}): it is reported, never scored")

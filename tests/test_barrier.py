@@ -90,6 +90,14 @@ def test_hash_must_be_the_manifests(repo):
     assert "is not the sha256" in prereg_published(CONFIG, repo)
 
 
+def test_a_hash_that_is_not_text_is_a_refusal_not_a_crash(repo):
+    register(repo)
+    (repo / "prereg" / "HASH").write_bytes(b"\xff\xfe\n")
+    git(repo, "commit", "-q", "-am", "a HASH that is not UTF-8")
+    git(repo, "push", "-q", "origin", "main")
+    assert "is not the sha256" in prereg_published(CONFIG, repo)
+
+
 def test_local_changes_and_a_newer_remote_are_refused(repo, tmp_path):
     register(repo)
     (repo / "prereg" / "HASH").write_text("edited\n")
@@ -98,6 +106,68 @@ def test_local_changes_and_a_newer_remote_are_refused(repo, tmp_path):
     other = clone(tmp_path, tmp_path / "origin.git", "other")  # someone else re-registers on the remote
     register(other, splits_sha256="0" * 64)
     assert "differs from origin/main" in prereg_published(CONFIG, repo)  # seen only because the barrier fetches
+
+
+def test_the_remote_is_what_the_fetch_brought_not_a_stale_ref(repo, tmp_path):
+    """A clone whose refspec does not map main keeps a stale origin/main after `git fetch origin main`:
+    the barrier compares with the fetched commit, so a re-registration on the remote is still seen."""
+    register(repo)
+    git(repo, "config", "--unset-all", "remote.origin.fetch")
+    other = clone(tmp_path, tmp_path / "origin.git", "other")
+    register(other, splits_sha256="0" * 64)
+    assert "differs from origin/main" in prereg_published(CONFIG, repo)
+
+
+def test_the_fetch_never_prompts_and_times_out(repo, monkeypatch):
+    import bench.barrier as barrier
+    register(repo)
+    real, seen = subprocess.run, []
+
+    def run(cmd, **kwargs):
+        if "fetch" in cmd:
+            seen.append((cmd, kwargs))
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return real(cmd, **kwargs)
+    monkeypatch.setattr(barrier.subprocess, "run", run)
+    for name in ("GIT_TERMINAL_PROMPT", "GIT_SSH_COMMAND"):  # whatever the shell running the tests exports
+        monkeypatch.delenv(name, raising=False)
+    assert "timed out" in prereg_published(CONFIG, repo)
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i my-key")  # a user's own ssh command is kept
+    assert "timed out" in prereg_published(CONFIG, repo)
+    (cmd, first), (_, second) = seen
+    assert first["env"]["GIT_TERMINAL_PROMPT"] == "0" and first["timeout"] == barrier.FETCH_TIMEOUT_S
+    assert first["env"]["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes" and second["env"]["GIT_SSH_COMMAND"] == "ssh -i my-key"
+    assert cmd[-1] == "refs/heads/main"  # the branch in full: a tag called main would win over a short name
+
+
+def test_a_failed_fetch_refuses_even_after_one_that_succeeded(repo):
+    """The earlier fetch left a FETCH_HEAD: a failed fetch must not compare with it."""
+    register(repo)
+    assert prereg_published(CONFIG, repo) == ""
+    git(repo, "remote", "set-url", "origin", str(repo.parent / "gone.git"))
+    assert "could not fetch origin/main" in prereg_published(CONFIG, repo)
+
+
+def test_a_fetch_that_leaves_no_commit_refuses(repo, monkeypatch):
+    """An empty FETCH_HEAD (a concurrent fetch had just emptied it) would read as the index, which holds
+    the committed files: the barrier would open. It refuses."""
+    import bench.barrier as barrier
+    register(repo)
+    real = barrier._git
+    monkeypatch.setattr(barrier, "_git", lambda root, *args: subprocess.CompletedProcess(args, 0, "", "")
+                        if "FETCH_HEAD^{commit}" in args else real(root, *args))
+    assert "left no commit to compare with" in prereg_published(CONFIG, repo)
+
+
+@pytest.mark.parametrize("content", ["[not JSON]\n", "[]\n", "1\n"])
+def test_a_malformed_registration_is_a_refusal_not_a_crash(repo, content):
+    (repo / "prereg").mkdir()
+    (repo / "prereg" / "manifest.json").write_text(content)
+    (repo / "prereg" / "HASH").write_text(sha(repo / "prereg" / "manifest.json") + "\n")
+    git(repo, "add", "prereg")
+    git(repo, "commit", "-q", "-m", "a malformed registration")
+    git(repo, "push", "-q", "origin", "main")
+    assert "is not a JSON object" in prereg_published(CONFIG, repo)
 
 
 def test_no_remote_no_test(tmp_path):
