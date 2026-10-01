@@ -118,7 +118,8 @@ def delta_rule(config: Dict[str, Any]) -> Dict[str, Any]:
                           "d": "paired discordance, the fraction of questions exactly one of the two arms gets right, "
                                "measured on the pilot (B3 against B0)",
                           "n": "the number of paired test questions (498)"},
-        "pilot": {"accessor": "bench.data.pilot_ids(config)", "size": config["stats"]["pilot_size"]},
+        "pilot": {"accessor": "bench.data.pilot_ids(config)", "size": config["stats"]["pilot_size"],
+                  "mix": config["stats"]["pilot_mix"]},
         "bootstrap": {"unit": "question", "n_boot": config["stats"]["n_boot"], "seed": config["seeds"]["bootstrap"],
                       "quantile": "inverted CDF: ci_low the ceil(n_boot/20)-th smallest resample, ci_high the "
                                   "ceil(n_boot/20)-th largest, from the same resamples"},
@@ -169,6 +170,10 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     for key in ("n_boot", "pilot_size"):
         if not isinstance((config.get("stats") or {}).get(key), int):
             raise PreregError(f"the configuration has no stats.{key}: the delta rule needs it")
+    mix = config["stats"].get("pilot_mix")
+    if not isinstance(mix, dict) or sum(mix.values()) != config["stats"]["pilot_size"]:
+        raise PreregError("the configuration's stats.pilot_mix does not give stats.pilot_size questions: the pilot "
+                          "is drawn by difficulty")
     inputs = barrier.REGISTERED
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in inputs.items()},

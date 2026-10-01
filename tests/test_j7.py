@@ -291,7 +291,7 @@ def test_the_bar_follows_the_teachers_self_agreement_by_call_site_and_difficulty
     assert result["reads"]["teacher_self_replay"] == reference(noisy)
     assert result["reads"]["config"] == j7.CONFIG_KEYS
     assert {"thresholds.concordance_slack_pp", "thresholds.selection_delta_pp", "allocation.min_calls",
-            "seeds.calib_split", "stats.pilot_size"} <= set(j7.CONFIG_KEYS)  # the pilot's keys too (bench.data.pilot_ids)
+            "seeds.calib_split", "stats.pilot_mix", "stats.pilot_size"} <= set(j7.CONFIG_KEYS)  # the pilot's keys too (bench.data.pilot_ids)
 
 
 def test_the_defaults_are_the_pilot_accessor_and_the_calib_difficulties(tmp_path, monkeypatch):

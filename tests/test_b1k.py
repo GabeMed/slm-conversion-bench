@@ -45,7 +45,7 @@ def test_k3_is_chosen_only_when_its_lower_bound_is_above_zero():
 def test_the_bound_is_j4s_paired_bootstrap():
     k0, k3 = correct(set(range(100, 150))), correct(set(range(120, 185)))
     mine = b1k.choose(k0, k3, seed=7, resamples=1000)
-    j4 = noninferiority({i[0]: ok for i, ok in k3.items()}, {i[0]: ok for i, ok in k0.items()}, 5, 7, 1000)
+    j4 = noninferiority({i[0]: ok for i, ok in k3.items()}, {i[0]: ok for i, ok in k0.items()}, 7, 1000, margin=0.05)
     assert (mine["diff"], mine["ci_low"]) == (j4["diff"], j4["ci_low"])  # one gold call per question: the same bootstrap
 
 

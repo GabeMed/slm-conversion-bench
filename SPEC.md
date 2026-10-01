@@ -341,7 +341,7 @@ Tudo aqui é fixado **antes** de qualquer resultado no teste.
   - O piloto também dá a projeção de tempo e de gasto (7.1).
 - **Não-inferioridade:** IC unilateral por bootstrap pareado, com a pergunta como unidade.
 - **Alegações conjuntivas** ("substitui em todos os clusters de rotina") exigem que todos os testes passem, sem correção de Holm, e o poder conjunto é reportado.
-- **"Inconclusivo"** conta como não confirmado, e é reportado **com o poder**, para não ser lido como refutação. O relatório diz também qual perda o IC exclui ("exclui uma perda maior que X p.p.").
+- **"Inconclusivo"** conta como não confirmado, e é reportado **com o poder**, para não ser lido como refutação. O relatório mostra o IC de cada comparação: o limite inferior é a maior perda que os dados ainda admitem.
 - **Seleção na calibração** (a alocação do B5) usa margem de 2,5 p.p., metade de Δ, para não escolher motores que estão no limite. Um cluster precisa de pelo menos `min_calls` chamadas na calibração para contar como evidência.
 - **Barra de concordância** (clusters sem gabarito, no B5): por call site, **min(95%, A − 2 p.p.)**, onde A é a concordância do professor consigo mesmo.
   - A é medida reexecutando o professor nas chamadas do piloto. Um modelo via API não repete a própria saída nem com temperatura 0, e uma barra acima de A seria inalcançável para qualquer motor.

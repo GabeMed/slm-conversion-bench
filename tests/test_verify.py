@@ -41,7 +41,8 @@ def world(tmp_path, monkeypatch):
         "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}})
     # what J7 reads beside its arguments: the size of the test split and the registered pilot
     monkeypatch.setattr(data, "load_splits", lambda: {"test": [str(q) for q in range(500)]})
-    monkeypatch.setattr(j7, "registered_pilot", lambda config: QUESTIONS[:50])
+    monkeypatch.setattr(data, "pilot_ids", lambda config: QUESTIONS[:50])
+    monkeypatch.setattr(data, "questions_for", lambda config, split: {q: {"difficulty": "simple"} for q in QUESTIONS})
 
     t = teacher("agent-B0-calib", "calib", QUESTIONS)  # every call takes 100 ms: the SLO is 100 ms, under the cap
     write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib", "question_ids": QUESTIONS}, t)
@@ -70,9 +71,14 @@ def world(tmp_path, monkeypatch):
     cheap = replay(t, "replay-cheap", "cheap_alt", 0.9)
     write_run("replay-cheap", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib"}, cheap)
     per_call_eval("eval-cheap", "replay-cheap", cheap, teacher_ok)
+    routine = sorted({c["call_site"] for c in t} - set(GOLD_SITES))  # the teacher against itself, on the pilot (T4)
+    write_run("replay-self", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "production_llm",
+                              "split": "calib", "call_sites": routine},
+              replay([c for c in t if c["question_id"] in QUESTIONS[:50] and c["call_site"] in routine], "replay-self",
+                     "production_llm", 1.0, model="teacher-model"))
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap", "eval-cheap"),
                                                                 "slm": ("replay-b4", "eval-b4")},
-                                 "eval-t", str(j8_path), str(j6_path), config)
+                                 "eval-t", str(j8_path), str(j6_path), config, teacher_self_replay="replay-self")
 
     slm_calls = [call("agent-B3", q, "select_tables", parsed={}, role="slm", engine="slm:qwen3-8b", model="qwen3-8b",
                       use=usage(1000, 0, 10)) for q in ("1", "2")]
@@ -131,7 +137,7 @@ def test_a_fabricated_result_does_not_come_out_of_its_own_reads(world):
     forged = forge(world)
     verified, divergences = verify.verify(world["config"], {**world["plan"], "j8": relative(forged)})
     assert divergences == [f"{relative(forged)}: recomputes to {relative(world['results']['j8'])}, not to the stored bytes "
-                           "(read cost.p95_slo_cap_ms, cost.utilizations, modal.gpu_prices, serving.cpu, serving.memory_gib "
+                           "(read cost.p95_slo_cap_ms, cost.slo_from, cost.utilizations, modal.gpu_prices, serving.cpu, serving.memory_gib "
                            "of the configuration)"]
     assert relative(world["results"]["j8"]) in verified  # the genuine one, which the J3 cost and J7 built on
 

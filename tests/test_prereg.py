@@ -81,7 +81,8 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
         (CONFIG["thresholds"]["delta_pp"], CONFIG["thresholds"]["selection_delta_pp"], CONFIG["stats"]["n_boot"],
          CONFIG["seeds"]["bootstrap"]) == (5, 2.5, 10000, 303)
     assert "cap_pp" not in rule and "sqrt(d / n)" in rule["planned_power"]["formula"]
-    assert rule["pilot"] == {"accessor": "bench.data.pilot_ids(config)", "size": CONFIG["stats"]["pilot_size"]}
+    assert rule["pilot"] == {"accessor": "bench.data.pilot_ids(config)", "size": 50,
+                             "mix": {"simple": 15, "moderate": 25, "challenging": 10}}
     assert manifest["analysis_code"] == {rel: sha256(repo / rel) for rel in ANALYSIS}
     assert git(repo, "rev-parse", "HEAD^") == before and git(repo, "status", "--porcelain") == ""
     assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == ["prereg/HASH", "prereg/manifest.json"]
@@ -156,6 +157,11 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
     (repo / "config.yaml").write_text(yaml.safe_dump({k: v for k, v in CONFIG.items() if k != "stats"}))
     git(repo, "commit", "-q", "-am", "no stats")
     with pytest.raises(PreregError, match="stats.n_boot"):
+        register("config.yaml", root=repo)
+    short = {**CONFIG, "stats": {**CONFIG["stats"], "pilot_mix": {"simple": 15, "moderate": 25, "challenging": 9}}}
+    (repo / "config.yaml").write_text(yaml.safe_dump(short))
+    git(repo, "commit", "-q", "-am", "a mix of 49")
+    with pytest.raises(PreregError, match="stats.pilot_mix does not give stats.pilot_size questions"):
         register("config.yaml", root=repo)
 
 
@@ -296,6 +302,7 @@ def published(tmp_path, monkeypatch, tmp_path_factory):
     raw = yaml.safe_load(config_path.read_text())
     raw["data"]["mini_dev"]["sha256"] = sha256(paths.RAW / "mini_dev.json")
     raw["stats"]["pilot_size"] = 1  # the synthetic calibration split has a single id
+    raw["stats"]["pilot_mix"] = {"simple": 1, "moderate": 0, "challenging": 0}
     config_path.write_text(yaml.safe_dump(raw))
     paths.SPLITS.write_text(json.dumps({"train": ["1", "2"], "calib": ["3"], "test": ["9"], "excluded": []}))
     (root / "SPEC.md").write_text("protocol\n")

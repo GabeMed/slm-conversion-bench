@@ -40,9 +40,9 @@ from bench.judge.base import (Identity, JudgmentError, calls_of, canonical, invo
 
 JUDGMENT = "J7"
 # the keys of config.yaml this judgment reads (design §6.2: `reads` names them, for `bench verify`).
-# seeds.calib_split and stats.pilot_size are what bench.data.pilot_ids reads today: they follow that accessor
+# seeds.calib_split, stats.pilot_mix and stats.pilot_size are what bench.data.pilot_ids reads: they follow that accessor
 CONFIG_KEYS = ["allocation.min_calls", "cost.utilizations", "data.bird_dev_questions", "prices", "seeds.bootstrap",
-               "seeds.calib_split", "stats.n_boot", "stats.pilot_size", "thresholds.concordance_min",
+               "seeds.calib_split", "stats.n_boot", "stats.pilot_mix", "stats.pilot_size", "thresholds.concordance_min",
                "thresholds.concordance_slack_pp", "thresholds.selection_delta_pp"]
 ENGINES = ("cheap_alt", "slm")
 NonInferiority = Callable[..., Dict[str, Any]]

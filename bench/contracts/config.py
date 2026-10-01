@@ -152,6 +152,8 @@ def cost_settings_errors(config: Dict[str, Any]) -> List[str]:
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
         if not number or value < 0 or (positive and value == 0):
             errors.append(f"{'.'.join(where)}.{key} must be a number {'> 0' if positive else '>= 0'}")
+    if not isinstance(section("cost").get("slo_from"), (str, type(None))):
+        errors.append("cost.slo_from must be a run id or null")
     return errors
 
 

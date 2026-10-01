@@ -12,8 +12,9 @@ Every level must have run with the prefix cache on (SPEC §6.6).
 
 **The SLO is a rule, not a number chosen after a load test**: the stricter of
 `cost.p95_slo_cap_ms`, an external reference, and the production LLM's own p95 latency per call,
-over the first attempts of the pilot's B0 execution on calib (`slo_from`, named by whoever runs
-J8). The SLM must answer at least as fast as the API it replaces, and never slower than the
+over the first attempts of the pilot's B0 execution on calib (`slo_from`). That execution is fixed
+in the configuration before the load test (`cost.slo_from`, registered with it): once set, J8
+refuses any other. The SLM must answer at least as fast as the API it replaces, and never slower than the
 reference. Every first attempt counts, a failed one too: it is the latency the agent met. That p95
 is the 95th percentile by linear interpolation between order statistics, the definition AIPerf's
 `request_latency.p95` follows on the SLM's side. The result records the cap, the LLM's p95 and
@@ -53,7 +54,8 @@ from bench.judge.base import JudgmentError, calls_of, canonical, reference, requ
 JUDGMENT = "J8"
 EXPORT = "profile_export_aiperf.json"
 # the configuration keys J8 reads, recorded in the result's `reads` (design §6.2)
-CONFIG_KEYS = ("cost.p95_slo_cap_ms", "cost.utilizations", "modal.gpu_prices", "serving.cpu", "serving.memory_gib")
+CONFIG_KEYS = ("cost.p95_slo_cap_ms", "cost.slo_from", "cost.utilizations", "modal.gpu_prices", "serving.cpu",
+               "serving.memory_gib")
 
 
 def level(export: Dict[str, Any]) -> Dict[str, float]:
@@ -121,6 +123,9 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[Li
     cost = config["cost"]
     if cost.get("p95_slo_cap_ms") is None:
         raise JudgmentError("cost.p95_slo_cap_ms is not set: the SLO needs its pre-registered cap")
+    if cost.get("slo_from") not in (None, slo_from):
+        raise JudgmentError(f"cost.slo_from names {cost['slo_from']}, not {slo_from}: the SLO's execution is fixed in "
+                            f"the configuration, before the load test")
     bound = slo(slo_from, cost["p95_slo_cap_ms"])
     levels = []
     for run_id in sorted(loadtest_run_ids):

@@ -394,6 +394,8 @@ def test_the_steps_table_reads_the_judgments():
     assert ("8 passed the production signal; 1 SQL completions dropped because masking changed them; "
             "2 exact and 3 near duplicates removed; 4 sensitive-data detections masked") in rows["S2"]["did"]
     assert rows["S2"]["changed"] == "2 training examples" and "75.0% on calib" in rows["S3"]["changed"]
+    curation["total"]["over_cap"] = 5  # the cap on the examples per question and call site (T1)
+    assert report.steps(data)[1]["changed"] == "2 training examples (5 above the cap per question and call site left out)"
     assert rows["S5"]["changed"] == "B4 − B3: +10.0 pp (CI low +0.0 pp), non-inferior"
     data["judgments"]["j7"] = {"adapters": "a" * 64, "allocation": {"c0": "slm", "c1": "production_llm"},
                                "clusters": {"c0": {"cost_dependent": True}, "c1": {"cost_dependent": False}}}
@@ -715,6 +717,16 @@ def register_analysis_code(root, config):
     return prereg_hash
 
 
+def b1k_choice(k, pilot=PILOT):
+    """A stored choice of B1's few-shot k on the pilot, as `bench judge b1k` writes it."""
+    from bench.judge.base import canonical
+    raw = canonical({"judgment": "b1k", "reads": {}, "result": {"k": k, "pilot_ids": sorted(pilot, key=int)}})
+    path = paths.ROOT / "judgments" / "b1k" / hashlib.sha256(raw).hexdigest() / "choice.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return relative(path)
+
+
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
     pytest.importorskip("sklearn")
@@ -722,7 +734,7 @@ def pipeline(tmp_path, monkeypatch):
     from bench.curate import run_curate, write_datasets
     from bench.embed import run_embed
     from bench.judge import j2, j3, j5, j6, j7, j8
-    from fixtures.fake import fake_embed, fake_tokens, write_run
+    from fixtures.fake import call, fake_embed, fake_tokens, write_run
     from fixtures.world import gold_correct, per_call_eval, replay, teacher, trained_on
     from synthetic import make_repo
     from test_curate import teacher_config
@@ -733,8 +745,9 @@ def pipeline(tmp_path, monkeypatch):
     config["prices"] = {"as_of": "2026-09-30", "table": {
         "teacher-model": {"input_per_mtok": 3.0, "cached_input_per_mtok": 0.3, "output_per_mtok": 12.0, "batch_discount": 0.5},
         "engine-model": {"input_per_mtok": 0.2, "cached_input_per_mtok": 0.02, "output_per_mtok": 0.6, "batch_discount": 0.5}}}
-    config["cost"]["p95_slo_ms"] = 1000
-    config["modal"] = {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}  # F3's key
+    config["cost"].update(p95_slo_cap_ms=1000, slo_from="agent-B0-slo")
+    config["modal"] = {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600},  # F3's key
+                                      "cpu_usd_per_core_s": 0.0, "memory_usd_per_gib_s": 0.0}}
     config["stats"] = {"n_boot": 100}  # F2's key
     config["allocation"]["min_calls"] = 5
     config["clustering"].update(k_min=2, k_max=6, n_init=3)
@@ -792,7 +805,10 @@ def pipeline(tmp_path, monkeypatch):
                       files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
                                                              "request_throughput": {"unit": "requests/sec", "avg": rps}}})
             loadtests.append(run_id)
-    j8_path = j8.run(loadtests, config)
+    # the SLO rule's pilot: a production LLM slower than the cap, so the cap is the SLO
+    run("agent-B0-slo", {"type": "agent", "arm": "B0", "split": "calib"},
+        [call("agent-B0-slo", "1", "select_tables", latency_ms=5000)])
+    j8_path = j8.run(loadtests, config, slo_from="agent-B0-slo")
     b4_calib = replay(calib, "replay-B4-calib", "slm:qwen3-8b+lora:c", 0.99, cluster_of=assigned)
     run("replay-B4-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "arm": "B4", "split": "calib",
                             "facts": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name}}, b4_calib)
@@ -829,7 +845,7 @@ def pipeline(tmp_path, monkeypatch):
             b5 += replay([c], "agent-B5-test", "slm:qwen3-8b+lora:c" if engine == "slm" else "cheap_alt", 1.0,
                          cluster_of=assigned)
     arms_calls["B5"] = b5
-    plan = {"split": "test", "arms": {}, "format": {}, "pilot": {}}
+    plan = {"split": "test", "arms": {}, "format": {}, "pilot": {}, "b1k": b1k_choice(config["arms"]["B1"]["few_shot"]["k"])}
     b0_ok = {q: unit("B0", q) < 0.8 for q in TEST_IDS + CALIB_IDS}
 
     def evaluation(eval_run_id, source_run_id, arm, split, ids):
@@ -956,7 +972,7 @@ def test_a_test_report_reads_costs_priced_as_the_configuration_says(pipeline):
     gpu = json.loads(json.dumps(pipeline["config"]))
     gpu["modal"]["gpu_prices"]["usd_per_s"]["L4"] = 1.6 / 3600
     loadtests = sorted(read_result(plan["j8"], "J8")["reads"]["loadtests"])
-    pipeline["plan"].write_text(yaml.safe_dump({**plan, "j8": relative(j8.run(loadtests, gpu))}))
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "j8": relative(j8.run(loadtests, gpu, slo_from="agent-B0-slo"))}))
     with pytest.raises(JudgmentError, match="priced the GPUs with another table"):
         report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
@@ -1218,7 +1234,7 @@ def test_the_report_refuses_a_cost_that_cannot_say_what_it_is_or_used_another_lo
     with pytest.raises(JudgmentError, match="records no upper_bound, cache_not_reported"):
         report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
     only_adapter = [f"loadtest-lora-c-{c}" for c in (1, 8, 32)]
-    other = relative(j8.run(only_adapter, pipeline["config"]))
+    other = relative(j8.run(only_adapter, pipeline["config"], slo_from="agent-B0-slo"))
     b4 = read_result(plan["arms"]["B4"]["cost"], "J3")
     from bench.judge import j3
     changed = json.loads(json.dumps(plan))
@@ -1226,6 +1242,26 @@ def test_the_report_refuses_a_cost_that_cannot_say_what_it_is_or_used_another_lo
     pipeline["plan"].write_text(yaml.safe_dump(changed))
     with pytest.raises(JudgmentError, match="another load test than the plan's j8"):
         report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+
+
+def test_the_report_refuses_an_slo_or_a_few_shot_k_the_configuration_does_not_name(pipeline):
+    """What the pilot fixed is read from the registered configuration: the execution the SLO is
+    measured on (T8), and B1's k, which is the one the rule chose on the pilot questions (T18)."""
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    k = pipeline["config"]["arms"]["B1"]["few_shot"]["k"]
+
+    def refused(changed, match):
+        pipeline["plan"].write_text(yaml.safe_dump({**plan, **changed}))
+        with pytest.raises(JudgmentError, match=match):
+            report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+    j8 = read_result(plan["j8"], "J8")
+    elsewhere = write_result("J8", {**j8["reads"], "slo_from": {**j8["reads"]["slo_from"], "run_id": "agent-B0-other"}},
+                             j8["result"])
+    refused({"j8": relative(elsewhere)}, r"another execution than the configuration's cost.slo_from \(agent-B0-slo\)")
+    refused({"b1k": b1k_choice(3 - k)}, f"arms.B1.few_shot.k is {k} and the plan's b1k chose {3 - k}")
+    refused({"b1k": b1k_choice(k, PILOT[1:])}, "on other questions than the pilot's")
+    refused({"b1k": None}, "a test report with B1 needs the plan's b1k")
+    assert plan["b1k"].endswith("choice.json")  # and the plan as written is the one every other test reports on
 
 
 def test_the_s3_row_reports_the_prompts_cut(pipeline):

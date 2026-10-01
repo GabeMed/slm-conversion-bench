@@ -153,7 +153,8 @@ def _j6(reads, result, config):
 def _j7(reads, result, config):
     from bench.judge import j7
     replays = {engine: (_run_id(reads[engine], "replay"), _run_id(reads[engine], "replay_eval")) for engine in ("cheap_alt", "slm")}
-    return j7.run, (
+    self_replay = _run_id(reads, "teacher_self_replay")
+    return (lambda *arguments: j7.run(*arguments, teacher_self_replay=self_replay)), (
         _fact_path("centroids", result["centroids"]), _fact_path("adapters", result["adapters"]), replays,
         _run_id(reads, "teacher_eval"), _built_on(reads, "j8"), _built_on(reads, "j6"), config)
 

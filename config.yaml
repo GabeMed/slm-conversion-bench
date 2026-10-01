@@ -294,6 +294,7 @@ cost:                          # J3 and J8 (SPEC §6.6); the container's price i
   # (judge j8 --slo-from). The cap is MLPerf's server limit for an 8B model on a ~150-token answer:
   # 2000 ms to the first token + 100 ms per token. Sustained throughput is the highest with p95 within the SLO.
   p95_slo_cap_ms: 17000
+  slo_from: null               # before prereg: the pilot's B0 execution on calib (run id); J8 and the report refuse another
   utilizations: [0.2, 0.5, 1.0]
 claims:                        # the SPEC §5 map (bench/report.py)
   v3_min_ratio: 3              # V3/A2: the paper's bar, met when the cost ratio's 95% CI lower bound is >= this (T9)

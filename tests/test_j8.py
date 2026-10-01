@@ -67,8 +67,8 @@ def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
     assert result["result"]["gpu_prices_as_of"] == "2026-09-30"
     assert set(result["reads"]["loadtests"]) == set(runs)
     assert result["reads"]["slo_from"]["run_id"] == PILOT
-    assert result["reads"]["config"] == ["cost.p95_slo_cap_ms", "cost.utilizations", "modal.gpu_prices", "serving.cpu",
-                                         "serving.memory_gib"]  # the configuration keys J8 read
+    assert result["reads"]["config"] == ["cost.p95_slo_cap_ms", "cost.slo_from", "cost.utilizations", "modal.gpu_prices",
+                                         "serving.cpu", "serving.memory_gib"]  # the configuration keys J8 read
     loadtest("loadtest-other", 4, 500, 5.0, engine="slm:granite-4.2-8b")
     with pytest.raises(JudgmentError, match="one base"):
         j8.run(runs + ["loadtest-other"], config, slo_from=PILOT)
@@ -81,6 +81,18 @@ def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
     config["cost"]["p95_slo_cap_ms"] = None
     with pytest.raises(JudgmentError, match="p95_slo_cap_ms"):
         j8.run(runs, config, slo_from=PILOT)
+
+
+def test_the_slos_execution_is_the_one_the_configuration_names(tmp_path, monkeypatch):
+    """Once `cost.slo_from` is set, the SLO cannot be measured on another execution chosen after the
+    load test; unset (before the pilot ran), whoever runs J8 names it."""
+    _, config = repo(tmp_path, monkeypatch, settings())
+    runs = [loadtest(f"loadtest-{c}", c, p95, rps) for c, p95, rps in ((1, 300, 2.0), (4, 700, 6.0))]
+    config["cost"]["slo_from"] = pilot()
+    named = read_result(j8.run(runs, config, slo_from=PILOT), "J8")
+    assert named["reads"]["slo_from"]["run_id"] == PILOT and "cost.slo_from" in named["reads"]["config"]
+    with pytest.raises(JudgmentError, match=f"cost.slo_from names {PILOT}, not pilot-other"):
+        j8.run(runs, config, slo_from=pilot(run_id="pilot-other"))
 
 
 def test_p95_interpolates_between_order_statistics():
@@ -218,6 +230,7 @@ def test_the_configuration_refuses_an_unusable_slo_cap_price_or_memory(tmp_path,
     for where, key, wrong, reason in ((("cost",), "p95_slo_cap_ms", "17s", "cost.p95_slo_cap_ms must be a number > 0"),
                                       (("cost",), "p95_slo_cap_ms", 0, "cost.p95_slo_cap_ms must be a number > 0"),
                                       (("cost",), "p95_slo_cap_ms", None, "cost.p95_slo_cap_ms must be a number > 0"),
+                                      (("cost",), "slo_from", 7, "cost.slo_from must be a run id or null"),
                                       (("serving",), "memory_gib", -32, "serving.memory_gib must be a number > 0"),
                                       (("serving",), "memory_gib", True, "serving.memory_gib must be a number > 0"),
                                       (("modal", "gpu_prices"), "cpu_usd_per_core_s", -0.1,

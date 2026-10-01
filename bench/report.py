@@ -11,6 +11,7 @@ of (no number goes in it):
     j5: <J5 result>   j6: <J6 result>   j7: <J7 result>   j8: <J8 result>
     adapters: <the adapters fact, when the plan has no J7; with J7, it must be J7's>
     teacher_train_cost: <J3 result of the teacher on train>
+    b1k: <the choice of B1's few-shot k on the pilot (bench judge b1k); a test plan with B1 needs it>
 
 Every figure is read from a judgment or computed by one: J1's per-question table and summary
 (`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
@@ -326,6 +327,20 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         gpu = hashlib.sha256(canonical((config.get("modal") or {}).get("gpu_prices") or {})).hexdigest()
         if judged["j8"].get("gpu_prices_sha256") != gpu:
             raise JudgmentError("the plan's J8 priced the GPUs with another table than the configuration's modal.gpu_prices")
+        pinned = (config.get("cost") or {}).get("slo_from")  # the SLO's execution, fixed before the load test (T8)
+        if (reads["j8"].get("slo_from") or {}).get("run_id") != pinned:
+            raise JudgmentError(f"the plan's J8 measured the SLO on another execution than the configuration's "
+                                f"cost.slo_from ({pinned})")
+    if "B1" in specs:  # B1's k is the one the rule chose on the pilot (T18), never one copied by hand
+        if plan.get("b1k"):
+            chosen = read_result(plan["b1k"], "b1k")["result"]
+            k = config["arms"]["B1"]["few_shot"]["k"]
+            if chosen["k"] != k or chosen["pilot_ids"] != sorted(pilot_ids, key=int):
+                raise JudgmentError(f"arms.B1.few_shot.k is {k} and the plan's b1k chose {chosen['k']}, or chose it on "
+                                    f"other questions than the pilot's")
+            sources["b1k"] = result_reference(plan["b1k"])
+        elif split == "test":
+            raise JudgmentError("a test report with B1 needs the plan's b1k: the choice of its few-shot k on the pilot")
 
     arms, correct, by_question = {}, {}, {}
     for arm, spec in specs.items():
@@ -857,7 +872,9 @@ def steps(data: Dict[str, Any]) -> List[Dict[str, str]]:
                              f"{c.get('masked_sql', 0)} SQL completions dropped because masking changed them; "
                              f"{c['exact_duplicates']} exact and {c['near_duplicates']} near duplicates removed; "
                              f"{sum(j5['curation']['mask_detections'].values())} sensitive-data detections masked; paraphrase not applied"),
-                     "cost": unmeasured, "changed": f"{c['kept']} training examples"})
+                     "cost": unmeasured,
+                     "changed": f"{c['kept']} training examples" + (f" ({c['over_cap']} above the cap per question and "
+                                                                    f"call site left out)" if c.get("over_cap") else "")})
         calib = j5["assignment"]["calib"]
         rows.append({"step": "S3 · clustering",
                      "did": f"{j5['k']} clusters on prompt+action, ARI {j5['ari_call_sites']:.3f} against call sites",
