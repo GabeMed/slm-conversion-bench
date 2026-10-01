@@ -460,11 +460,13 @@ def test_throughput_lists_only_finished_load_runs_and_leaves_the_judgment_to_j8(
 
 
 def test_bench_preflight_writes_the_report_and_exits_1_unless_everything_passes(tmp_path, monkeypatch, capsys):
+    import bench.preflight as preflight
     _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(preflight, "probe_engine", lambda config, engine, t: {"engine": engine, "status": PENDING})
     assert cli.main(["preflight", "--config", str(config_path)]) == 1
     report_path = next(paths.RUNS.glob("preflight-*/report.json"))
     report = json.loads(report_path.read_text())
-    assert [c["id"] for c in report["checks"]] == ["agent_end_to_end", "call_sites_registered", "data_ids_and_gold",
+    assert [c["id"] for c in report["checks"]] == ["engines", "agent_end_to_end", "call_sites_registered", "data_ids_and_gold",
                                                    "teacher_terms", "pilot_spend", "training_time", "throughput",
                                                    "lora_parity"]
     assert report["all_pass"] is False and all(c["action"] for c in report["checks"])
@@ -496,7 +498,108 @@ def test_p4_on_modal_asks_the_gpu_reference_for_the_adapter_by_its_sha256(parity
 def test_preflight_on_modal_hands_its_configuration_to_the_modal_reference(tmp_path, monkeypatch):
     import os
 
+    import bench.preflight as preflight
     _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(preflight, "probe_engine", lambda config, engine, t: {"engine": engine, "status": PENDING})
     monkeypatch.delenv("BENCH_CONFIG", raising=False)
     cli.main(["preflight", "--config", str(config_path), "--on", "modal"])
     assert os.environ["BENCH_CONFIG"] == str(config_path.resolve())
+
+
+class FakeEngine:
+    """An OpenAI-compatible endpoint that answers, refuses a parameter with HTTP 400, or answers without usage."""
+
+    def __init__(self, refuse=None, usage=True):
+        fake = self
+        self.requests, self.refuse, self.usage = [], refuse, usage
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fake.requests.append({"headers": dict(self.headers), "body": body})
+                if fake.refuse and fake.refuse in body:
+                    code, answer = 400, {"error": {"message": f"Unsupported parameter: {fake.refuse}"}}
+                else:
+                    code, answer = 200, {"choices": [{"message": {"role": "assistant", "content": "OK"}}]}
+                    if fake.usage:
+                        answer["usage"] = {"prompt_tokens": 12, "completion_tokens": 1,
+                                           "prompt_tokens_details": {"cached_tokens": 0}}
+                raw = json.dumps(answer).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def close(self):
+        self.server.shutdown()
+
+
+def engines_config(base_url, monkeypatch, **production_params):
+    from bench.contracts.config import load_config
+    config = json.loads(json.dumps(load_config(paths.ROOT / "config.yaml")))
+    monkeypatch.setenv("PROBE_KEY", "probe-key-0001")
+    for name in ("SLM_VLLM_API_KEY", "SLM_MODAL_KEY", "SLM_MODAL_SECRET"):
+        monkeypatch.setenv(name, f"{name.lower()}-0001")
+    for role in ("production_llm", "cheap_alt"):
+        config["roles"][role]["endpoint"].update(base_url=base_url, api_key_env="PROBE_KEY")
+    config["roles"]["production_llm"]["params"].update(production_params)
+    for candidate in config["roles"]["slm_candidates"]:
+        candidate["endpoint"]["base_url"] = base_url
+    return config
+
+
+def test_every_engine_answers_a_real_call_with_its_configured_parameters(monkeypatch):
+    from bench.preflight import check_engines
+    server = FakeEngine()
+    try:
+        config = engines_config(server.base_url, monkeypatch, top_p=0.9)
+        check = check_engines(config)
+    finally:
+        server.close()
+    temperatures = sorted({s["temperature"] for s in config["call_sites"].values()})
+    assert check["status"] == PASS and len(check["evidence"]) == 4 * len(temperatures)  # 2 LLMs and 2 candidates
+    sent = {(r["body"]["model"], r["body"]["temperature"]) for r in server.requests}
+    assert sent == {(m, t) for m in (config["roles"]["production_llm"]["model"], config["roles"]["cheap_alt"]["model"],
+                                     *[c["name"] for c in config["roles"]["slm_candidates"]]) for t in temperatures}
+    production = next(r for r in server.requests if r["body"]["model"] == config["roles"]["production_llm"]["model"])
+    assert production["body"]["top_p"] == 0.9 and production["body"]["max_tokens"] == 4096  # as an execution sends it
+    assert production["headers"]["Authorization"] == "Bearer probe-key-0001"
+    slm = next(r for r in server.requests if r["body"]["model"] == config["roles"]["slm_candidates"][0]["name"])
+    assert slm["headers"]["Modal-Key"] == "slm_modal_key-0001" and slm["headers"]["Authorization"] == "Bearer slm_vllm_api_key-0001"
+
+
+def test_an_engine_that_refuses_its_configured_parameters_fails_the_preflight(monkeypatch):
+    """The case an execution cannot tell from the model failing: a 400 on every call."""
+    from bench.preflight import check_engines
+    server = FakeEngine(refuse="top_p")
+    try:
+        check = check_engines(engines_config(server.base_url, monkeypatch, top_p=0.9))
+    finally:
+        server.close()
+    assert check["status"] == FAIL and "production_llm" in check["action"] and "cheap_alt" not in check["action"]
+    refused = [p for p in check["evidence"] if p["status"] == FAIL]
+    assert refused and all(p["engine"] == "production_llm" and "HTTP 400" in p["why"] for p in refused)
+
+
+def test_an_engine_without_usage_fails_and_one_not_yet_served_is_pending(monkeypatch):
+    from bench.preflight import check_engines
+    server = FakeEngine(usage=False)
+    try:
+        config = engines_config(server.base_url, monkeypatch)
+        check = check_engines(config)
+        assert check["status"] == FAIL and all("no usage" in p["why"] for p in check["evidence"])
+    finally:
+        server.close()
+    for candidate in config["roles"]["slm_candidates"]:
+        candidate["endpoint"]["base_url"] = None
+    for role in ("production_llm", "cheap_alt"):
+        config["roles"][role]["endpoint"]["base_url"] = None
+    assert check_engines(config)["status"] == PENDING
