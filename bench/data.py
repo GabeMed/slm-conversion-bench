@@ -247,6 +247,12 @@ def load_splits() -> dict:
     return json.loads(paths.SPLITS.read_text())
 
 
+def pilot_ids(config: dict) -> List[str]:
+    """The pilot questions (design §6.2: their only accessor). PROVISIONAL, until Front D's stratified
+    pilot lands: today's `pilot_sample` over the calib split, with stats.pilot_size and seeds.calib_split."""
+    return pilot_sample(load_splits()["calib"], config["stats"]["pilot_size"], config["seeds"]["calib_split"])
+
+
 def questions_for(config: dict, split: str) -> Dict[str, dict]:
     """The questions of one split, by id. train and calib come from BIRD dev; test from Plat-SQL."""
     if split not in SPLIT_NAMES:
