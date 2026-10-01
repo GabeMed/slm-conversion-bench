@@ -171,6 +171,11 @@ def _f4(args) -> int:
     return 0
 
 
+def _verify(args) -> int:
+    from bench import verify
+    return verify.cli(args)
+
+
 def f4_commands(sub) -> None:
     p = sub.add_parser("curate", help="S2: curate the teacher's train logs (masking, success filter, dedup)")
     p.add_argument("--config", default="config.yaml")
@@ -192,6 +197,12 @@ def f4_commands(sub) -> None:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--plan", required=True, help="a YAML plan naming the executions and judgments (bench/report.py)")
     p.set_defaults(f4=_f4)
+
+    p = sub.add_parser("verify", help="recompute every stored judgment the report or an arm's fact reads; "
+                                      "list the ones that do not come out the same, and fail on any")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--plan", required=True, help="the report's plan (bench/report.py)")
+    p.set_defaults(f4=_verify)
 
     judge = sub.add_parser("judge", help="the judgments J2, J3, J5-J8 (pure functions over executions)")
     judgments = judge.add_subparsers(dest="judgment", required=True)
