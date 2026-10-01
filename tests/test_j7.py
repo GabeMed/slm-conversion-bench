@@ -1,5 +1,7 @@
 """J7 · S6: the cheapest engine that passes per cluster, the production LLM otherwise, an agreement bar
 tied to the teacher's agreement with itself (T4), and an allocation fact the router accepts."""
+from fractions import Fraction
+
 import pytest
 
 from bench import paths
@@ -90,13 +92,14 @@ def test_agreement_needs_enough_calls():
 
 def test_each_call_sites_bar_is_capped_by_the_teachers_agreement_with_itself():
     """T4: bar = min(thresholds.concordance_min, A_tt − thresholds.concordance_slack_pp / 100)."""
-    measured = {"exact": {"rate": 1.0}, "close": {"rate": 0.97}, "noisy": {"rate": 0.93}, "unmeasured": {"rate": None}}
+    measured = {site: agreement(rate)["agreement"] for site, rate in (("exact", 1.0), ("close", 0.97), ("noisy", 0.93))}
+    measured["unmeasured"] = {"n": 0, "agree": 0, "rate": None}
     bars = j7.site_bars(measured, SETTINGS)
-    assert bars == {"exact": 0.95, "close": pytest.approx(0.95), "noisy": pytest.approx(0.91)}  # 0.95 caps; 0.93 − 0.02
-    assert j7.site_bars({"noisy": {"rate": 0.93}}, {**SETTINGS, "concordance_slack_pp": 5}) == {"noisy": pytest.approx(0.88)}
+    assert bars == {"exact": Fraction(95, 100), "close": Fraction(95, 100), "noisy": Fraction(91, 100)}  # 0.95 caps; 0.93 − 0.02
+    assert j7.site_bars({"noisy": measured["noisy"]}, {**SETTINGS, "concordance_slack_pp": 5}) == {"noisy": Fraction(88, 100)}
     # a cluster's bar: its call sites' bars weighted by its calls of each: (300 × 0.95 + 100 × 0.91) / 400 = 0.94
-    assert j7.cluster_bar({"exact": 300, "noisy": 100}, bars) == pytest.approx(0.94)
-    assert j7.cluster_bar({"noisy": 7}, bars) == pytest.approx(0.91) and j7.cluster_bar({}, bars) is None
+    assert j7.cluster_bar({"exact": 300, "noisy": 100}, bars) == Fraction(94, 100)
+    assert j7.cluster_bar({"noisy": 7}, bars) == Fraction(91, 100) and j7.cluster_bar({}, bars) is None
     with pytest.raises(JudgmentError, match="does not measure its agreement on unmeasured"):
         j7.cluster_bar({"exact": 10, "unmeasured": 5}, bars)
 
@@ -110,6 +113,21 @@ def test_an_engine_passes_at_the_teachers_bar_not_at_a_bar_the_teacher_misses():
     assert not untied["passes"] and "A_tt" in untied["why"]
     assert not j7.passes(evidence(agreement(0.90)), noninferiority, SETTINGS, 0.91)["passes"]
     assert not j7.passes(evidence(agreement(1.0)), noninferiority, SETTINGS)["passes"]  # no bar, no pass
+
+
+def test_an_engine_exactly_on_its_bar_passes():
+    """The bar is reached at equality, and the comparison is exact: a cluster of two call sites, 3 and 7
+    calls, both at 0.95, has a bar of 0.95 (in floats, 3 × 0.95 + 7 × 0.95 over 10 is not 0.95)."""
+    exact = {site: agreement(1.0)["agreement"] for site in ("a", "b")}
+    bar = j7.cluster_bar({"a": 3, "b": 7}, j7.site_bars(exact, SETTINGS))
+    assert bar == Fraction(95, 100)
+    on_it = j7.passes(evidence(agreement(0.95)), noninferiority, SETTINGS, bar)
+    assert on_it["passes"] and on_it["agreement"]["bar"] == 0.95
+    assert not j7.passes(evidence(agreement(0.949, n=1000)), noninferiority, SETTINGS, bar)["passes"]
+    # a teacher at 96% with itself: the bar is 0.96 − 0.02, and an engine at 94% is on it
+    tied = j7.cluster_bar({"a": 3, "b": 7}, j7.site_bars({site: agreement(0.96)["agreement"] for site in ("a", "b")}, SETTINGS))
+    assert tied == Fraction(94, 100) and j7.passes(evidence(agreement(0.94)), noninferiority, SETTINGS, tied)["passes"]
+    assert not j7.passes(evidence(agreement(0.939, n=1000)), noninferiority, SETTINGS, tied)["passes"]
 
 
 def test_a_mixed_cluster_must_pass_both_tests():
@@ -257,7 +275,7 @@ def test_the_bar_follows_the_teachers_self_agreement_by_call_site_and_difficulty
         mine = [c for c in calls if c["call_site"] == site and c["question_id"] in PILOT]
         agree = [unit("production_llm", c["question_id"], site, c["invocation_key"]) < 0.9 for c in mine]
         assert (measured[site]["n"], measured[site]["agree"]) == (len(mine), sum(agree))
-        assert measured[site]["bar"] == min(0.95, sum(agree) / len(mine) - 0.02)
+        assert measured[site]["bar"] == pytest.approx(min(0.95, sum(agree) / len(mine) - 0.02))
         levels = measured[site]["by_difficulty"]
         assert sorted(levels) == ["challenging", "moderate", "simple"]
         for level, found in levels.items():
@@ -271,7 +289,9 @@ def test_the_bar_follows_the_teachers_self_agreement_by_call_site_and_difficulty
         assert found["bar"] == pytest.approx(expected) and found["passes"] == (found["rate"] >= found["bar"])
     assert result["result"]["settings"]["concordance_slack_pp"] == 2 and result["result"]["pilot_ids"] == PILOT
     assert result["reads"]["teacher_self_replay"] == reference(noisy)
-    assert result["reads"]["config"] == j7.CONFIG_KEYS and "thresholds.concordance_slack_pp" in j7.CONFIG_KEYS
+    assert result["reads"]["config"] == j7.CONFIG_KEYS
+    assert {"thresholds.concordance_slack_pp", "thresholds.selection_delta_pp", "allocation.min_calls",
+            "seeds.calib_split", "stats.pilot_size"} <= set(j7.CONFIG_KEYS)  # the pilot's keys too (bench.data.pilot_ids)
 
 
 def test_the_defaults_are_the_pilot_accessor_and_the_calib_difficulties(tmp_path, monkeypatch):

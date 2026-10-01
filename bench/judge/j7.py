@@ -29,6 +29,7 @@ utilization of `cost.utilizations` (the most expensive SLM, so the SLM is prefer
 cheaper even there).
 """
 import hashlib
+from fractions import Fraction
 from typing import Any, Callable, Dict, List, Optional
 
 from bench.contracts.concordance import GOLD_CALL_SITES
@@ -38,11 +39,11 @@ from bench.judge.base import (Identity, JudgmentError, calls_of, canonical, invo
                               require_done, result_reference, write_result)
 
 JUDGMENT = "J7"
-# the keys of config.yaml this judgment reads (design §6.2: `reads` names them, for `bench verify`); the
-# pilot questions come through bench.data.pilot_ids and are recorded in the result
+# the keys of config.yaml this judgment reads (design §6.2: `reads` names them, for `bench verify`).
+# seeds.calib_split and stats.pilot_size are what bench.data.pilot_ids reads today: they follow that accessor
 CONFIG_KEYS = ["allocation.min_calls", "cost.utilizations", "data.bird_dev_questions", "prices", "seeds.bootstrap",
-               "stats.n_boot", "thresholds.concordance_min", "thresholds.concordance_slack_pp",
-               "thresholds.selection_delta_pp"]
+               "seeds.calib_split", "stats.n_boot", "stats.pilot_size", "thresholds.concordance_min",
+               "thresholds.concordance_slack_pp", "thresholds.selection_delta_pp"]
 ENGINES = ("cheap_alt", "slm")
 NonInferiority = Callable[..., Dict[str, Any]]
 
@@ -54,15 +55,15 @@ def plain(value: Any) -> Any:
     return value.item() if hasattr(value, "item") else value
 
 
-def site_bars(self_agreement: Dict[str, Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, float]:
+def site_bars(self_agreement: Dict[str, Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Fraction]:
     """Each call site's agreement bar (T4): min(concordance_min, A_tt − slack). A site whose A_tt was not
-    measured has none."""
-    slack = settings["concordance_slack_pp"] / 100
-    return {site: min(settings["concordance_min"], found["rate"] - slack)
-            for site, found in self_agreement.items() if found["rate"] is not None}
+    measured has none. Exact fractions, so an engine exactly on its bar passes whatever the rounding."""
+    floor, slack = Fraction(str(settings["concordance_min"])), Fraction(str(settings["concordance_slack_pp"])) / 100
+    return {site: min(floor, Fraction(found["agree"], found["n"]) - slack)
+            for site, found in self_agreement.items() if found["n"]}
 
 
-def cluster_bar(sites: Dict[str, int], bars: Dict[str, float]) -> Optional[float]:
+def cluster_bar(sites: Dict[str, int], bars: Dict[str, Fraction]) -> Optional[Fraction]:
     """A cluster's bar: the mean of its call sites' bars, weighted by the cluster's agreement calls of each
     (`sites`: {call site: calls}); None for a cluster with no such call."""
     missing = sorted(site for site in sites if site not in bars)
@@ -74,8 +75,9 @@ def cluster_bar(sites: Dict[str, int], bars: Dict[str, float]) -> Optional[float
 
 
 def passes(entry: Optional[Dict[str, Any]], noninferiority: NonInferiority, settings: Dict[str, Any],
-           bar: Optional[float] = None) -> Dict[str, Any]:
-    """Whether one engine passes on one cluster, and why; `bar` is the cluster's agreement bar."""
+           bar: Optional[Fraction] = None) -> Dict[str, Any]:
+    """Whether one engine passes on one cluster, and why; `bar` is the cluster's agreement bar, which the
+    engine's agreement (agree / n, exactly) must reach."""
     if entry is None:
         return {"passes": False, "why": "no calib call in this cluster"}
     verdict: Dict[str, Any] = {"passes": True, "why": []}
@@ -92,8 +94,9 @@ def passes(entry: Optional[Dict[str, Any]], noninferiority: NonInferiority, sett
     if entry["agreement"]:
         agreement = entry["agreement"]
         ok = agreement["n"] >= settings["min_calls"] and agreement["rate"] is not None and bar is not None \
-            and agreement["rate"] >= bar
-        verdict["agreement"] = {"n": agreement["n"], "rate": agreement["rate"], "bar": bar, "passes": bool(ok), "proxy": True}
+            and Fraction(agreement["agree"], agreement["n"]) >= bar
+        verdict["agreement"] = {"n": agreement["n"], "rate": agreement["rate"], "bar": None if bar is None else float(bar),
+                                "passes": bool(ok), "proxy": True}
         if not ok:
             verdict["why"].append("agreement: fewer calls than allocation.min_calls" if agreement["n"] < settings["min_calls"]
                                   else "agreement: below the bar, min(thresholds.concordance_min, A_tt − slack)")
@@ -261,7 +264,8 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
     result = {"allocation": {c: d["engine"] for c, d in decided.items()}, "clusters": decided,
               "centroids": centroids_sha, "adapters": adapters_sha, "allocation_fact": {"sha256": fact.parent.name},
               "pilot_ids": sorted(pilot_ids, key=int), "slm_cost_utilization": lowest,
-              "teacher_self_agreement": {site: {**found, "bar": site_bar.get(site)} for site, found in a_tt.items()},
+              "teacher_self_agreement": {site: {**found, "bar": float(site_bar[site]) if site in site_bar else None}
+                                         for site, found in a_tt.items()},
               "prices": {"as_of": config["prices"].get("as_of"),
                          "sha256": hashlib.sha256(canonical(config["prices"].get("table") or {})).hexdigest()}, "slm_cost_basis": "extrapolated from per-adapter load tests",
               "slm_cost_combined": j8.get("combined"), "settings": settings}
