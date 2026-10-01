@@ -635,6 +635,10 @@ def test_missing_credentials_are_pending_and_a_failure_outranks_pending(monkeypa
     assert pending["status"] == PENDING
     assert {p["engine"] for p in pending["evidence"] if p["status"] == PENDING} == \
         {f"slm:{c['name']}" for c in config["roles"]["slm_candidates"]}
+    with FakeEngine() as server:  # the SLMs not served yet, the LLMs answering: nothing failed, something to do
+        unserved = check_engines(engines_config(server.base_url, monkeypatch, slm_base_url=None))
+    assert unserved["status"] == PENDING and {p["why"] for p in unserved["evidence"] if p["status"] == PENDING} == \
+        {"no endpoint.base_url yet"}
     with FakeEngine(refuse="top_p") as server:  # Day 1: the SLMs not served yet, an LLM refusing a parameter
         config = engines_config(server.base_url, monkeypatch, slm_base_url=None, top_p=0.9)
         check = check_engines(config)
