@@ -1,6 +1,7 @@
 """J8 · load: the SLO rule, the container's all-in price, sustained throughput within the SLO, and
 the cost per request at each utilization, from AIPerf exports."""
 import hashlib
+import json
 
 import pytest
 
@@ -65,7 +66,9 @@ def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
     assert result["result"]["cost_per_request"]["50%"] == pytest.approx(0.8 / 18000)
     assert result["result"]["gpu_prices_as_of"] == "2026-09-30"
     assert set(result["reads"]["loadtests"]) == set(runs)
-    assert result["reads"]["slo_from"]["run_id"] == PILOT and result["reads"]["config"] == list(j8.CONFIG_KEYS)
+    assert result["reads"]["slo_from"]["run_id"] == PILOT
+    assert result["reads"]["config"] == ["cost.p95_slo_cap_ms", "cost.utilizations", "modal.gpu_prices", "serving.cpu",
+                                         "serving.memory_gib"]  # the configuration keys J8 read
     loadtest("loadtest-other", 4, 500, 5.0, engine="slm:granite-4.2-8b")
     with pytest.raises(JudgmentError, match="one base"):
         j8.run(runs + ["loadtest-other"], config, slo_from=PILOT)
@@ -92,8 +95,7 @@ def test_the_slo_is_the_stricter_of_the_cap_and_the_llms_own_p95(tmp_path, monke
     runs = [loadtest("loadtest-1", 1, 400, 2.0), loadtest("loadtest-8", 8, 900, 10.0)]
     # the LLM is slower than the cap: the cap binds, and the level at 900 ms is sustained
     slow = read_result(j8.run(runs, config, slo_from=pilot([2000] * 20, "pilot-slow")), "J8")["result"]
-    assert slow["slo"] == {"cap_ms": 1000, "llm_p95_ms": 2000.0, "slo_ms": 1000, "from": "pilot-slow", "first_attempts": 20,
-                           "rule": "the stricter of the cap and the production LLM's p95 latency per call (first attempts)"}
+    assert slow["slo"] == {"cap_ms": 1000, "llm_p95_ms": 2000.0, "slo_ms": 1000, "first_attempts": 20}
     assert slow["engines"]["slm:qwen3-8b"]["sustained"]["concurrency"] == 8
     # the LLM is faster than the cap: its p95 binds, and the SLM must keep up with it
     fast = read_result(j8.run(runs, config, slo_from=pilot([500] * 20, "pilot-fast")), "J8")["result"]
@@ -107,14 +109,22 @@ def test_the_slo_is_the_stricter_of_the_cap_and_the_llms_own_p95(tmp_path, monke
 
 def test_the_llms_p95_is_over_the_first_attempts_of_a_done_b0_run_on_calib(tmp_path, monkeypatch):
     _, config = repo(tmp_path, monkeypatch, settings(cap_ms=10000))
-    runs = [loadtest("loadtest-8", 8, 900, 10.0)]
+    runs = [loadtest("loadtest-4", 4, 3000, 6.0), loadtest("loadtest-8", 8, 4000, 10.0)]
+    # the SLO is the p95 of the latencies, not their largest, smallest or first: 900 + 0.55 × (5000 − 900)
+    spread = read_result(j8.run(runs, config, slo_from=pilot([700, 100, 200, 300, 400, 500, 600, 800, 900, 5000], "pilot-spread")),
+                         "J8")["result"]
+    assert spread["slo"] == {"cap_ms": 10000, "llm_p95_ms": 3155.0, "slo_ms": 3155.0, "first_attempts": 10}
+    assert spread["engines"]["slm:qwen3-8b"]["sustained"]["concurrency"] == 4  # 3000 ms is within it, 4000 ms is not
     first = call("pilot-retries", "1", "select_tables", latency_ms=1000, parsed_ok=False)
     retry = call("pilot-retries", "1", "select_tables", latency_ms=9000, attempt=2, retry_of=first["call_id"])
-    write_run("pilot-retries", {"type": "agent", "arm": "B0", "split": "calib"}, [first, retry])
+    failed = call("pilot-retries", "2", "select_tables", latency_ms=3500, response=None, parsed_ok=False)
+    write_run("pilot-retries", {"type": "agent", "arm": "B0", "split": "calib"}, [first, retry, failed])
     measured = read_result(j8.run(runs, config, slo_from="pilot-retries"), "J8")["result"]["slo"]
-    assert (measured["llm_p95_ms"], measured["first_attempts"]) == (1000.0, 1)  # the retry's 9000 ms is not a first attempt
+    # the retry's 9000 ms is not a first attempt; the first attempt that failed is one: 1000 + 0.95 × 2500
+    assert (measured["llm_p95_ms"], measured["first_attempts"]) == (3375.0, 2)
     for run_id, manifest, reason in (("pilot-b1", {"arm": "B1"}, "arm is 'B1'"), ("pilot-train", {"split": "train"}, "split is 'train'"),
-                                     ("pilot-failed", {"status": "failed"}, "not 'done'")):
+                                     ("pilot-failed", {"status": "failed"}, "not 'done'"),
+                                     ("pilot-replay", {"type": "replay"}, "type is 'replay'")):
         with pytest.raises(JudgmentError, match=reason):
             j8.run(runs, config, slo_from=pilot(run_id=run_id, **manifest))
     write_run("pilot-empty", {"type": "agent", "arm": "B0", "split": "calib"}, [])
@@ -199,3 +209,28 @@ def test_naming_a_sweep_never_drops_an_engine_with_one(tmp_path, monkeypatch):
     with pytest.raises(JudgmentError, match=r"no load test has the named sweep\(s\) \['sweep-c0-typo'\]"):
         j8.run(runs, config, sweeps=["sweep-c0-b", "sweep-c0-typo"], slo_from=PILOT)  # a typo is refused, never ignored
     assert len(result["gpu_prices_sha256"]) == 64
+
+
+def test_the_configuration_refuses_an_unusable_slo_cap_price_or_memory(tmp_path, monkeypatch):
+    from bench.contracts.config import validate_config
+    _, config = repo(tmp_path, monkeypatch)
+    assert validate_config(config) == []
+    for where, key, wrong, reason in ((("cost",), "p95_slo_cap_ms", "17s", "cost.p95_slo_cap_ms must be a number > 0"),
+                                      (("cost",), "p95_slo_cap_ms", 0, "cost.p95_slo_cap_ms must be a number > 0"),
+                                      (("cost",), "p95_slo_cap_ms", None, "cost.p95_slo_cap_ms must be a number > 0"),
+                                      (("serving",), "memory_gib", -32, "serving.memory_gib must be a number > 0"),
+                                      (("serving",), "memory_gib", True, "serving.memory_gib must be a number > 0"),
+                                      (("modal", "gpu_prices"), "cpu_usd_per_core_s", -0.1,
+                                       "modal.gpu_prices.cpu_usd_per_core_s must be a number >= 0"),
+                                      (("modal", "gpu_prices"), "memory_usd_per_gib_s", "free",
+                                       "modal.gpu_prices.memory_usd_per_gib_s must be a number >= 0")):
+        broken = json.loads(json.dumps(config))
+        node = broken
+        for part in where:
+            node = node[part]
+        node[key] = wrong
+        assert validate_config(broken) == [reason]
+    free = json.loads(json.dumps(config))
+    free["modal"]["gpu_prices"].update(cpu_usd_per_core_s=0, memory_usd_per_gib_s=0.0)  # a price may be zero
+    del free["cost"]["p95_slo_cap_ms"]  # a key that is absent is J8's to refuse, when it runs
+    assert validate_config(free) == []

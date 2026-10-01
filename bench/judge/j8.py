@@ -10,11 +10,12 @@ reads two blocks (AIPerf's JSON export schema): `request_latency` (unit `ms`, wi
 levels whose p95 request latency is within the SLO. No level within it is an error, not a number.
 Every level must have run with the prefix cache on (SPEC §6.6).
 
-**The SLO is a rule, not a number**, so it cannot be picked after a load test: the stricter of
+**The SLO is a rule, not a number chosen after a load test**: the stricter of
 `cost.p95_slo_cap_ms`, an external reference, and the production LLM's own p95 latency per call,
-over the first attempts of the pilot's B0 execution on calib (`slo_from`). The SLM must answer at
-least as fast as the API it replaces, and never slower than the reference. That p95 is the 95th
-percentile by linear interpolation between order statistics, the definition AIPerf's
+over the first attempts of the pilot's B0 execution on calib (`slo_from`, named by whoever runs
+J8). The SLM must answer at least as fast as the API it replaces, and never slower than the
+reference. Every first attempt counts, a failed one too: it is the latency the agent met. That p95
+is the 95th percentile by linear interpolation between order statistics, the definition AIPerf's
 `request_latency.p95` follows on the SLM's side. The result records the cap, the LLM's p95 and
 the SLO used (`slo`).
 
@@ -97,9 +98,7 @@ def slo(slo_from: str, cap_ms: float) -> Dict[str, Any]:
     if not first:
         raise JudgmentError(f"{slo_from} has no call: the production LLM's p95 latency cannot be measured")
     measured = p95(first)
-    return {"cap_ms": cap_ms, "llm_p95_ms": measured, "slo_ms": min(cap_ms, measured),
-            "rule": "the stricter of the cap and the production LLM's p95 latency per call (first attempts)",
-            "from": slo_from, "first_attempts": len(first)}
+    return {"cap_ms": cap_ms, "llm_p95_ms": measured, "slo_ms": min(cap_ms, measured), "first_attempts": len(first)}
 
 
 def container_price(config: Dict[str, Any], gpu: str) -> Dict[str, float]:
