@@ -3,6 +3,7 @@
 fabricated, computed with another configuration or code, or left without what it read is listed,
 and the command fails."""
 import copy
+import hashlib
 import json
 
 import pytest
@@ -89,8 +90,9 @@ def world(tmp_path, monkeypatch):
             "choice": choice, "allocation": allocation}
 
 
-def stored(root=None):
-    return sorted(str(p) for p in (paths.ROOT / "judgments").rglob("*.json"))
+def stored():
+    """Every file under judgments/, with its bytes."""
+    return {str(p): p.read_bytes() for p in sorted((paths.ROOT / "judgments").rglob("*.json"))}
 
 
 def test_an_untouched_world_verifies_clean_and_writes_nothing(world, capsys):
@@ -118,14 +120,38 @@ def test_a_result_edited_in_place_is_listed_and_the_command_fails(world, capsys)
     assert relative(path) in printed.out and "3 divergence(s)" in printed.err
 
 
-def test_a_fabricated_result_does_not_come_out_of_its_own_reads(world):
+def forge(world):
+    """A well-formed J8 result, its sha256 naming its directory, that halves the SLM's cost."""
     genuine = read_result(world["results"]["j8"], "J8")
     cheaper = {**genuine["result"], "cost_per_request": {u: c / 2 for u, c in genuine["result"]["cost_per_request"].items()}}
-    forged = write_result("J8", genuine["reads"], cheaper)  # a well-formed result: its sha256 names its directory
+    return write_result("J8", genuine["reads"], cheaper)
+
+
+def test_a_fabricated_result_does_not_come_out_of_its_own_reads(world):
+    forged = forge(world)
     verified, divergences = verify.verify(world["config"], {**world["plan"], "j8": relative(forged)})
-    assert divergences == [f"{relative(forged)}: recomputed as {relative(world['results']['j8'])} "
-                           f"(read {', '.join(j8.CONFIG_KEYS)} of the configuration)"]
+    assert divergences == [f"{relative(forged)}: recomputes to {relative(world['results']['j8'])}, not to the stored bytes "
+                           "(read cost.p95_slo_cap_ms, cost.utilizations, modal.gpu_prices, serving.cpu, serving.memory_gib "
+                           "of the configuration)"]
     assert relative(world["results"]["j8"]) in verified  # the genuine one, which the J3 cost and J7 built on
+
+
+def test_a_forgery_planted_at_the_true_address_too_still_fails(world):
+    """The recomputation is compared by the sha256 of the bytes just computed, never by reading the
+    file at that address: the same forged bytes placed there change nothing."""
+    forged = forge(world)
+    world["results"]["j8"].write_bytes(forged.read_bytes())
+    _, divergences = verify.verify(world["config"], {"j8": relative(forged)})
+    assert len(divergences) == 1 and divergences[0].startswith(f"{relative(forged)}: recomputes to {relative(world['results']['j8'])}")
+
+
+def test_a_result_of_another_judgment_in_the_slot_is_listed(world):
+    j2_result = world["results"]["format"]
+    misplaced = paths.ROOT / "judgments" / "J8" / j2_result.parent.name / "result.json"
+    misplaced.parent.mkdir(parents=True)
+    misplaced.write_bytes(j2_result.read_bytes())  # a genuine J2 result, named where the plan expects J8
+    _, divergences = verify.verify(world["config"], {"j8": relative(misplaced)})
+    assert len(divergences) == 1 and divergences[0].startswith(f"{relative(misplaced)}: recomputes to {relative(j2_result)}")
 
 
 def test_a_result_of_another_configuration_or_code_is_listed(world, monkeypatch):
@@ -133,9 +159,9 @@ def test_a_result_of_another_configuration_or_code_is_listed(world, monkeypatch)
     other["serving"]["memory_gib"] = 64  # a key J8 read: the container costs more
     before = stored()
     verified, divergences = verify.verify(other, world["plan"])
-    assert len(divergences) == 1 and divergences[0].startswith(f"{relative(world['results']['j8'])}: recomputed as judgments/J8/")
+    assert len(divergences) == 1 and divergences[0].startswith(f"{relative(world['results']['j8'])}: recomputes to judgments/J8/")
     assert "serving.memory_gib" in divergences[0]
-    assert len(stored()) == len(before) + 1  # the recomputed result, written beside the stored one to compare
+    assert stored() == before  # judgments/ is left as it was: what the divergent recomputation wrote is removed
     assert len(verified) == 5  # the others read the stored J8, which is still the bytes they were built on
     monkeypatch.setattr(j2, "truncation", lambda calls: {})  # the code changed since the result was stored
     _, divergences = verify.verify(world["config"], world["plan"])
@@ -152,10 +178,43 @@ def test_the_judgments_behind_the_arms_facts_are_verified(world):
     orphan = facts.write_fact("J6", "choice", {"slm": "granite-4.2-8b"})  # a fact no stored judgment decided
     config["arms"]["B3"]["choice"] = relative(orphan)
     _, divergences = verify.verify(config, only_j8)
-    assert divergences == [f"arms.B3.choice ({relative(orphan)}): no stored J6 result wrote this fact"]
+    assert divergences == [f"arms.B3.choice ({relative(orphan)}): no stored J6 result that wrote this fact verifies"]
     orphan.write_text(json.dumps({"slm": "qwen3-8b"}))  # a fact edited in place
     _, divergences = verify.verify(config, only_j8)
     assert len(divergences) == 1 and "content sha256" in divergences[0] and divergences[0].startswith("arms.B3.choice")
+
+
+def test_a_fact_stands_on_one_result_that_verifies_and_falls_with_none(world):
+    config = copy.deepcopy(world["config"])
+    config["arms"]["B3"] = {"choice": relative(world["choice"])}
+    only_j8 = {"split": "calib", "j8": world["plan"]["j8"]}
+    # an older J6, run before `selection.tie_tolerance` was settled: it chose the same SLM, so it wrote the same fact
+    earlier = copy.deepcopy(config)
+    earlier["selection"]["tie_tolerance"] = 0.01
+    zeroshots = {f"zeroshot-{name}": f"eval-zeroshot-{name}" for name in ("qwen3-8b", "granite-4.2-8b")}
+    stale, fact = j6.run(zeroshots, "eval-t", earlier)
+    assert fact == world["choice"] and stale != world["results"]["j6"]
+    before = stored()
+    verified, divergences = verify.verify(config, only_j8)
+    assert divergences == []  # nothing reads the stale result: it does not count against the fact
+    assert relative(world["results"]["j6"]) in verified and relative(stale) not in verified
+    # verifying under the earlier settings, then under today's again, leaves no trace that fails the fact
+    verified, divergences = verify.verify(earlier, only_j8)
+    assert divergences == [] and relative(stale) in verified and relative(world["results"]["j6"]) not in verified
+    assert verify.verify(config, only_j8)[1] == [] and stored() == before
+    # under settings no stored J6 was computed with, the fact has nothing behind it
+    neither = copy.deepcopy(config)
+    neither["selection"]["tie_tolerance"] = 0.02
+    _, divergences = verify.verify(neither, only_j8)
+    assert len(divergences) == 1 and divergences[0].startswith(
+        f"arms.B3.choice ({relative(world['choice'])}): no stored J6 result that wrote this fact verifies (judgments/J6/")
+    assert relative(stale) in divergences[0] and relative(world["results"]["j6"]) in divergences[0]
+    assert stored() == before
+    # a writer verifies only with what it built on: J7 stands on J6 and J8
+    config["arms"]["B5"]["allocation"] = relative(world["allocation"])
+    world["results"]["j8"].write_bytes(forge(world).read_bytes())
+    _, divergences = verify.verify(config, {"split": "calib"})
+    assert len(divergences) == 1 and divergences[0].startswith("arms.B5.allocation") and relative(world["results"]["j8"]) in divergences[0]
 
 
 def test_a_result_that_does_not_say_what_it_read_cannot_be_verified(world, capsys):
@@ -168,8 +227,25 @@ def test_a_result_that_does_not_say_what_it_read_cannot_be_verified(world, capsy
     gone = write_result("J2", {"run": {"run_id": "nowhere", "manifest_sha256": "0" * 64}, "config": []}, {"mode": "run"})
     _, divergences = verify.verify(world["config"], {"format": {"B0": relative(gone)}})
     assert divergences == [f"{relative(gone)}: cannot be recomputed: no execution nowhere (runs/nowhere/manifest.json is missing)"]
-    assert cli.main(["verify", "--plan", "no-plan.yaml", "--config", str(world["config_path"])]) == 2
-    assert "bench verify: " in capsys.readouterr().err
+    no_reads = paths.ROOT / "judgments" / "J8" / ("1" * 64) / "result.json"
+    no_reads.parent.mkdir(parents=True)
+    no_reads.write_text(json.dumps({"judgment": "J8", "result": {}}))
+    real = no_reads.parent.with_name(hashlib.sha256(no_reads.read_bytes()).hexdigest())
+    no_reads.parent.rename(real)
+    _, divergences = verify.verify(world["config"], {"j8": relative(real / "result.json")})
+    assert len(divergences) == 1 and "its reads do not name what J8 needs" in divergences[0]
+    # an execution a result read is gone: listed, and the rest is still checked
+    (paths.RUNS / "lt-8" / j8.EXPORT).unlink()
+    verified, divergences = verify.verify(world["config"], {"j8": world["plan"]["j8"], "j6": world["plan"]["j6"]})
+    assert len(divergences) == 1 and "cannot be recomputed" in divergences[0] and verified == [world["plan"]["j6"]]
+    for plan_text, reason in (("", "is not a report plan"), (None, "No such file")):
+        plan_path = paths.ROOT / "other-plan.yaml"
+        if plan_text is not None:
+            plan_path.write_text(plan_text)
+        else:
+            plan_path.unlink()
+        assert cli.main(["verify", "--plan", str(plan_path), "--config", str(world["config_path"])]) == 2
+        assert reason in capsys.readouterr().err
 
 
 def test_j5_is_recomputed_from_the_executions_it_clustered(tmp_path, monkeypatch):
