@@ -73,6 +73,23 @@ def test_call_sites_filter_what_is_resent(monkeypatch, repo, source):
     assert manifest["call_sites"] == ["generate_candidate", "revise"] and manifest["status"] == "done"
 
 
+def test_ids_keep_only_those_questions_of_the_source(monkeypatch, repo, source):
+    """`--ids`: a replay of a subset of the source's questions (the pilot, inside a calibration run),
+    every invocation of each kept question resent, none of the others."""
+    teacher = read_calls(paths.RUNS / source / "calls.jsonl")
+    _, manifest, calls = replayed(monkeypatch, repo, source, engine="slm:qwen3-8b", ids=["2"])
+    assert {identity(c) for c in calls} == {identity(c) for c in teacher if c["attempt"] == 1 and c["question_id"] == "2"}
+    assert (manifest["question_ids"], manifest["status"], manifest["n_questions_replayed"]) == (["2"], "done", 1)
+    assert manifest["n_invocations"] == len(calls) < len({identity(c) for c in teacher})
+    both, _, _ = replayed(monkeypatch, repo, source, engine="slm:qwen3-8b", ids=["2"], call_sites=["revise"])
+    assert {(c["question_id"], c["call_site"]) for c in read_calls(both / "calls.jsonl")} == {("2", "revise")}
+    from bench.data import DataError
+    with pytest.raises(DataError, match="ids not among the questions of .*: \\['3'\\]"):  # in the split, not in the source
+        replay(str(repo), source, engine="slm:qwen3-8b", ids=["2", "3"])
+    with pytest.raises(DataError, match="more than once"):
+        replay(str(repo), source, engine="slm:qwen3-8b", ids=["2", "2"])
+
+
 def test_the_same_retry_policy_applies(monkeypatch, repo, source):
     class Flaky(Revising):
         def __init__(self):
