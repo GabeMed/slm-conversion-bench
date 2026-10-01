@@ -90,6 +90,14 @@ def test_hash_must_be_the_manifests(repo):
     assert "is not the sha256" in prereg_published(CONFIG, repo)
 
 
+def test_a_hash_that_is_not_text_is_a_refusal_not_a_crash(repo):
+    register(repo)
+    (repo / "prereg" / "HASH").write_bytes(b"\xff\xfe\n")
+    git(repo, "commit", "-q", "-am", "a HASH that is not UTF-8")
+    git(repo, "push", "-q", "origin", "main")
+    assert "is not the sha256" in prereg_published(CONFIG, repo)
+
+
 def test_local_changes_and_a_newer_remote_are_refused(repo, tmp_path):
     register(repo)
     (repo / "prereg" / "HASH").write_text("edited\n")

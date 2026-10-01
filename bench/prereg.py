@@ -160,16 +160,19 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
                 "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib),
                 "analysis_code": analysis_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
-    if manifest_path.exists():
-        existing = barrier.read_registered(root)
-        if existing is None and not replace:
-            raise PreregError(f"{barrier.PREREG_MANIFEST} is not a JSON object: pass --replace to register anew")
-        if existing is not None and \
-                {k: v for k, v in existing.items() if k != "commit"} == {k: v for k, v in manifest.items() if k != "commit"}:
-            return {"hash": hash_path.read_text().strip(), "commit": _git(root, "rev-parse", "HEAD"), "new": False,
-                    "unset": unset(config)}
-        if not replace:
-            raise PreregError(f"a different pre-registration is in force ({hash_path.read_text(errors='replace').strip()}); "
+    if manifest_path.exists() or hash_path.exists():
+        existing = barrier.read_registered(root)  # both halves, as the barrier reads them
+        intact = existing is not None and hash_path.is_file() and \
+            hash_path.read_bytes().strip() == _sha256(manifest_path).encode()
+        if not intact:
+            if not replace:
+                raise PreregError(f"the registration in prereg/ is broken ({barrier.PREREG_MANIFEST} is not a JSON object, "
+                                  f"or {barrier.PREREG_HASH} is not its sha256): pass --replace to register anew")
+        elif {k: v for k, v in existing.items() if k != "commit"} == {k: v for k, v in manifest.items() if k != "commit"}:
+            return {"hash": hash_path.read_bytes().strip().decode(), "commit": _git(root, "rev-parse", "HEAD"),
+                    "new": False, "unset": unset(config)}
+        elif not replace:
+            raise PreregError(f"a different pre-registration is in force ({hash_path.read_bytes().strip().decode()}); "
                               f"pass --replace to register anew (test runs made under it can no longer be scored)")
     raw = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
     digest = hashlib.sha256(raw).hexdigest()

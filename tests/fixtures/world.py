@@ -77,11 +77,12 @@ def gold_correct(run_id_seed: str, quality: float) -> Callable[[dict], bool]:
     return lambda c: unit("gold", run_id_seed, c["question_id"], c["call_site"], c["invocation_key"]) < quality
 
 
-def per_call_eval(eval_run_id: str, source_run_id: str, calls: List[dict], correct: Callable[[dict], bool]) -> str:
+def per_call_eval(eval_run_id: str, source_run_id: str, calls: List[dict], correct: Callable[[dict], bool],
+                  prereg_hash: Optional[str] = None) -> str:
     rows = [{"question_id": c["question_id"], "call_site": c["call_site"], "invocation_key": c["invocation_key"],
              "correct": bool(c["parsed_ok"] and correct(c))}
             for c in calls if c["call_site"] in GOLD_SITES and c["parsed_ok"]]
     write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "per_call": True, "status": None,
-                            "finished_at": "2026-09-30T12:00:00+00:00"},
+                            "finished_at": "2026-09-30T12:00:00+00:00", "prereg_hash": prereg_hash},
               files={"results.jsonl": rows})
     return eval_run_id

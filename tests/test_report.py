@@ -378,6 +378,10 @@ QUALITY = {"B0": 1.0, "B1": 0.7, "B2-production": 0.6, "B2-cheap": 0.5, "B3": 0.
 CODE = Path(__file__).resolve().parent.parent  # this repository, whatever bench.paths points at
 
 
+def publish(root):
+    subprocess.run(["git", "-C", str(root), "push", "-q", "origin", "HEAD:main"], check=True, capture_output=True)
+
+
 def register_analysis_code(root, config):
     """A pre-registration of `config` as `bench prereg` writes it: SPEC.md, the configuration, the splits,
     the data manifest and a copy of the analysis code this repository tracks, committed in `root` and
@@ -441,6 +445,10 @@ def pipeline(tmp_path, monkeypatch):
         {"candidate": "qwen3-8b", "capabilities": "pass", "benchmarks": "pass", "license": "pass", "footprint": "pass", "result": "zero-shot"},
         {"candidate": "granite-4.2-8b", "capabilities": "pass", "benchmarks": "pass", "license": "pass", "footprint": "pass", "result": "zero-shot"}]
     config_path.write_text(yaml.safe_dump(config))
+    # registered (and published) once the configuration is final, before anything touches the test
+    for args in (("init", "-q"), ("config", "user.email", "t@example.org"), ("config", "user.name", "t")):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    prereg_hash = register_analysis_code(tmp_path, config)
     monkeypatch.setattr(clusters, "embed", fake_embed)
 
     def run(run_id, manifest, calls):
@@ -528,7 +536,8 @@ def pipeline(tmp_path, monkeypatch):
                  "gold_date_substituted": False, "gold_has_limit": False, "gold_error": None} for q in ids]
         write_run(eval_run_id, {"type": "eval", "source_run_id": source_run_id, "arm": arm.split("-")[0], "engine": engine,
                                 "split": split, "n": len(rows), "status": None, "fixed_date": "2026-09-30",
-                                "timeout_s": 60, "sqlite_version": "3.45.0", "prereg_hash": "d" * 64,
+                                "timeout_s": 60, "sqlite_version": "3.45.0",
+                                "prereg_hash": prereg_hash if split == "test" else None,
                                 "finished_at": "2026-09-30T12:00:00+00:00" if split == "calib" else "2026-10-02T12:00:00+00:00"},
                   files={"results.jsonl": rows})
     for arm, calls in arms_calls.items():
@@ -548,8 +557,9 @@ def pipeline(tmp_path, monkeypatch):
     # the per-call-site evaluation on the test inputs: B0's invocations replayed as B4
     b4_replay = replay(b0, "replay-B4-test", "slm:qwen3-8b+lora:c", 0.97, cluster_of=assigned)
     run("replay-B4-test", {"type": "replay", "source_run_id": "agent-B0-test", "arm": "B4", "split": "test"}, b4_replay)
-    per_call_eval("eval-B0-test-per-call", "agent-B0-test", b0, gold_correct("teacher-test", 0.9))
-    per_call_eval("eval-B4-test-per-call", "replay-B4-test", b4_replay, gold_correct("teacher-test", 0.9))
+    per_call_eval("eval-B0-test-per-call", "agent-B0-test", b0, gold_correct("teacher-test", 0.9), prereg_hash=prereg_hash)
+    per_call_eval("eval-B4-test-per-call", "replay-B4-test", b4_replay, gold_correct("teacher-test", 0.9),
+                  prereg_hash=prereg_hash)
     reads, result = j2.judge_replay("replay-B4-test", "eval-B4-test-per-call", "eval-B0-test-per-call")
     plan.update(per_call=relative(write_result("J2", reads, result)), j5=relative(j5_path), j6=relative(j6_path),
                 j7=relative(j7_path), j8=relative(j8_path),
@@ -557,9 +567,6 @@ def pipeline(tmp_path, monkeypatch):
     plan_path = tmp_path / "plan.yaml"
     plan_path.write_text(yaml.safe_dump(plan))
     # the test registry, as F1 commits it, under a pre-registration of the analysis code this repository holds
-    for args in (("init", "-q"), ("config", "user.email", "t@example.org"), ("config", "user.name", "t")):
-        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
-    prereg_hash = register_analysis_code(tmp_path, config)
     (tmp_path / "registry" / "test").mkdir(parents=True)
     recorded = {"B3": {"choice": choice.parent.name},
                 "B4": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name},
@@ -579,6 +586,7 @@ def pipeline(tmp_path, monkeypatch):
         {**replay_identity, "status": "done", "facts": recorded["B4"]}))
     subprocess.run(["git", "-C", str(tmp_path), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "registry"], check=True, capture_output=True)
+    publish(tmp_path)
     return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path,
             "j6": j6_path, "root": tmp_path, "prereg_hash": prereg_hash}
 
@@ -601,6 +609,52 @@ def test_a_test_report_is_read_only_under_the_registration_in_force(pipeline):
         subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
     with pytest.raises(JudgmentError, match="HASH is not the sha256 of prereg/manifest.json"):
         run(pipeline["config"])
+
+
+def test_a_test_report_reads_the_registry_as_published(pipeline):
+    """A registry record that only this clone holds is no record: it counts once pushed."""
+    root = pipeline["root"]
+    registered = json.loads((root / "registry" / "test" / "agent-B4-test.manifest.json").read_text())
+    identity = {k: registered[k] for k in ("type", "arm", "engine", "commit", "prereg_hash")}
+    (root / "registry" / "test" / "agent-B4-again.intent.json").write_text(json.dumps(
+        {**identity, "run_id": "agent-B4-again", "split": "test", "started_at": "2026-10-01T11:00:00+00:00"}))
+    (root / "registry" / "test" / "agent-B4-again.manifest.json").write_text(json.dumps({**identity, "status": "failed"}))
+    for args in (("add", "registry"), ("commit", "-q", "-m", "a record not pushed yet")):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    run = lambda: json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary,  # noqa: E731
+                                         noninferiority, pilot_ids=PILOT) / "report.json").read_text())
+    assert run()["tests"]["B0|B4"]["several_runs"] is None
+    publish(root)
+    assert run()["tests"]["B0|B4"]["several_runs"] == ["agent-B4-again", "agent-B4-test"]
+
+
+def test_a_test_report_reads_no_evaluation_scored_under_another_registration(pipeline):
+    for eval_dir in [d for d in paths.RUNS.glob("eval-*") if (d / "manifest.json").exists()]:
+        found = json.loads((eval_dir / "manifest.json").read_text())
+        if found.get("prereg_hash"):  # every test evaluation, all under one other registration (J1 sees no mix)
+            (eval_dir / "manifest.json").write_text(json.dumps({**found, "prereg_hash": "0" * 64}))
+    with pytest.raises(JudgmentError, match="was scored under pre-registration 0000"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+
+
+def test_a_test_report_reads_costs_priced_as_the_configuration_says(pipeline):
+    from bench.judge import j3, j8
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    other = json.loads(json.dumps(pipeline["config"]))
+    other["prices"]["as_of"] = "2026-10-15"  # every arm repriced alike: consistent among themselves, not registered
+    changed = json.loads(json.dumps(plan))
+    for arm, spec in changed["arms"].items():
+        slm = arm in ("B3", "B4", "B5")
+        spec["cost"] = relative(j3.run(f"agent-{arm}-test", spec["eval"], str(paths.ROOT / plan["j8"]) if slm else None, other))
+    pipeline["plan"].write_text(yaml.safe_dump(changed))
+    with pytest.raises(JudgmentError, match="another price table than the configuration's"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+    gpu = json.loads(json.dumps(pipeline["config"]))
+    gpu["modal"]["gpu_prices"]["usd_per_s"]["L4"] = 1.6 / 3600
+    loadtests = sorted(read_result(plan["j8"], "J8")["reads"]["loadtests"])
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "j8": relative(j8.run(loadtests, gpu))}))
+    with pytest.raises(JudgmentError, match="priced the GPUs with another table"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
 
 def test_a_test_report_is_read_only_with_the_registered_analysis_code(pipeline):
@@ -741,6 +795,7 @@ def test_a_replay_of_some_call_sites_decides_neither_appendix_b_nor_k4(pipeline)
     write_run("replay-gold", {**manifest, "run_id": "replay-gold", "call_sites": ["generate_candidate", "revise"]}, calls)
     evaluated = [r for r in read_jsonl(paths.RUNS / "eval-B4-test-per-call" / "results.jsonl")]
     write_run("eval-gold", {"type": "eval", "source_run_id": "replay-gold", "per_call": True, "status": None,
+                            "prereg_hash": pipeline["prereg_hash"],
                             "finished_at": "2026-10-02T12:00:00+00:00"}, files={"results.jsonl": evaluated})
     registered = json.loads((root / "registry" / "test" / "replay-B4-test.manifest.json").read_text())
     identity = {k: registered[k] for k in ("type", "arm", "engine", "commit", "prereg_hash")}
@@ -752,6 +807,7 @@ def test_a_replay_of_some_call_sites_decides_neither_appendix_b_nor_k4(pipeline)
         {**identity, "status": "done", "facts": registered["facts"]}))
     subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "a gold-only replay"], check=True, capture_output=True)
+    publish(root)
     plan = yaml.safe_load(pipeline["plan"].read_text())
     plan["per_call"] = relative(write_result("J2", *j2.judge_replay("replay-gold", "eval-gold", "eval-B0-test-per-call")))
     pipeline["plan"].write_text(yaml.safe_dump(plan))
@@ -773,6 +829,7 @@ def test_several_registered_replays_leave_k4_and_appendix_b_without_a_verdict(pi
     (root / "registry" / "test" / "replay-B4-again.manifest.json").write_text(json.dumps({**identity, "status": "failed"}))
     for args in (("add", "registry"), ("commit", "-q", "-m", "the replay again")):
         subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    publish(root)
     data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
                                   pilot_ids=PILOT) / "report.json").read_text())
     several = "no verdict (several test runs of one configuration: replay-B4-again, replay-B4-test)"
@@ -790,6 +847,7 @@ def test_several_registered_runs_of_an_arm_leave_its_comparisons_without_a_verdi
     (root / "registry" / "test" / "agent-B4-again.manifest.json").write_text(json.dumps({**identity, "status": "failed"}))
     subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "B4 again"], check=True, capture_output=True)
+    publish(root)
     data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
                                   pilot_ids=PILOT) / "report.json").read_text())
     several = "agent-B4-again, agent-B4-test"
@@ -839,6 +897,7 @@ def register(root, run_id, identity, status="done", facts=None, started="2026-10
         {**identity, "status": status, "facts": facts or {}}))
     subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", run_id], check=True, capture_output=True)
+    publish(root)
 
 
 def test_several_runs_of_the_replay_or_of_b0_reach_k4_and_appendix_b(pipeline):
@@ -878,6 +937,7 @@ def test_a_replay_of_the_routine_only_decides_neither_appendix_b_nor_k4(pipeline
     manifest = json.loads((paths.RUNS / "replay-B4-test" / "manifest.json").read_text())
     write_run("replay-routine", {**manifest, "run_id": "replay-routine", "call_sites": routine}, calls)
     write_run("eval-routine", {"type": "eval", "source_run_id": "replay-routine", "per_call": True, "status": None,
+                               "prereg_hash": pipeline["prereg_hash"],
                                "finished_at": "2026-10-02T12:00:00+00:00"}, files={"results.jsonl": []})
     registered = json.loads((root / "registry" / "test" / "replay-B4-test.manifest.json").read_text())
     for name in ("replay-B4-test.intent.json", "replay-B4-test.manifest.json"):  # the routine-only replay is the only one

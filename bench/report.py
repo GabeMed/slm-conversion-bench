@@ -73,7 +73,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from bench import paths
+from bench import barrier, paths
 from bench.contracts.concordance import GOLD_CALL_SITES as GOLD_SITES
 from bench.contracts.facts import read_fact
 from bench.contracts.router import ARM_FACTS
@@ -264,11 +264,17 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
            noninferiority: Callable, pilot_ids: List[str]) -> Dict[str, Any]:
     """Every number of the report, each from a judgment."""
     split = plan["split"]
-    registry, in_force = test_registry(), None
-    if split == "test":  # before anything is read: the registry, then the registration in force
+    registry, in_force = None, None
+    if split == "test":  # before anything is read: the registry as published, then the registration in force
+        remote, why_not = barrier.fetch_origin_main(paths.ROOT)
+        if remote is None:
+            raise JudgmentError(f"a test report needs the published test registry: {why_not}")
+        registry = test_registry(ref=remote)  # a record only a local clone holds is no record
         if not registry["available"]:
             raise JudgmentError(f"a test report needs the test registry, which git could not give: {registry['reason']}")
         in_force = registration_in_force(split, config)
+    else:
+        registry = test_registry()
     specs = plan.get("arms") or {}
     rows = per_arm({arm: spec["eval"] for arm, spec in specs.items()}, split, ex_table)
     pilot_plan = plan.get("pilot") or {}
@@ -282,6 +288,10 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         reads[key] = found["reads"] if found else None
         if found:
             sources[key] = result_reference(plan[key])
+    if judged["j8"]:  # the configuration's GPU prices (for a test report, the registered ones)
+        gpu = hashlib.sha256(canonical((config.get("modal") or {}).get("gpu_prices") or {})).hexdigest()
+        if judged["j8"].get("gpu_prices_sha256") != gpu:
+            raise JudgmentError("the plan's J8 priced the GPUs with another table than the configuration's modal.gpu_prices")
 
     arms, correct = {}, {}
     for arm, spec in specs.items():
@@ -309,6 +319,10 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     tables = {(a["prices_as_of"], a["prices_sha256"]) for a in arms.values()}
     if len(tables) > 1:
         raise JudgmentError(f"the arms were priced with different price tables {sorted(map(str, tables))}")
+    prices = config["prices"]  # the configuration's (for a test report, the registered one)
+    configured = (prices.get("as_of"), hashlib.sha256(canonical(prices.get("table") or {})).hexdigest())
+    if tables and tables != {configured}:
+        raise JudgmentError(f"the arms were priced with another price table than the configuration's {configured}")
 
     per_call = judged["per_call"]
     if per_call and (per_call.get("mode"), per_call.get("arm"), per_call.get("split")) != ("replay", "B4", split):
@@ -321,6 +335,16 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             raise JudgmentError("the plan's J7 ordered engines by another price table than the arms were priced with")
     replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged),
                                         in_force)
+    if split == "test":  # every evaluation read was scored under the registration in force (eval records it)
+        evals = {f"{arm}'s": spec["eval"] for arm, spec in specs.items()}
+        for who in ("replay_eval", "teacher_eval"):
+            if (reads.get("per_call") or {}).get(who):
+                evals[f"the per-call {who.replace('_', ' ')}'s"] = reads["per_call"][who]["run_id"]
+        for label, eval_run_id in evals.items():
+            recorded = manifest(eval_run_id).get("prereg_hash")
+            if recorded != in_force:
+                raise JudgmentError(f"{label} evaluation {eval_run_id} was scored under pre-registration {recorded}, "
+                                    f"not the one in force ({in_force})")
     if per_call and "call_sites" not in per_call:
         raise JudgmentError("the per-call J2 result does not record which call sites the replay covered")
     coverage = None if not per_call else per_call["call_sites"]
@@ -671,15 +695,16 @@ def _test_line(data, key) -> str:
 
 # ---------------------------------------------------------------- the test registry
 
-def test_registry(root: Optional[Path] = None) -> Dict[str, Any]:
-    """Test-split executions as F1 commits them (`registry/test/`), read at HEAD: each run's intent
-    (when it started) merged with its manifest (how it ended, the facts it used); an intent without
-    a manifest is an interrupted execution."""
+def test_registry(root: Optional[Path] = None, ref: str = "HEAD") -> Dict[str, Any]:
+    """Test-split executions as F1 commits them (`registry/test/`), read at `ref` (for a test report,
+    the commit origin's main is at, as a fetch just found it): each run's intent (when it started)
+    merged with its manifest (how it ended, the facts it used); an intent without a manifest is an
+    interrupted execution."""
     root = root or paths.ROOT
 
     def git(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
-    listed = git("ls-tree", "-r", "--name-only", "HEAD", REGISTRY_DIR)
+    listed = git("ls-tree", "-r", "--name-only", ref, REGISTRY_DIR)
     if listed.returncode != 0:
         return {"available": False, "reason": scrub(listed.stderr.strip() or "git failed")[:200], "runs": []}
     files = {Path(line).name for line in listed.stdout.splitlines()}
@@ -688,9 +713,9 @@ def test_registry(root: Optional[Path] = None) -> Dict[str, Any]:
     def shown(name: str) -> Optional[Dict[str, Any]]:
         if name not in files:
             return None
-        out = git("show", f"HEAD:{REGISTRY_DIR}/{name}")
+        out = git("show", f"{ref}:{REGISTRY_DIR}/{name}")
         if out.returncode != 0:
-            raise JudgmentError(f"cannot read {REGISTRY_DIR}/{name} at HEAD")
+            raise JudgmentError(f"cannot read {REGISTRY_DIR}/{name} at {ref}")
         return json.loads(out.stdout)
     runs = []
     for run_id in run_ids:
