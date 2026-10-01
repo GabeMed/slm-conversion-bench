@@ -660,6 +660,6 @@ def test_the_preflight_report_never_carries_a_credential(tmp_path, monkeypatch):
     echoed = preflight._check("lora_parity", "P-4", FAIL, {"error": "PreflightError: HTTP 401 b'bad key embeddings-key-0001'"},
                               "serve it")  # served_generate's error body, as check_lora_parity records it
     monkeypatch.setattr(preflight, "run_checks", lambda config, parity_cluster=None, on="modal": [echoed])
-    preflight.preflight(str(config_path))
+    preflight.preflight(str(config_path), on="local")  # not "modal", which exports BENCH_CONFIG for good
     report = next(paths.RUNS.glob("preflight-*/report.json")).read_text()
     assert "embeddings-key-0001" not in report and "<redacted>" in report
