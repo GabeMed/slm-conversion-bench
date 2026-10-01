@@ -13,24 +13,23 @@ from bench import paths, report
 from bench.contracts import clusters, facts
 from bench.judge.base import JudgmentError, read_jsonl, read_result, relative, write_result
 from bench.judge.j1 import ex_summary, ex_table
-from bench.judge.j4 import margin, noninferiority
+from bench.judge.j4 import noninferiority
 from fixtures.world import unit
 
 VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute",
               "no verdict")
 
 
-def j4(ok=True, testable=True, diff=-0.01, pilot=0.1, ci_low=None, ci_high=None, margin_from=None):
-    """A J4 result as F2's J4 returns it (with the upper bound F2 is adding)."""
-    margin_from = margin_from or ("pilot" if pilot is not None else "pairs")
-    return {"d": 0.1, "d_pilot": pilot, "margin_from": margin_from, "delta": 0.04,
-            "diff": diff, "ci_low": ci_low if ci_low is not None else (0.0 if ok else -0.09),
-            "ci_high": ci_high if ci_high is not None else diff + 0.05,
-            "noninferior": (ok if testable else None) if margin_from != "pairs" else None, "power": 0.8, "testable": testable}
+def j4(ok=True, diff=-0.01, pilot=0.1, ci_low=None, ci_high=None):
+    """A J4 result as the report holds it: J4's test at the fixed margin, with the pilot's d and the
+    planned power beside it (None without a pilot)."""
+    return {"n": 498, "d": 0.1, "delta": 0.05, "diff": diff, "ci_low": ci_low if ci_low is not None else (0.0 if ok else -0.09),
+            "ci_high": ci_high if ci_high is not None else diff + 0.05, "noninferior": ok, "power": 0.97,
+            "d_pilot": pilot, "planned_power": 0.8 if pilot is not None else None}
 
 
-def j4_results(ok4=True, ok5=True, testable=True, diff=-0.01, pilot=0.1):
-    return {"B0|B4": j4(ok4, testable, diff, pilot), "B0|B5": j4(ok5, testable, diff, pilot)}
+def j4_results(ok4=True, ok5=True, diff=-0.01, pilot=0.1):
+    return {"B0|B4": j4(ok4, diff, pilot), "B0|B5": j4(ok5, diff, pilot)}
 
 
 def data_with(tests, costs, formats=None, repair=None, per_call=None):
@@ -45,23 +44,44 @@ def row(rows, prefix):
 
 def test_the_outcome_of_a_comparison():
     assert report.outcome(None) == "no data"
-    assert report.outcome(j4(pilot=None)) == "no pilot"
-    assert report.outcome(j4(testable=False)) == "not testable"
     assert report.outcome(j4(True)) == "non-inferior"
     assert report.outcome(j4(False, diff=-0.2)) == "worse"
     assert report.outcome(j4(False, diff=-0.02)) == "inconclusive"
+    assert report.outcome(j4(True, pilot=None)) == "non-inferior"  # the margin is fixed: no pilot, still a verdict
+    assert report.outcome({**j4(True), "several_runs": ["a", "b"]}) == "several runs"
+
+
+def test_the_verdict_on_each_side_of_minus_5_pp():
+    """Against the fixed Δ = 5 p.p. (T3): non-inferior with the lower bound above −Δ, worse with the upper
+    bound below it, inconclusive in between. No comparison is 'not testable'."""
+    assert report.outcome(j4(True, ci_low=-0.0499)) == "non-inferior"
+    assert report.outcome(j4(False, diff=-0.06, ci_low=-0.09, ci_high=-0.0501)) == "worse"
+    assert report.outcome(j4(False, diff=-0.06, ci_low=-0.09, ci_high=-0.0499)) == "inconclusive"  # the point is below −Δ, not the bound
+    assert report.outcome(j4(False, ci_low=-0.0501, ci_high=0.01)) == "inconclusive"
+
+
+def test_planned_power_is_j4s_at_the_pilots_d_and_the_tests_n():
+    """The pilot's d gives the planned power and nothing else: by hand, at d = 0.20, n = 498, Δ = 0.05,
+    Φ(0.05 / sqrt(0.20 / 498) − 1.6448536) = Φ(2.494995 − 1.6448536) = Φ(0.850141) = 0.8024."""
+    test = {"n": 498, "delta": 0.05, "noninferior": False, "ci_high": 0.0}
+    with_pilot = report.planned(test, 0.20)
+    assert with_pilot["d_pilot"] == 0.20 and with_pilot["planned_power"] == pytest.approx(0.8024, abs=1e-4)
+    assert with_pilot["delta"] == 0.05 and report.outcome(with_pilot) == "inconclusive"  # the margin did not move
+    assert report.planned(test, None)["planned_power"] is None
 
 
 def test_v1_confirms_refutes_and_says_why_not():
     costs = {"B0": {"": 1.0}}
     assert row(report.claims_map(data_with(j4_results(), costs)), "V1")["verdict"] == "confirms"
     assert row(report.claims_map(data_with(j4_results(False, False, diff=-0.2), costs)), "V1")["verdict"] == "refutes"
-    assert row(report.claims_map(data_with(j4_results(False, False), costs)), "V1")["verdict"] == "inconclusive"
-    assert row(report.claims_map(data_with(j4_results(testable=False), costs)), "V1")["verdict"] == "not testable"
+    undecided = row(report.claims_map(data_with(j4_results(False, False), costs)), "V1")
+    assert undecided["verdict"] == "inconclusive (planned power 0.80, 0.80)" and undecided["power"] == "0.80, 0.80"
     assert row(report.claims_map(data_with({}, costs)), "V1")["verdict"] == "no data"
-    # without the pilot's d, J4 gives no verdict, and the report never reads it as a pass
+    # without a pilot the margin is still the fixed one: a verdict, with no planned power
     no_pilot = row(report.claims_map(data_with(j4_results(pilot=None), costs)), "V1")
-    assert no_pilot["verdict"] == "no verdict (no pilot d)" and "from the pairs" in no_pilot["result"]
+    assert no_pilot["verdict"] == "confirms" and no_pilot["power"] == "—" and "Δ 5.0 pp" in no_pilot["result"]
+    unpowered = row(report.claims_map(data_with(j4_results(False, False, pilot=None), costs)), "V1")
+    assert unpowered["verdict"] == "inconclusive (no pilot: planned power unknown)"
 
 
 def test_cost_claims_per_utilization():
@@ -74,8 +94,8 @@ def test_cost_claims_per_utilization():
     assert row(rows, "AV2")["verdict"] == "20%: refutes the paper (AV2 wins) · 100%: does not refute"
     worse = {**costs, "B5": {"20%": 2.0, "100%": 1.5}}
     assert row(report.claims_map(data_with(tests, worse)), "A6")["verdict"] == "20%: refutes · 100%: refutes"
-    unpiloted = row(report.claims_map(data_with(j4_results(pilot=None), costs)), "V3")["verdict"]
-    assert unpiloted.startswith("20%: no verdict (no pilot d) (no trained arm passes V1)")
+    failing = row(report.claims_map(data_with(j4_results(False, False), costs)), "V3")["verdict"]
+    assert failing.startswith("20%: inconclusive (planned power 0.80, 0.80) (no trained arm passes V1)")
 
 
 def test_format_claim_compares_each_call_site():
@@ -109,8 +129,7 @@ def test_appendix_b_confirms_only_when_repair_is_worse_and_the_routine_passes():
                                                "Appendix B")["verdict"]
     assert verdict(j4(False, diff=-0.2)) == "confirms (the routine by the agreement proxy, which supports no per-cluster claim (D15))"
     assert verdict(j4(True)) == "refutes (the SLM ties on repair)"
-    assert verdict(j4(False, diff=-0.02)) == "inconclusive"
-    assert verdict(j4(pilot=None)) == "no verdict (no pilot d)"
+    assert verdict(j4(False, diff=-0.02)) == "inconclusive (planned power 0.80)"
     assert verdict(j4(False, diff=-0.2), per_call({"filter_column": 0.90})).startswith("refutes (the SLM loses on the routine;")
 
 
@@ -131,15 +150,6 @@ def test_the_steps_table_reads_the_judgments():
     s6 = {r["step"].split(" ")[0]: r for r in report.steps(data)}["S6"]["did"]
     assert s6 == ("allocation: c0 → slm, c1 → production_llm; 1 chosen on the SLM cost extrapolated from "
                   "per-adapter load tests alone (c0)")
-
-
-def test_no_verdict_is_read_from_j4_itself_and_refuting_takes_the_upper_bound():
-    assert report.outcome(j4(True, pilot=None, margin_from="given")) == "non-inferior"  # J7-style margin, no d_pilot
-    assert report.outcome(j4(True, pilot=0.1, margin_from="pairs")) == "no pilot"
-    assert report.outcome({**j4(True), "noninferior": None}) == "no pilot"
-    assert report.outcome(j4(False, diff=-0.2, ci_high=-0.02)) == "inconclusive"  # the point below −Δ, not the bound
-    assert report.outcome({k: v for k, v in j4(False, diff=-0.2).items() if k != "ci_high"}) == "inconclusive"
-    assert report.outcome(j4(False, diff=-0.2, ci_high=-0.05)) == "worse"
 
 
 def test_appendix_b_with_no_routine_measured_is_no_data():
@@ -186,13 +196,6 @@ def test_every_arm_of_a_set_counts_not_only_its_cheapest():
     for claim in ("V3", "A6"):
         assert row(report.claims_map(data), claim)["verdict"] == \
             "20%: no verdict (several test runs of one configuration of B2-cheap: b2-a, b2-b)"
-
-
-def test_a_missing_pilot_reads_no_verdict_even_on_an_upper_bound_cost():
-    tests = j4_results(pilot=None)
-    data = data_with(tests, {"B0": {"": 1.0}, "B5": {"20%": 0.5}})
-    data["arms"]["B0"].update(upper_bound=True, cache_not_reported=2)
-    assert row(report.claims_map(data), "A6")["verdict"].startswith("20%: no verdict (no pilot d)")
 
 
 def registry_of(*runs):
@@ -505,8 +508,7 @@ def pipeline(tmp_path, monkeypatch):
     per_call_eval("eval-cheap-calib", "replay-cheap-calib", cheap_calib, lambda c: teacher_ok(c) and unit("cheap", c["question_id"]) < 0.8)
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap-calib", "eval-cheap-calib"),
                                                                 "slm": ("replay-B4-calib", "eval-B4-calib")},
-                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, noninferiority,
-                                 margin, len(TEST_IDS), PILOT)
+                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, noninferiority)
     allocated = facts.read_fact(str(allocation), "allocation")[0]["allocation"]
 
     # the arms on test
@@ -681,10 +683,13 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     assert data["arms"]["B4"]["cost_per_correct"] == {u: b4_cost[f"standard@{u}"] for u in ("20%", "50%", "100%")}
     assert data["judgments"]["j7"]["allocation"] == pipeline["allocation"]
     assert len(data["map"]) == 12 and all(any(v in r["verdict"] for v in VOCABULARY) for r in data["map"])
-    # every margin came from the pilot: no comparison is left without a verdict
-    assert all(t["margin_from"] == "pilot" for t in data["tests"].values()) and data["repair_test"]["d_pilot"] is not None
-    assert "no verdict" not in markdown
+    # every margin is the fixed thresholds.delta_pp, whatever the pair's discordance; the pilot gives the planned power
+    assert {t["delta"] for t in data["tests"].values()} == {0.05} == {t["delta"] for t in data["gold_tests"].values()}
+    assert len({t["d"] for t in data["tests"].values()}) > 1 and data["repair_test"]["d_pilot"] is not None
+    assert "no verdict" not in markdown and "not testable (" not in markdown
     assert data["d_pilot"] == data["tests"]["B0|B4"]["d_pilot"] == data["tests"]["B0|B1"]["d_pilot"]  # one pilot
+    from bench.judge.j4 import power
+    assert data["tests"]["B0|B4"]["planned_power"] == power(data["d_pilot"], len(TEST_IDS), 0.05)
     pilot_rows = {arm: {r["question_id"]: r["correct"] for r in read_jsonl(paths.RUNS / f"eval-{arm}-pilot" / "results.jsonl")}
                   for arm in ("B0", "B3")}
     assert data["d_pilot"] == sum(pilot_rows["B0"][q] != pilot_rows["B3"][q] for q in PILOT) / len(PILOT)  # the pilot ids only
@@ -714,14 +719,14 @@ def test_a_test_report_needs_the_registry(pipeline):
         report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
 
-def test_without_a_pilot_no_comparison_gets_a_verdict(pipeline):
+def test_without_a_pilot_the_verdicts_stand_and_only_the_planned_power_is_missing(pipeline):
     plan = yaml.safe_load(pipeline["plan"].read_text())
     del plan["pilot"]
     pipeline["plan"].write_text(yaml.safe_dump(plan))
     data = json.loads((report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary,
                                   noninferiority, pilot_ids=PILOT) / "report.json").read_text())
-    assert all(t["noninferior"] is None for t in data["tests"].values())
-    assert report.v1_verdict(data["tests"]["B0|B4"], data["tests"]["B0|B5"]) == "no verdict (no pilot d)"
+    assert all(t["noninferior"] is not None and t["planned_power"] is None for t in data["tests"].values())
+    assert data["d_pilot"] is None and next(r for r in data["map"] if r["claim"].startswith("V1"))["power"] == "—"
 
 
 def test_report_refuses_an_eval_of_another_arm(pipeline):
@@ -733,7 +738,7 @@ def test_report_refuses_an_eval_of_another_arm(pipeline):
 
 
 def test_generation_and_repair_get_their_own_tests_with_the_pilot_restricted(pipeline):
-    from bench.judge.j4 import noninferiority as j4_
+    from bench.judge.j4 import discordance
     out = report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority,
                      pilot_ids=PILOT)
     data = json.loads((out / "report.json").read_text())
@@ -741,7 +746,7 @@ def test_generation_and_repair_get_their_own_tests_with_the_pilot_restricted(pip
     assert "## Clusters with gold" in (out / "report.md").read_text()
     j6 = read_result(pipeline["j6"], "J6")["result"]
     gold = j6["per_call_site"][j6["choice"]]["revise"]["gold"]["by_question"]
-    d_on = lambda ids: j4_({q: gold["replay"][q] for q in ids}, {q: gold["teacher"][q] for q in ids}, 5, 1, 10)["d"]  # noqa: E731
+    d_on = lambda ids: discordance({q: gold["replay"][q] for q in ids}, {q: gold["teacher"][q] for q in ids})  # noqa: E731
     pilot = sorted(set(PILOT) & set(gold["teacher"]))
     assert data["repair_test"]["d_pilot"] == d_on(pilot) != d_on(sorted(gold["teacher"]))  # the pilot questions only
     a4 = next(r for r in data["map"] if r["claim"].startswith("A4"))

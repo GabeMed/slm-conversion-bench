@@ -14,13 +14,13 @@ of (no number goes in it):
 
 Every figure is read from a judgment or computed by one: J1's per-question table and summary
 (`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
-second), run here through F2's functions. **Every J4 margin comes from the pilot** (SPEC §6.4,
-§7.3), measured on calib before training, between the SLM and the production LLM: `d_pilot` is the
-discordance J4 measures between B3 (the zero-shot SLM) and B0 on the pre-registered pilot questions
-(`bench.data.pilot_sample`), one number for every end-to-end comparison; for repair, between the
-zero-shot candidate S4 chose and the teacher on the pilot questions' repair calls (J6's result).
-J4 then takes Δ at n = the test's pairs. A comparison with no pilot gets no verdict (J4 returns
-`noninferior: None`, `margin_from: "pairs"`), never a pass. **A test report is read only under the
+second). **Every J4 margin is the fixed `thresholds.delta_pp`** (design §6.3 T3), end to end and per
+call site, never derived from a discordance. **The pilot gives only the planned power** (SPEC §6.4),
+measured on calib before training: `d_pilot` is the discordance J4 measures between B3 (the zero-shot
+SLM) and B0 on the pilot questions (`bench.data.pilot_ids`), and the planned power of a comparison is
+J4's `power` at that d and the comparison's n (the test's 498 questions); for repair, d is between the
+zero-shot candidate S4 chose and the teacher on the pilot questions' repair calls (J6's result). A
+comparison with no pilot still gets its verdict, with no planned power. **A test report is read only under the
 registration in force**, before anything is read: the barrier finds it published, intact and
 matching the configuration given (every threshold, seed and the pilot come from it), and the analysis
 code is the registered one. **A test report is bound to the test registry**: every run it binds ran
@@ -37,14 +37,14 @@ from; its sha256 names the directory) and `ex_cost.svg`, the main chart.
 
 **How each row of the SPEC §5 map is decided** (the SPEC fixes the criteria; where it leaves a
 term open, the reading is stated here and in the row). A J4 comparison has one outcome, shared by
-every row: several runs (no verdict), no pilot (no verdict), not testable (Δ above the cap),
-non-inferior (the one-sided 95% lower bound above −Δ), worse (the one-sided 95% **upper** bound
-below −Δ: refuting takes the same standard as confirming) or inconclusive (neither). A cost verdict
+every row: several runs (no verdict), non-inferior (the one-sided 95% lower bound above −Δ), worse
+(the one-sided 95% **upper** bound below −Δ: refuting takes the same standard as confirming) or
+inconclusive (neither), which a row states with the planned power. A cost verdict
 carries the labels of the costs it rests on (estimated, lower bound, upper bound, extrapolated), and
 one that rests on an upper-bound cost is inconclusive; arms priced from different price tables (by
 date or by content) are refused.
-- V1/A1: confirms if B4 or B5 is non-inferior to B0; refutes if both are worse; otherwise the
-  outcomes say why not (no pilot, not testable, inconclusive).
+- V1/A1: confirms if B4 or B5 is non-inferior to B0; refutes if both are worse; otherwise
+  inconclusive, with the planned power.
 - A4/A11: the replaceable fraction of B5 by call, token and cost, and whether B5 met
   non-inferiority; the SPEC says "high" without a number, so the row is descriptive.
 - Appendix B: on the per-call-site evaluation of B4 on the test inputs. The routine (the call sites
@@ -78,6 +78,7 @@ from bench.contracts.concordance import GOLD_CALL_SITES as GOLD_SITES
 from bench.contracts.facts import read_fact
 from bench.contracts.router import ARM_FACTS
 from bench.provenance import scrub
+from bench.judge import j4
 from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
                               run_dir)
 
@@ -129,9 +130,9 @@ def correct_of(rows: List[Dict[str, Any]]) -> Dict[str, bool]:
     return {str(r["question_id"]): bool(r["correct"]) for r in rows}
 
 
-def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callable, noninferiority: Callable,
-            settings: tuple) -> Optional[float]:
-    """The pilot's discordance: J4's d between B3 (the zero-shot SLM) and B0 on the pilot questions."""
+def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callable) -> Optional[float]:
+    """The pilot's discordance: between B3 (the zero-shot SLM) and B0 on the pilot questions. It gives the
+    planned power only, never a margin."""
     if not pilot_evals:
         return None
     if set(pilot_evals) != {"B0", "B3"}:
@@ -141,7 +142,14 @@ def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callabl
     missing = sorted(set(pilot_ids) - (set(b0) & set(b3)), key=int)
     if missing:
         raise JudgmentError(f"the pilot's B0 and B3 executions did not answer every pilot question: {missing[:5]}")
-    return plain(noninferiority({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids}, *settings))["d"]
+    return j4.discordance({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids})
+
+
+def planned(test: Dict[str, Any], d_pilot: Optional[float]) -> Dict[str, Any]:
+    """A J4 test with its pilot discordance and planned power: J4's `power` at the pilot's d, this
+    comparison's n and its fixed margin (None without a pilot)."""
+    power = None if d_pilot is None else j4.power(d_pilot, test["n"], test["delta"])
+    return {**test, "d_pilot": d_pilot, "planned_power": power}
 
 
 NEEDS = ARM_FACTS  # the facts each trained arm runs on (C4)
@@ -350,14 +358,15 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     coverage = None if not per_call else per_call["call_sites"]
     uncovered = sorted(set(ROUTINE + GOLD_SITES) - set(coverage)) if coverage is not None else []
 
-    settings = (config["thresholds"]["delta_cap_pp"], config["seeds"]["bootstrap"], n_boot(config))
-    d_pilot = pilot_d(pilot_plan, pilot_ids, ex_table, noninferiority, settings)
+    margin = config["thresholds"]["delta_pp"] / 100  # the one fixed margin of every non-inferiority (T3)
+    test_of = lambda a, b: plain(noninferiority(a, b, config["seeds"]["bootstrap"], n_boot(config), margin=margin))  # noqa: E731
+    d_pilot = pilot_d(pilot_plan, pilot_ids, ex_table)
     tests = {}
     for candidate, reference_arm in PAIRS:
         if candidate in correct and reference_arm in correct:
-            test = plain(noninferiority(correct[candidate], correct[reference_arm], *settings, d_pilot=d_pilot))
             several = sorted(set((arms[candidate].get("several_runs") or []) + (arms[reference_arm].get("several_runs") or [])))
-            tests[f"{reference_arm}|{candidate}"] = {**test, "several_runs": several or None}
+            tests[f"{reference_arm}|{candidate}"] = {**planned(test_of(correct[candidate], correct[reference_arm]), d_pilot),
+                                                     "several_runs": several or None}
     formats = {}
     for arm, path in (plan.get("format") or {}).items():
         found = read_result(path, "J2")
@@ -375,15 +384,16 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         gold = (zeroshot.get(site) or {}).get("gold")
         ids = sorted(set(pilot_ids) & set(gold["by_question"]["teacher"])) if gold else []
         if ids:
-            d = plain(noninferiority({q: gold["by_question"]["replay"][q] for q in ids},
-                                     {q: gold["by_question"]["teacher"][q] for q in ids}, *settings))["d"]
+            d = j4.discordance({q: gold["by_question"]["replay"][q] for q in ids},
+                               {q: gold["by_question"]["teacher"][q] for q in ids})
         # the replay's several runs, and its teacher's (B0's run), as the registry binding found them
-        gold_tests[site] = {**plain(noninferiority(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
-                                                   *settings, d_pilot=d)), "several_runs": replay_several}
+        gold_tests[site] = {**planned(test_of(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"]), d),
+                            "several_runs": replay_several}
     utilizations_cfg = [f"{round(u * 100)}%" for u in config["cost"]["utilizations"]]
     return {"split": split, "arms": arms, "tests": tests, "d_pilot": d_pilot, "pilot_ids": sorted(pilot_ids, key=int),
             "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"), "per_call_uncovered": uncovered,
-            "formats": formats, "judgments": judged, "concordance_min": config["thresholds"]["concordance_min"],
+            "formats": formats, "judgments": judged, "delta_pp": config["thresholds"]["delta_pp"],
+            "concordance_min": config["thresholds"]["concordance_min"],
             "v3_min_ratio": config["claims"]["v3_min_ratio"], "utilizations": utilizations_cfg,
             "registry": registry, "sources": sources}
 
@@ -396,27 +406,17 @@ def plain(value: Any) -> Any:
 
 # ---------------------------------------------------------------- the SPEC §5 map
 
-NO_PILOT = "no verdict (no pilot d)"
-
-
 def outcome(test: Optional[Dict[str, Any]]) -> str:
-    """The one reading of a J4 comparison every row shares. No verdict is read from J4 itself
-    (`margin_from == "pairs"` or `noninferior is None`); worse means the one-sided 95% upper bound
-    of the difference is below −Δ (the same standard as non-inferior, from the other side)."""
+    """The one reading of a J4 comparison every row shares, against the fixed margin Δ: non-inferior when
+    the one-sided 95% lower bound of the difference is above −Δ, worse when the upper bound is below −Δ
+    (the same standard, from the other side), inconclusive otherwise."""
     if not test:
         return "no data"
     if test.get("several_runs"):
         return "several runs"
-    if test.get("margin_from") == "pairs":
-        return "no pilot"
-    if not test["testable"]:
-        return "not testable"
-    if test["noninferior"] is None:
-        return "no pilot"
     if test["noninferior"]:
         return "non-inferior"
-    ci_high = test.get("ci_high")
-    return "worse" if ci_high is not None and ci_high < -test["delta"] else "inconclusive"
+    return "worse" if test["ci_high"] < -test["delta"] else "inconclusive"
 
 
 def _several(data, *tests) -> Optional[str]:
@@ -495,16 +495,15 @@ def cost_verdict(data, verdict: str, arms: List[str]) -> str:
 
 
 def _power(*tests) -> str:
-    return ", ".join(f"{t['power']:.2f}" for t in tests if t and t.get("power") is not None) or "—"
+    """The planned power of these comparisons: from the pilot's d, at the fixed margin (T3)."""
+    return ", ".join(f"{t['planned_power']:.2f}" for t in tests if t and t.get("planned_power") is not None) or "—"
 
 
-def _why_not(outcomes: List[str]) -> str:
-    """The verdict when a row neither confirms nor refutes, from its comparisons' outcomes."""
-    if outcomes and all(o == "no pilot" for o in outcomes):
-        return NO_PILOT
-    if outcomes and all(o == "not testable" for o in outcomes):
-        return "not testable"
-    return "inconclusive"
+def _inconclusive(*tests) -> str:
+    """A row that neither confirms nor refutes is inconclusive, with its planned power (SPEC §6.4): a
+    low power never makes a comparison untestable."""
+    power = _power(*tests)
+    return f"inconclusive (planned power {power})" if power != "—" else "inconclusive (no pilot: planned power unknown)"
 
 
 def v1_verdict(t4, t5) -> str:
@@ -518,7 +517,7 @@ def v1_verdict(t4, t5) -> str:
         return "confirms"
     if outcomes == ["worse", "worse"]:
         return "refutes"
-    return _why_not(outcomes)
+    return _inconclusive(t4, t5)
 
 
 def _ci(t) -> str:
@@ -529,7 +528,7 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     rows = []
     t4, t5 = data["tests"].get("B0|B4"), data["tests"].get("B0|B5")
     rows.append({"claim": "V1 / A1: SLMs suffice for agent calls (p.3–4)",
-                 "result": "; ".join(f"{a} − B0: {_pp(t['diff'])} (Δ {_margin(t['delta'])} from the {t['margin_from']}, "
+                 "result": "; ".join(f"{a} − B0: {_pp(t['diff'])} (Δ {_margin(t['delta'])}, "
                                      f"{_ci(t)})" for a, t in (("B4", t4), ("B5", t5)) if t) or "—",
                  "verdict": v1_verdict(t4, t5), "power": _power(t4, t5)})
 
@@ -554,13 +553,13 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
         elif b5_cost >= base_cost:
             a6.append((u, cost_verdict(data, "refutes", ["B5"] + untrained)))
         else:
-            a6.append((u, cost_verdict(data, "confirms" if _passes_v1(data, "B5") else _why_not([outcome(t5)]),
+            a6.append((u, cost_verdict(data, "confirms" if _passes_v1(data, "B5") else _inconclusive(t5),
                                        ["B5"] + untrained)))
         trained = [(c, a) for a in trained_arms if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
         if base_cost is None:
             v3.append((u, cost_verdict(data, "no data", trained_arms + untrained)))
         elif not trained:
-            v3.append((u, cost_verdict(data, f"{_why_not([outcome(t) for t in (t4, t5) if t])} (no trained arm passes V1)",
+            v3.append((u, cost_verdict(data, f"{_inconclusive(t4, t5)} (no trained arm passes V1)",
                                        trained_arms + untrained)))
         else:
             cheapest, arm = min(trained)
@@ -625,7 +624,7 @@ def _appendix_b(data) -> Dict[str, str]:
     routine = {site: e["agreement"]["rate"] for site, e in per_call["per_call_site"].items()
                if site in ROUTINE and e["agreement"] and e["agreement"]["rate"] is not None}
     repaired = outcome(repair)
-    result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])} from the {repair['margin_from']}, "
+    result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])}, "
               f"{_ci(repair)}), {repaired}; routine agreement: "
               + (", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())) or "none measured"))
     several = _several(data, repair)
@@ -642,7 +641,7 @@ def _appendix_b(data) -> Dict[str, str]:
     elif repaired == "worse":
         verdict = f"confirms ({proxy})"
     else:
-        verdict = _why_not([repaired])
+        verdict = _inconclusive(repair)
     return {**row, "result": result, "verdict": verdict}
 
 
@@ -834,7 +833,7 @@ def render(data: Dict[str, Any]) -> str:
             rows.append([arm, a["n"], _pct(a["ex"])] + [_pct(a["by_difficulty"].get(d)) for d in difficulties]
                         + [costs, usage])
     parts += [_table(["arm", "n", "EX"] + [f"EX {d}" for d in difficulties] + ["cost per correct query (standard prices)", "usage"], rows), ""]
-    parts += ["## The SPEC §5 map", "", _table(["claim", "result", "verdict", "power"],
+    parts += ["## The SPEC §5 map", "", _table(["claim", "result", "verdict", "planned power"],
                                                [[r["claim"], r["result"], r["verdict"], r["power"]] for r in data["map"]]), ""]
     parts += ["## S1–S6: what each step did, cost and changed", "",
               _table(["step", "what it did", "cost", "what it changed"], [[s["step"], s["did"], s["cost"], s["changed"]] for s in data["steps"]]), ""]
@@ -868,7 +867,7 @@ def render(data: Dict[str, Any]) -> str:
                   f"No data: the per-call replay covers only {', '.join(per_call['call_sites'])}.", ""]
     elif data["gold_tests"]:
         parts += ["## Clusters with gold: per-call non-inferiority on the test inputs (SPEC §7.2 K4)", "",
-                  _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "CI", "outcome", "power"],
+                  _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "CI", "outcome", "planned power"],
                          [[site, t["n"], "—" if t.get("d_pilot") is None else f"{t['d_pilot']:.3f}", _margin(t["delta"]),
                            _pp(t["diff"]), _ci(t), outcome(t), _power(t)] for site, t in sorted(data["gold_tests"].items())]), ""]
     registry = data["registry"]
@@ -894,10 +893,9 @@ def run(plan_path: str, config: Dict[str, Any], ex_table: Optional[Callable] = N
     if ex_table is None or ex_summary is None:
         from bench.judge import j1  # F2's J1
         ex_table, ex_summary = ex_table or j1.ex_table, ex_summary or j1.ex_summary
-    if noninferiority is None:
-        from bench.judge.j4 import noninferiority  # F2's J4
+    noninferiority = noninferiority or j4.noninferiority
     if pilot_ids is None:
-        from bench.judge.j7 import registered_pilot
+        from bench.data import pilot_ids as registered_pilot
         pilot_ids = registered_pilot(config)
     data = gather(plan, config, ex_table, ex_summary, noninferiority, pilot_ids)
     data["map"], data["steps"] = claims_map(data), steps(data)

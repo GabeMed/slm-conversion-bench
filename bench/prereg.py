@@ -1,6 +1,6 @@
 """`bench prereg` (SPEC 6.1): before the test split is touched, register the hash of the SPEC, of the
 configuration, of the splits (the calibration and test ids), of the data manifest, and the rule
-that computes Δ.
+of the non-inferiority tests: the fixed margin Δ, and what the pilot is for.
 
 It writes the two files the test barrier reads (`bench/barrier.py` documents the format):
 `prereg/manifest.json`, and `prereg/HASH`, one line with the sha256 of the manifest's bytes; and it
@@ -18,7 +18,7 @@ import yaml
 
 from bench import barrier, paths
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError, pilot_sample
+from bench.data import DataError
 from bench.judge import j4
 
 # The analysis code the registration hashes, so no reading of the results changes without changing
@@ -95,24 +95,27 @@ def analysis_code(root: Path) -> Dict[str, str]:
     return {rel: _sha256(root / rel) for rel in files}
 
 
-def delta_rule(config: Dict[str, Any], calib: List[str]) -> Dict[str, Any]:
-    """The rule J4 applies (bench/judge/j4.py), in words and parameters, and the pilot it takes d from."""
-    size, seed = config["stats"]["pilot_size"], config["seeds"]["calib_split"]
+def delta_rule(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The rule J4 applies (bench/judge/j4.py), in words and parameters: a fixed margin, and a pilot that
+    gives the planned power only (design §6.3 T3)."""
+    thresholds = config["thresholds"]
     return {
-        "formula": "delta = (z_0.95 + z_0.80) * sqrt(d / n)",
-        "z": {"one_sided_confidence": j4.CONFIDENCE, "power": j4.POWER},
-        "d": "paired discordance, the fraction of questions exactly one of the two arms gets right, "
-             "measured on the pilot",
-        "pilot": {"rule": "the stats.pilot_size calibration ids with the smallest sha256('<seeds.calib_split>:pilot:<id>')",
-                  "size": size, "ids": pilot_sample(calib, size, seed)},
-        "n": "the number of paired test questions (498)",
-        "cap_pp": config["thresholds"]["delta_cap_pp"],
-        "above_cap": "not testable with this n: reported as descriptive only",
-        "noninferior_if": "the one-sided 95% paired-bootstrap lower bound of EX_A - EX_B is above -delta",
+        "margin_pp": thresholds["delta_pp"],
+        "margin": "fixed before any data, the same for every non-inferiority comparison of the report; "
+                  "never derived from a discordance",
+        "selection_margin_pp": thresholds["selection_delta_pp"],
+        "selection_margin": "when choosing engines on the calibration split (B5)",
+        "noninferior_if": "the one-sided 95% paired-bootstrap lower bound of EX_A - EX_B is above -margin",
+        "worse_if": "the one-sided 95% paired-bootstrap upper bound of EX_A - EX_B is below -margin",
+        "otherwise": "inconclusive, reported with the planned power",
+        "planned_power": {"formula": "Phi(margin / sqrt(d / n) - z_0.95)", "one_sided_confidence": j4.CONFIDENCE,
+                          "d": "paired discordance, the fraction of questions exactly one of the two arms gets right, "
+                               "measured on the pilot (B3 against B0)",
+                          "n": "the number of paired test questions (498)"},
+        "pilot": {"accessor": "bench.data.pilot_ids(config)", "size": config["stats"]["pilot_size"]},
         "bootstrap": {"unit": "question", "n_boot": config["stats"]["n_boot"], "seed": config["seeds"]["bootstrap"],
                       "quantile": "inverted CDF: ci_low the ceil(n_boot/20)-th smallest resample, ci_high the "
                                   "ceil(n_boot/20)-th largest, from the same resamples"},
-        "calibration_margin": "delta / 2 when choosing engines on the calibration split (B5)",
     }
 
 
@@ -154,10 +157,9 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
         if not isinstance((config.get("stats") or {}).get(key), int):
             raise PreregError(f"the configuration has no stats.{key}: the delta rule needs it")
     inputs = barrier.REGISTERED
-    calib = json.loads((root / inputs["splits_sha256"]).read_text()).get("calib") or []
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in inputs.items()},
-                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib),
+                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config),
                 "analysis_code": analysis_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
     if manifest_path.exists() or hash_path.exists():

@@ -117,9 +117,13 @@ splits:
   calib_size: 200
   excluded: ["119", "120"]     # absent from Arcwise-Plat-SQL; out of train and test (D14)
 
-thresholds:
-  delta_cap_pp: 5
-  concordance_min: 0.95
+thresholds:                    # R · every verdict rule (design §6.3), fixed before the pilot is read
+  delta_pp: 5                  # the non-inferiority margin of every comparison, fixed (T3: never from d)
+  selection_delta_pp: 2.5      # J7's margin when choosing engines on calib (T3)
+  concordance_min: 0.95        # the agreement bar's ceiling on call sites without gold
+  concordance_slack_pp: 2      # T4: each such site's bar is min(concordance_min, A_tt - slack), A_tt the
+                               # teacher's agreement with its own replay on the pilot
+  format_tolerance_pp: 1       # T11: A5 refutes only when B4 is more than this below B0 on a call site
 
 prices:
   as_of: null                  # dated price table: before runs
@@ -268,9 +272,10 @@ selection:                     # S4 (J6): higher per-call-site score on calib; t
   footprint_gb: {qwen3-8b: null, granite-4.2-8b: null}  # before runs
   triage: []                   # before runs: the desk triage (SPEC §4 S4a), one mapping per candidate
 allocation:                    # S6 (J7)
-  min_calls: null              # before runs: fewest calib calls of a cluster part to count as evidence
+  min_calls: 100               # fewest calls to count as evidence: of a cluster part on calib (J7), of a call
+                               # site in both arms (A5)
 cost:                          # J3 and J8 (SPEC §6.6); the GPU's price is F3's modal.gpu_prices
   p95_slo_ms: null             # before runs: sustained throughput is the highest with p95 latency within this
   utilizations: [0.2, 0.5, 1.0]
 claims:                        # the SPEC §5 map (bench/report.py)
-  v3_min_ratio: 3              # V3/A2 confirms at >= 3x cheaper per correct query (SPEC §5)
+  v3_min_ratio: 3              # V3/A2: the paper's bar, met when the cost ratio's 95% CI lower bound is >= this (T9)

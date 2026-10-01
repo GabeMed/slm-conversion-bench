@@ -12,7 +12,7 @@ import yaml
 from bench import paths
 from bench.barrier import prereg_published
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError, pilot_sample
+from bench.data import DataError
 from bench.evaluate import evaluate, evaluate_per_call
 from bench.prereg import PreregError, check_registered_analysis_code, register
 from synthetic import make_repo, sha256
@@ -74,13 +74,13 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
     assert manifest["spec_sha256"] == sha256(repo / "SPEC.md")
     assert manifest["splits_sha256"] == sha256(repo / "data" / "splits.json")
     assert manifest["data_manifest_sha256"] == sha256(repo / "data" / "MANIFEST.json")
-    rule = manifest["delta_rule"]
-    assert (rule["cap_pp"], rule["bootstrap"]["n_boot"], rule["bootstrap"]["seed"]) == \
-        (CONFIG["thresholds"]["delta_cap_pp"], CONFIG["stats"]["n_boot"], CONFIG["seeds"]["bootstrap"])
+    rule = manifest["delta_rule"]  # the fixed margin (T3); the pilot only gives the planned power
+    assert (rule["margin_pp"], rule["selection_margin_pp"], rule["bootstrap"]["n_boot"], rule["bootstrap"]["seed"]) == \
+        (CONFIG["thresholds"]["delta_pp"], CONFIG["thresholds"]["selection_delta_pp"], CONFIG["stats"]["n_boot"],
+         CONFIG["seeds"]["bootstrap"]) == (5, 2.5, 10000, 303)
+    assert "cap_pp" not in rule and "sqrt(d / n)" in rule["planned_power"]["formula"]
+    assert rule["pilot"] == {"accessor": "bench.data.pilot_ids(config)", "size": CONFIG["stats"]["pilot_size"]}
     assert manifest["analysis_code"] == {rel: sha256(repo / rel) for rel in ANALYSIS}
-    calib = [str(i) for i in range(100, 160)]
-    assert rule["pilot"]["ids"] == pilot_sample(calib, 50, CONFIG["seeds"]["calib_split"])
-    assert (rule["pilot"]["size"], len(rule["pilot"]["ids"])) == (CONFIG["stats"]["pilot_size"], 50)
     assert git(repo, "rev-parse", "HEAD^") == before and git(repo, "status", "--porcelain") == ""
     assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == ["prereg/HASH", "prereg/manifest.json"]
     assert "not on origin/main" in prereg_published(CONFIG, repo)  # publishing is the author's act
