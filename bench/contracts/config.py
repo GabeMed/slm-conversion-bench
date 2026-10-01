@@ -155,6 +155,25 @@ def cost_settings_errors(config: Dict[str, Any]) -> List[str]:
     return errors
 
 
+def verdict_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """Front R's keys: what every verdict reads (design §6.3), fixed before the pilot is read."""
+    errors = []
+
+    def number(value, low, high):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high
+    thresholds = config["thresholds"]
+    for key, high in (("delta_pp", 100), ("selection_delta_pp", 100), ("concordance_min", 1),
+                      ("concordance_slack_pp", 100), ("format_tolerance_pp", 100)):
+        if not number(thresholds.get(key), 0, high):
+            errors.append(f"thresholds.{key} must be a number in [0, {high}]")
+    min_calls = (config.get("allocation") or {}).get("min_calls")
+    if not (isinstance(min_calls, int) and not isinstance(min_calls, bool) and min_calls >= 1):
+        errors.append("allocation.min_calls must be an integer >= 1")
+    if not number((config.get("claims") or {}).get("v3_min_ratio"), 1, float("inf")):
+        errors.append("claims.v3_min_ratio must be a number >= 1")
+    return errors
+
+
 def validate_config(config: Dict[str, Any]) -> List[str]:
     errors = [f"missing key: {k}" for k in REQUIRED if k not in config]
     if errors:
@@ -196,6 +215,7 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
             errors.append(f"data.{name} needs url and sha256")
     if not errors:  # the agent's settings read the keys checked above
         errors += agent_settings_errors(config)
+    errors += verdict_settings_errors(config)
     return errors + data_training_errors(config) + cost_settings_errors(config)
 
 

@@ -53,7 +53,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("prereg", help="write and commit prereg/manifest.json and prereg/HASH (push to publish)")
     p.add_argument("--config", default="config.yaml")
-    p.add_argument("--replace", action="store_true", help="register anew over a different registration")
+    p.add_argument("--replace", action="store_true", help="register anew over a different registration (needs --reason)")
+    p.add_argument("--reason", help="with --replace: the defect that made a new registration necessary; it becomes "
+                                    "a dated line of prereg/DEVIATIONS.md, which the report prints")
 
     # F3 · training, load test and preflight (bench/train.py, bench/loadtest.py, bench/preflight.py)
     p = sub.add_parser("train", help="S5: one LoRA adapter for a cluster; registers the adapters fact once every cluster has one")
@@ -100,7 +102,7 @@ def main(argv=None) -> int:
         elif args.command == "prereg":
             from pathlib import Path
             from bench.prereg import register
-            registered = register(str(Path(args.config).resolve()), replace=args.replace)
+            registered = register(str(Path(args.config).resolve()), replace=args.replace, reason=args.reason)
             if registered["unset"]:
                 print(f"bench prereg: registered with null values: {', '.join(registered['unset'])}", file=sys.stderr)
             print(f"{registered['hash']} ({'committed' if registered['new'] else 'already registered'} at "
@@ -161,7 +163,8 @@ def _f4(args) -> int:
             from bench.judge import j7
             replays = {engine: next(iter(_pairs([value]).items())) for engine, value in
                        (("cheap_alt", args.cheap_alt), ("slm", args.slm))}
-            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
+            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config,
+                          teacher_self_replay=args.teacher_self_replay), sep="\n")
         elif args.judgment == "b1k":
             from bench.judge import b1k
             k0, k3 = (next(iter(_pairs([value]).items())) for value in (args.k0, args.k3))
@@ -234,7 +237,9 @@ def f4_commands(sub) -> None:
     p.add_argument("--slm", required=True, metavar="REPLAY=EVAL", help="the calib replay routed as B4")
     p.add_argument("--teacher-eval", required=True)
     p.add_argument("--j8", required=True)
-    p.add_argument("--j6", required=True, help="the J6 result: its chosen candidate's zero-shot replay is the pilot")
+    p.add_argument("--j6", required=True, help="the J6 result that chose the adapters' base")
+    p.add_argument("--teacher-self-replay", required=True, metavar="RUN",
+                   help="the teacher's calib run replayed on production_llm on the pilot questions: A_tt, the agreement bar's cap")
     p = judgments.add_parser("j8", help="load: SLM cost per request at each utilization")
     p.add_argument("--loadtest", action="append", required=True)
     p.add_argument("--sweep", action="append", help="the sweep to use when an engine has several (repeatable)")
