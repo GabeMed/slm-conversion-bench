@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from bench.contracts.config import ConfigError, engine_spec
 from bench.contracts.router import Route, route
-from bench.provenance import scrub
+from bench.provenance import redact, scrub
 
 _config: Optional[Dict[str, Any]] = None
 _run: Optional["_RunState"] = None
@@ -57,7 +57,7 @@ class HarnessError(RuntimeError):
         run = _run
         if run is not None:
             with run.lock:
-                run.harness_errors.append(scrub(message))
+                run.harness_errors.append(redact(scrub(message), _config) if _config is not None else scrub(message))
 
 
 class RunAborted(RuntimeError):
@@ -299,7 +299,7 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
         "usage": _usage(output) if output is not None else
         {"input": None, "cached_input": None, "output": None, "source": "missing"},
         "latency_ms": latency_ms, "started_at": started_at, "temperature": temperature,
-        "error": scrub(error) if error is not None else None,  # no local paths in a record
+        "error": redact(scrub(error), _config) if error is not None else None,  # no local path, no credential
     }, ensure_ascii=False)
     with run.lock, open(run.calls_path, "a") as fh:
         fh.write(line + "\n")

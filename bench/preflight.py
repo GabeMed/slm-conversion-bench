@@ -285,6 +285,77 @@ def parity_verdict(served_base: List[Generation], served_adapter: List[Generatio
 _TOKEN_ID = re.compile(r"^token_id:(\d+)$")
 
 
+PROBE_PROMPT = "Reply with the single word OK."  # far below any context limit
+
+
+def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dict[str, Any]:
+    """One real call to `engine` through the agent's own client (`bench.agent.hooks.chat_model`: the
+    request body, SDK, headers and credentials an execution uses, by construction), retried as an
+    execution retries a transport failure. On a prompt this short a 400 cannot be a context overflow: it is
+    the configuration, which an execution would record as the model failing every call, and end `done`.
+    Needs the agent environment (LangChain), like an execution."""
+    from bench.contracts.config import engine_spec
+    from bench.provenance import redact
+
+    spec = engine_spec(config, engine)
+    found = {"engine": engine, "model": spec["model"], "temperature": temperature}
+    if not spec["endpoint"].get("base_url"):
+        return {**found, "status": PENDING, "why": "no endpoint.base_url yet"}
+    try:
+        import langchain_openai  # noqa: F401
+        from langchain_core.messages import HumanMessage
+    except ImportError:
+        return {**found, "status": PENDING, "why": "run bench preflight in the agent environment to call the engines"}
+    from bench.agent import hooks
+
+    hooks.configure(config)
+    try:
+        model = hooks.chat_model(engine, temperature)
+    except hooks.HarnessError as e:  # a credential variable not set
+        return {**found, "status": PENDING, "why": str(e)}
+    attempts = config["retries"]["http_max_attempts"]
+    for attempt in range(1, attempts + 1):
+        try:
+            output = model.invoke([HumanMessage(content=PROBE_PROMPT)])
+            break
+        except Exception as e:  # noqa: BLE001 (classified as an execution classifies it)
+            kind = hooks.classify(e)
+            if kind == "transport" and attempt < attempts:
+                hooks._backoff(attempt)
+                continue
+            reading = {"model": "refused the configured parameters", "transport": "did not answer",
+                       "harness": "refused the request"}[kind]
+            return {**found, "status": FAIL, "kind": kind,
+                    "why": redact(f"{reading}: {type(e).__name__}: {e}", config)}  # provider text may echo a key
+    problems = []
+    if not isinstance(output.content, str) or not output.content.strip():
+        problems.append("no text in the answer (an execution would read every call as the model's empty output)")
+    usage = hooks._usage(output)
+    if usage["source"] != "api":
+        problems.append("no usage (P-2: this engine's cost would be an estimate)")
+    return {**found, "status": FAIL if problems else PASS, "why": "; ".join(problems) or None,
+            "cached_tokens_reported": usage["cached_input"] is not None}
+
+
+def check_engines(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Every engine an arm runs on (the production LLM, the cheap alternative, each SLM candidate's base)
+    answers a real call with the parameters configured for it, at every temperature the call sites use."""
+    precondition = ("every configured engine answers a real call through the agent's client with its configured "
+                    "parameters: text and usage (P-2), so no execution records a refused parameter as the model's "
+                    "failures (a context window smaller than the prompts is not something a short call can see)")
+    engines = ["production_llm", "cheap_alt"] + [f"slm:{c['name']}" for c in config["roles"].get("slm_candidates") or []]
+    temperatures = sorted({spec["temperature"] for spec in config["call_sites"].values()})
+    probes = [probe_engine(config, engine, t) for engine in engines for t in temperatures]
+    failed = sorted({p["engine"] for p in probes if p["status"] == FAIL})
+    if failed:
+        return _check("engines", precondition, FAIL, probes,
+                      f"fix what each failed probe of {', '.join(failed)} says: a refused parameter, a credential, "
+                      f"or an endpoint that did not answer (a Modal server cold-starts in minutes), then run again")
+    if any(p["status"] == PENDING for p in probes):
+        return _check("engines", precondition, PENDING, probes, "set each engine's base_url and credentials, then run again")
+    return _check("engines", precondition, PASS, probes, "")
+
+
 def _token_id(token: str) -> int:
     match = _TOKEN_ID.match(token)
     if not match:
@@ -456,14 +527,14 @@ def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -
 # ---------------------------------------------------------------- the command
 
 def run_checks(config: Dict[str, Any], parity_cluster: Optional[str] = None, on: str = "modal") -> List[Dict[str, Any]]:
-    return [check_agent_runs(config), check_call_sites(config), check_data(config), check_teacher_terms(config),
-            check_pilot_spend(config), check_training_time(config), check_throughput(),
+    return [check_engines(config), check_agent_runs(config), check_call_sites(config), check_data(config),
+            check_teacher_terms(config), check_pilot_spend(config), check_training_time(config), check_throughput(),
             check_lora_parity(config, parity_cluster, on)]
 
 
 def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = "modal") -> int:
     from bench.contracts.config import config_sha256, load_config
-    from bench.provenance import git_state, scrub
+    from bench.provenance import git_state, redact, scrub
 
     import os
 
@@ -477,7 +548,7 @@ def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = 
     report = {"type": "preflight", "config_sha256": config_sha256(config), **git_state(),
               "started_at": started.isoformat(), "checks": checks,
               "all_pass": all(c["status"] == PASS for c in checks)}
-    (run_dir / "report.json").write_text(scrub(json.dumps(report, indent=2, default=str)) + "\n")
+    (run_dir / "report.json").write_text(redact(scrub(json.dumps(report, indent=2, default=str)), config) + "\n")
     for c in checks:
         print(f"{c['status']:8} {c['id']:24} {c['action'] if c['status'] != PASS else ''}")
     print(run_dir)

@@ -460,11 +460,13 @@ def test_throughput_lists_only_finished_load_runs_and_leaves_the_judgment_to_j8(
 
 
 def test_bench_preflight_writes_the_report_and_exits_1_unless_everything_passes(tmp_path, monkeypatch, capsys):
+    import bench.preflight as preflight
     _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(preflight, "probe_engine", lambda config, engine, t: {"engine": engine, "status": PENDING})
     assert cli.main(["preflight", "--config", str(config_path)]) == 1
     report_path = next(paths.RUNS.glob("preflight-*/report.json"))
     report = json.loads(report_path.read_text())
-    assert [c["id"] for c in report["checks"]] == ["agent_end_to_end", "call_sites_registered", "data_ids_and_gold",
+    assert [c["id"] for c in report["checks"]] == ["engines", "agent_end_to_end", "call_sites_registered", "data_ids_and_gold",
                                                    "teacher_terms", "pilot_spend", "training_time", "throughput",
                                                    "lora_parity"]
     assert report["all_pass"] is False and all(c["action"] for c in report["checks"])
@@ -496,7 +498,168 @@ def test_p4_on_modal_asks_the_gpu_reference_for_the_adapter_by_its_sha256(parity
 def test_preflight_on_modal_hands_its_configuration_to_the_modal_reference(tmp_path, monkeypatch):
     import os
 
+    import bench.preflight as preflight
     _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(preflight, "probe_engine", lambda config, engine, t: {"engine": engine, "status": PENDING})
     monkeypatch.delenv("BENCH_CONFIG", raising=False)
     cli.main(["preflight", "--config", str(config_path), "--on", "modal"])
     assert os.environ["BENCH_CONFIG"] == str(config_path.resolve())
+
+
+class FakeEngine:
+    """An OpenAI-compatible endpoint: answers (with or without text and usage), refuses a parameter with
+    HTTP 400 echoing the caller's key, or fails with 503."""
+
+    def __init__(self, refuse=None, content="OK", usage=True, status=200):
+        fake = self
+        self.requests, self.refuse, self.content, self.usage, self.status = [], refuse, content, usage, status
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fake.requests.append({"headers": dict(self.headers), "body": body})
+                if fake.status != 200:
+                    code, answer = fake.status, {"error": {"message": "overloaded", "type": "server_error"}}
+                elif fake.refuse and fake.refuse in body:
+                    code, answer = 400, {"error": {"message": f"Unsupported parameter: {fake.refuse} "
+                                                              f"(request by {self.headers.get('Authorization')})",
+                                                   "type": "invalid_request_error"}}
+                else:
+                    code, answer = 200, {"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
+                                         "choices": [{"index": 0, "finish_reason": "stop",
+                                                      "message": {"role": "assistant", "content": fake.content}}]}
+                    if fake.usage:
+                        answer["usage"] = {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13,
+                                           "prompt_tokens_details": {"cached_tokens": 0}}
+                raw = json.dumps(answer).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+
+
+def engines_config(base_url, monkeypatch, slm_base_url="same", **production_params):
+    from bench.contracts.config import load_config
+    config = json.loads(json.dumps(load_config(paths.ROOT / "config.yaml")))
+    monkeypatch.setenv("PROBE_KEY", "probe-key-0001")
+    for name in ("SLM_VLLM_API_KEY", "SLM_MODAL_KEY", "SLM_MODAL_SECRET"):
+        monkeypatch.setenv(name, f"{name.lower()}-0001")
+    for role in ("production_llm", "cheap_alt"):
+        config["roles"][role]["endpoint"].update(base_url=base_url, api_key_env="PROBE_KEY")
+    config["roles"]["production_llm"]["params"].update(production_params)
+    for candidate in config["roles"]["slm_candidates"]:
+        candidate["endpoint"]["base_url"] = base_url if slm_base_url == "same" else slm_base_url
+    return config
+
+
+def temperatures_of(config):
+    return sorted({s["temperature"] for s in config["call_sites"].values()})
+
+
+def test_every_engine_answers_through_the_agents_own_client(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine() as server:
+        config = engines_config(server.base_url, monkeypatch, top_p=0.9)
+        check = check_engines(config)
+    temperatures = temperatures_of(config)
+    assert check["status"] == PASS and len(check["evidence"]) == 4 * len(temperatures)  # 2 LLMs and 2 candidates
+    assert all(p["cached_tokens_reported"] for p in check["evidence"])
+    sent = {(r["body"]["model"], r["body"]["temperature"]) for r in server.requests}
+    assert sent == {(m, t) for m in (config["roles"]["production_llm"]["model"], config["roles"]["cheap_alt"]["model"],
+                                     *[c["name"] for c in config["roles"]["slm_candidates"]]) for t in temperatures}
+    production = next(r for r in server.requests if r["body"]["model"] == config["roles"]["production_llm"]["model"])
+    body = production["body"]  # the agent's client's body: its own fields too, not a rebuilt one
+    assert (body["top_p"], body["max_tokens"], body["n"], body["stream"]) == (0.9, 4096, 1, False)
+    assert production["headers"]["Authorization"] == "Bearer probe-key-0001"
+    slm = next(r for r in server.requests if r["body"]["model"] == config["roles"]["slm_candidates"][0]["name"])
+    assert slm["headers"]["Modal-Key"] == "slm_modal_key-0001" and slm["headers"]["Authorization"] == "Bearer slm_vllm_api_key-0001"
+
+
+def test_an_engine_that_refuses_its_configured_parameters_fails_and_its_echoed_key_is_redacted(monkeypatch):
+    """The case an execution cannot tell from the model failing: a 400 on every call."""
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine(refuse="top_p") as server:
+        check = check_engines(engines_config(server.base_url, monkeypatch, top_p=0.9))
+    assert check["status"] == FAIL and "production_llm" in check["action"] and "cheap_alt" not in check["action"]
+    refused = [p for p in check["evidence"] if p["status"] == FAIL]
+    assert refused and all(p["engine"] == "production_llm" and p["kind"] == "model" for p in refused)
+    assert all("refused the configured parameters" in p["why"] and "<redacted>" in p["why"]
+               and "probe-key-0001" not in p["why"] for p in refused)
+
+
+@pytest.mark.parametrize("answer,problem", [({"content": ""}, "no text"), ({"usage": False}, "no usage")])
+def test_an_answer_without_text_or_usage_fails(monkeypatch, answer, problem):
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine(**answer) as server:
+        check = check_engines(engines_config(server.base_url, monkeypatch))
+    assert check["status"] == FAIL and all(problem in p["why"] for p in check["evidence"])
+
+
+def test_an_engine_that_does_not_answer_is_retried_then_fails_as_unreachable(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    from bench.agent import hooks
+    from bench.preflight import check_engines
+    monkeypatch.setattr(hooks, "_backoff", lambda n: None)
+    with FakeEngine(status=503) as server:
+        config = engines_config(server.base_url, monkeypatch)
+        check = check_engines(config)
+    attempts = config["retries"]["http_max_attempts"]
+    assert check["status"] == FAIL and all(p["kind"] == "transport" and "did not answer" in p["why"] for p in check["evidence"])
+    assert len(server.requests) == attempts * len(check["evidence"])  # retried as an execution retries
+
+
+def test_missing_credentials_are_pending_and_a_failure_outranks_pending(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine() as server:
+        config = engines_config(server.base_url, monkeypatch)
+        monkeypatch.delenv("SLM_MODAL_SECRET")  # a header credential of the candidates
+        pending = check_engines(config)
+    assert pending["status"] == PENDING
+    assert {p["engine"] for p in pending["evidence"] if p["status"] == PENDING} == \
+        {f"slm:{c['name']}" for c in config["roles"]["slm_candidates"]}
+    with FakeEngine() as server:  # the SLMs not served yet, the LLMs answering: nothing failed, something to do
+        unserved = check_engines(engines_config(server.base_url, monkeypatch, slm_base_url=None))
+    assert unserved["status"] == PENDING and {p["why"] for p in unserved["evidence"] if p["status"] == PENDING} == \
+        {"no endpoint.base_url yet"}
+    with FakeEngine(refuse="top_p") as server:  # Day 1: the SLMs not served yet, an LLM refusing a parameter
+        config = engines_config(server.base_url, monkeypatch, slm_base_url=None, top_p=0.9)
+        check = check_engines(config)
+    assert check["status"] == FAIL and "production_llm" in check["action"]
+
+
+def test_without_the_agent_environment_the_engines_are_pending(monkeypatch):
+    import sys
+    from bench.preflight import check_engines
+    monkeypatch.setitem(sys.modules, "langchain_openai", None)  # as in env/train, where LangChain is absent
+    check = check_engines(engines_config("http://127.0.0.1:9/v1", monkeypatch))
+    assert check["status"] == PENDING and all("agent environment" in p["why"] for p in check["evidence"])
+
+
+def test_the_preflight_report_never_carries_a_credential(tmp_path, monkeypatch):
+    import bench.preflight as preflight
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "embeddings-key-0001")
+    echoed = preflight._check("lora_parity", "P-4", FAIL, {"error": "PreflightError: HTTP 401 b'bad key embeddings-key-0001'"},
+                              "serve it")  # served_generate's error body, as check_lora_parity records it
+    monkeypatch.setattr(preflight, "run_checks", lambda config, parity_cluster=None, on="modal": [echoed])
+    preflight.preflight(str(config_path), on="local")  # not "modal", which exports BENCH_CONFIG for good
+    report = next(paths.RUNS.glob("preflight-*/report.json")).read_text()
+    assert "embeddings-key-0001" not in report and "<redacted>" in report

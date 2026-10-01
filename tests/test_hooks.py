@@ -251,6 +251,23 @@ def test_content_that_is_not_text_is_a_harness_failure_with_its_line(run):
     assert line["usage"]["source"] == "api" and line["usage"]["input"] == 12  # answered and billed
 
 
+def test_a_providers_error_that_echoes_a_key_is_recorded_without_it(run, monkeypatch):
+    import httpx
+    import openai
+    model, calls_path, _ = run
+    monkeypatch.setenv("OPENAI_API_KEY", "embeddings-key-0001")  # a credential of every configuration (C2)
+
+    def refuse(messages):
+        raise openai.BadRequestError("bad request from embeddings-key-0001", body=None,
+                                     response=httpx.Response(400, request=httpx.Request("POST", "http://x")))
+    model.script = []
+    model.invoke = refuse
+    with pytest.raises(openai.BadRequestError):
+        hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+    (line,) = read_calls(calls_path)
+    assert "embeddings-key-0001" not in line["error"] and "<redacted>" in line["error"]
+
+
 def test_the_agent_package_switches_tracing_off_and_runs_drop_chroma_servers(monkeypatch, tmp_path):
     import importlib
     import bench.agent

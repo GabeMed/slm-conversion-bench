@@ -251,7 +251,8 @@ def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):
             raise openai.AuthenticationError(body, response=httpx.Response(401, request=httpx.Request("POST", "http://x")), body=None)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Refusing())
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
-    assert "sk-proj-abc1" in (run_dir / "manifest.json").read_text()  # the local record keeps the provider's words
+    local = (run_dir / "manifest.json").read_text()  # no manifest keeps a credential, the local one included
+    assert "sk-proj" not in local and "<redacted>" in local and "Incorrect API key provided" in local
     committed = git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json")
     assert "sk-proj" not in committed and "<redacted>" in committed
 
