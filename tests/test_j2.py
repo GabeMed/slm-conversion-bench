@@ -71,6 +71,41 @@ def test_format_validity_of_one_run():
     assert j2.format_validity(calls)["select_tables"] == {"n": 2, "valid": 1, "attempts": 3, "rate": 0.5}
 
 
+def test_truncation_counts_cut_off_answers_and_leaves_lines_without_the_field_unknown():
+    def answered(question, finish_reason="absent", response="ok", site="select_tables", **kwargs):
+        line = call("a", question, site, response=response, **kwargs)
+        return line if finish_reason == "absent" else {**line, "finish_reason": finish_reason}
+    first = answered("3", "length", parsed_ok=False)
+    calls = [answered("1", "stop"), answered("2", "stop"),
+             first, answered("3", "stop", attempt=2, retry_of=first["call_id"]),  # every attempt is a call
+             answered("4", "stop", response=""), answered("5", "stop", response=" \n"),  # empty content: cut, whatever the reason
+             answered("6", None),                      # the provider reported no reason: unknown
+             answered("7", None, response=""),         # ... but an empty answer is cut
+             answered("8"), answered("9", response=""),  # no field (an older log): unknown, even when empty
+             answered("10", None, response=None, parsed_ok=False),  # failed before any answer: not counted
+             answered("1", "length", site="revise", key="revise_1:0"), answered("2", "tool_calls", site="revise", key="revise_1:0")]
+    table = j2.truncation(calls)
+    assert table["select_tables"] == {"answers": 10, "truncated": 4, "unknown": 3, "rate": 4 / 7}
+    assert table["revise"] == {"answers": 2, "truncated": 1, "unknown": 0, "rate": 0.5}
+    old_log = j2.truncation([answered("1"), answered("2")])["select_tables"]
+    assert old_log == {"answers": 2, "truncated": 0, "unknown": 2, "rate": None}  # nothing known: no rate, never 0%
+
+
+def test_judge_run_reports_truncation_by_call_site_and_records_what_it_read(tmp_path, monkeypatch):
+    world(tmp_path, monkeypatch)
+    payload = read_result(j2.run("replay-cheap"), "J2")
+    assert payload["reads"] == {"run": payload["reads"]["run"], "config": []} and payload["reads"]["run"]["run_id"] == "replay-cheap"
+    result = payload["result"]
+    assert (result["mode"], result["engine"]) == ("run", "cheap_alt")
+    assert set(result["truncation"]) == set(result["format_validity"])
+    # these C1 lines predate `finish_reason`: every answer is unknown
+    assert result["truncation"]["filter_column"] == {"answers": 2 * len(QUESTIONS), "truncated": 0,
+                                                    "unknown": 2 * len(QUESTIONS), "rate": None}
+    replayed = read_result(j2.run(replay_run_id="replay-cheap", replay_eval_run_id="eval-r", teacher_eval_run_id="eval-t"), "J2")
+    assert set(replayed["reads"]) == {"teacher", "replay", "replay_eval", "teacher_eval", "config"}
+    assert replayed["result"]["mode"] == "replay"
+
+
 def world(tmp_path, monkeypatch):
     repo(tmp_path, monkeypatch)
     t = teacher("agent-B0-calib", "calib", QUESTIONS)

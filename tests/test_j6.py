@@ -58,8 +58,14 @@ def zeroshot_world(tmp_path, monkeypatch, overrides=None):
 def test_run_writes_the_choice_fact(tmp_path, monkeypatch):
     config, runs = zeroshot_world(tmp_path, monkeypatch)
     path, fact = j6.run(runs, "eval-t", config)
-    result = read_result(path, "J6")["result"]
+    payload = read_result(path, "J6")
+    result = payload["result"]
     assert result["choice"] == "qwen3-8b" and result["score"]["qwen3-8b"] > result["score"]["granite-4.2-8b"]
+    # what it read: each candidate's executions, and the configuration keys
+    assert set(payload["reads"]) == {"qwen3-8b", "granite-4.2-8b", "config"}
+    assert payload["reads"]["config"] == ["roles.slm_candidates", "selection.footprint_gb", "selection.tie_tolerance",
+                                          "selection.triage"]
+    assert set(payload["reads"]["qwen3-8b"]) == {"teacher", "replay", "replay_eval", "teacher_eval"}
     assert facts.read_fact(str(fact), "choice")[0] == {"slm": "qwen3-8b"}
     assert result["choice_fact"]["sha256"] == fact.parent.name
 

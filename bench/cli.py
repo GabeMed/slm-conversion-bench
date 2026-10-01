@@ -147,10 +147,7 @@ def _f4(args) -> int:
             print(report.run(args.plan, config))
         elif args.judgment == "j2":
             from bench.judge import j2
-            from bench.judge.base import write_result
-            reads, result = (j2.judge_run(args.run) if args.run else
-                             j2.judge_replay(args.replay, args.replay_eval, args.teacher_eval))
-            print(write_result(j2.JUDGMENT, reads, result))
+            print(j2.run(args.run, args.replay, args.replay_eval, args.teacher_eval))
         elif args.judgment == "j3":
             from bench.judge import j3
             print(j3.run(args.run, args.eval, args.j8, config))
