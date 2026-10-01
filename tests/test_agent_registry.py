@@ -96,6 +96,73 @@ def test_the_intent_is_committed_before_anything_runs_and_the_manifest_after(rep
     assert str(root) not in committed + git(root, "show", f"HEAD~1:{intent}")
 
 
+def test_the_intent_is_on_origin_before_the_first_question(repo, monkeypatch):
+    """Published, not only committed: while the run answers its first call, origin's main already
+    holds the intent (and not the manifest, which does not exist yet)."""
+    root, config_path = repo
+    register(root, config_path)
+    origin, on_origin = root.parent / "origin.git", []
+
+    class Watching(ScriptedChess):
+        def invoke(self, messages):
+            if not on_origin:
+                on_origin.append(git(origin, "ls-tree", "-r", "--name-only", "main", "registry/test").split())
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert on_origin == [[f"registry/test/{run_dir.name}.intent.json"]]
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+
+
+def refused_before_spending(root, config_path, monkeypatch, match):
+    """Run on test expecting the intent's publication to refuse it; returns the intent left committed."""
+    calls = []
+
+    class Counting(ScriptedChess):
+        def invoke(self, messages):
+            calls.append(1)
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Counting())
+    with pytest.raises(barrier.TestSplitLocked, match=match):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert calls == []  # not one model call
+    assert not any(p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())  # and no run
+    (intent,) = git(root, "ls-files", "registry/test").split()
+    assert intent.endswith(".intent.json")
+    return intent
+
+
+def test_a_failed_push_of_the_intent_refuses_the_run_before_any_spend(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    origin = root.parent / "origin.git"
+    hook = origin / "hooks" / "pre-receive"  # origin refuses every push from here on (fetches still work)
+    hook.write_text("#!/bin/sh\necho 'pushes are closed' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    intent = refused_before_spending(root, config_path, monkeypatch, "not published \\(the push to origin/main failed")
+    assert git(origin, "ls-tree", "-r", "--name-only", "main", "registry/").split() == [registry.CALL_SITES_FILE]
+    # the intent stays committed here, the record of the attempt; until it is pushed nothing else runs on test
+    with pytest.raises(barrier.TestSplitLocked, match="push the registry first"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    hook.unlink()
+    git(root, "push", "-q", "origin", "main")
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+    assert intent in git(origin, "ls-tree", "-r", "--name-only", "main", "registry/test").split()
+
+
+def test_a_push_that_succeeds_is_still_confirmed_by_what_a_fetch_finds(repo, monkeypatch):
+    """The push's own answer is not the evidence: a push that lands somewhere else than the origin a
+    fetch reads (here, a separate push URL) leaves origin's main without the intent, and the run is refused."""
+    root, config_path = repo
+    register(root, config_path)
+    elsewhere = root.parent / "elsewhere.git"
+    git(root.parent, "clone", "-q", "--bare", str(root.parent / "origin.git"), str(elsewhere))
+    git(root, "config", "remote.origin.pushurl", str(elsewhere))
+    refused_before_spending(root, config_path, monkeypatch, "origin/main does not contain it after the push")
+    assert len(git(elsewhere, "ls-tree", "-r", "--name-only", "main", "registry/test").split()) == 1  # it was pushed
+
+
 def test_a_single_call_execution_on_test_is_registered_too(repo):
     root, config_path = repo
     register(root, config_path)
