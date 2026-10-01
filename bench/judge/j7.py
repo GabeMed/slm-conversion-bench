@@ -107,7 +107,7 @@ def passes(entry: Optional[Dict[str, Any]], noninferiority: NonInferiority, sett
 
 def allocate(clusters: List[str], evidence: Dict[str, Dict[str, Dict[str, Any]]], costs: Dict[str, Dict[str, float]],
              noninferiority: NonInferiority, settings: Dict[str, Any],
-             bars: Dict[str, Dict[str, Optional[float]]]) -> Dict[str, Dict[str, Any]]:
+             bars: Dict[str, Dict[str, Optional[Fraction]]]) -> Dict[str, Dict[str, Any]]:
     """{cluster: {"engine", "order", "evidence", ...}}; `evidence` is {engine: J2 compare by cluster},
     `costs` is {cluster: {engine: mean cost per invocation}}, `bars` is {engine: {cluster: agreement
     bar}} (an engine's replay may cover its own call sites). When more than one engine passes, the

@@ -245,6 +245,9 @@ def test_v3_confirms_at_the_lowest_utilization_and_refutes_at_the_highest():
     assert failing["verdict"] == "inconclusive (planned power 0.80, 0.80) (no SLM arm is non-inferior to B0)"
     both_worse = {"B0|B4": j4(False, diff=-0.2), "B0|B5": j4(False, diff=-0.2)}  # decided, not inconclusive: V1 and A6 refute
     assert v3(None, None, None, tests=both_worse)["verdict"] == "not testable (every SLM arm is worse than B0)"
+    capped = data_with(both_worse, {"B0": {"": 1.0}, "B4": {"20%": 0.25, "100%": 0.05}})
+    capped["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)  # nor does an upper-bound cost make it inconclusive
+    assert row(report.claims_map(capped), "V3")["verdict"] == "not testable (every SLM arm is worse than B0)"
     assert row(report.claims_map(data_with(j4_results(), {"B0": {"": 1.0}})), "V3")["verdict"] == "no data"
 
 
@@ -281,6 +284,11 @@ def test_a6_takes_b5_against_b0_under_the_utilization_bracket():
     # B5 against B0 is this row's (T7): a B5 that is worse than B0 refutes it, however cheap
     worse = {"B0|B4": j4(True), "B0|B5": j4(False, diff=-0.2)}
     assert a6({"20%": 0.4, "100%": 0.05}, tests=worse)["verdict"] == "refutes (B5 is worse than B0)"
+    capped = data_with(worse, {"B0": {"": 1.0}, "B5": {"20%": 0.4, "100%": 0.05}})
+    capped["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)  # a verdict on quality rests on no cost
+    assert row(report.claims_map(capped), "A6")["verdict"] == "refutes (B5 is worse than B0)"
+    capped["arms"]["B0"]["several_runs"] = ["b0-a", "b0-b"]
+    assert row(report.claims_map(capped), "A6")["verdict"].startswith("no verdict (several test runs")
     # allocated to an SLM, and no call of the execution reached one: an LLM system, which says nothing of A6
     llm_only = a6({"": 0.4}, j7={"allocation": {"c0": "slm"}})
     assert llm_only["verdict"] == "not testable (B5's execution made no SLM call)"

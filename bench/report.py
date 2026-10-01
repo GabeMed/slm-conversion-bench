@@ -724,9 +724,9 @@ def _a6(data, t5) -> Dict[str, str]:
         return {**row, "result": quality, "verdict": several_of(data, arms) or "not testable (B5's execution made no SLM call)"}
     result = (f"{quality}; cost per correct query: B5 {_usd(at_low)} at {low} utilization and {_usd(at_high)} at {high}, "
               f"against {_usd(base_cost)} of the best arm without training ({base})")
-    if outcome(t5) == "worse":
-        verdict = "refutes (B5 is worse than B0)"
-    elif at_high >= base_cost:
+    if outcome(t5) == "worse":  # decided on quality: no cost, and so no cost label, changes it
+        return {**row, "result": result, "verdict": several_of(data, arms) or "refutes (B5 is worse than B0)"}
+    if at_high >= base_cost:
         verdict = f"refutes (B5 is not cheaper even at {high} utilization)"
     elif at_low >= base_cost:
         verdict = f"utilization-dependent ({tipping_point(data, ['B5'], base_cost)})"
@@ -755,12 +755,13 @@ def _v3(data, t4, t5) -> Dict[str, str]:
     result = (f"cost per correct query, the best arm without training ÷ the cheapest SLM arm non-inferior to B0, per "
               f"utilization: {result or '—'}")
     passing = [a for a in slm_arms(data) if _passes_v1(data, a)]
+    if base is not None and slm_arms(data) and all(outcome(data["tests"].get(f"B0|{a}")) == "worse" for a in slm_arms(data)):
+        # decided on quality: no cost, and so no cost label, changes it
+        return {**row, "result": result, "verdict": several_of(data, arms) or "not testable (every SLM arm is worse than B0)"}
     if base is None or not slm_arms(data):
         verdict = "no data"
     elif not passing:
-        worse = all(outcome(data["tests"].get(f"B0|{a}")) == "worse" for a in slm_arms(data))
-        verdict = ("not testable (every SLM arm is worse than B0)" if worse
-                   else f"{_inconclusive(t4, t5)} (no SLM arm is non-inferior to B0)")
+        verdict = f"{_inconclusive(t4, t5)} (no SLM arm is non-inferior to B0)"
     elif low not in ratios or high not in ratios:
         verdict = "no data"
     elif readings[low] == "meets":
