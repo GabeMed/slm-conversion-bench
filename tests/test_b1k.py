@@ -46,7 +46,22 @@ def test_the_bound_is_j4s_paired_bootstrap():
     k0, k3 = correct(set(range(100, 150))), correct(set(range(120, 185)))
     mine = b1k.choose(k0, k3, seed=7, resamples=1000)
     j4 = noninferiority({i[0]: ok for i, ok in k3.items()}, {i[0]: ok for i, ok in k0.items()}, 5, 7, 1000)
-    assert (mine["diff"], mine["ci_low"]) == (j4["diff"], j4["ci_low"])
+    assert (mine["diff"], mine["ci_low"]) == (j4["diff"], j4["ci_low"])  # one gold call per question: the same bootstrap
+
+
+def test_the_question_is_the_bootstrap_unit():
+    """Ten questions with ten gold calls each: k = 3 gains every call of six questions and loses every
+    call of four. Resampled call by call, 100 independent pairs would put the bound above 0; a
+    question's calls move together, so there are ten units, and the bound is below 0."""
+    k0 = {(str(q), "revise", f"revise_{r}:0"): q >= 6 for q in range(10) for r in range(10)}
+    k3 = {identity: not ok for identity, ok in k0.items()}
+    result = b1k.choose(k0, k3, seed=3, resamples=2000)
+    assert (result["n"], result["n_questions"], result["ex_k0"], result["ex_k3"]) == (100, 10, 0.4, 0.6)
+    assert result["diff"] == pytest.approx(0.2) and result["ci_low"] < 0 and result["k"] == 0
+    # questions with more calls weigh more: EX is per call, not per question
+    uneven = {("1", "revise", f"revise_{r}:0"): False for r in range(3)} | {("2", "generate_candidate", "g:0"): True}
+    gained = b1k.choose(uneven, {identity: True for identity in uneven}, seed=3, resamples=200)
+    assert (gained["ex_k0"], gained["diff"]) == (0.25, 0.75)
 
 
 def test_the_two_replays_must_answer_the_same_invocations():
@@ -82,7 +97,8 @@ def test_run_chooses_k3_when_the_examples_earn_their_tokens(tmp_path, monkeypatc
     payload = json.loads(path.read_bytes())
     result = payload["result"]
     n = sum(1 for q in PILOT for _ in (["generate"] + (["revise"] if int(q) % 3 == 0 else [])))  # the gold calls of the pilot
-    assert (result["k"], result["n"]) == (3, n) and result["ex_k3"] > result["ex_k0"] and result["ci_low"] > 0
+    assert (result["k"], result["n"], result["n_questions"]) == (3, n, len(PILOT))
+    assert result["ex_k3"] > result["ex_k0"] and result["ci_low"] > 0
     assert result["pilot_ids"] == PILOT and (result["seed"], result["n_boot"]) == (config["seeds"]["bootstrap"], 500)
     assert 0 < result["ex_teacher"] <= 1
     assert payload["judgment"] == "b1k" and payload["reads"]["config"] == ["seeds.bootstrap", "stats.n_boot"]
