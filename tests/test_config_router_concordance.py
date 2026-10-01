@@ -290,6 +290,10 @@ def test_agreement_follows_the_decision_chess_takes():
     assert agree("filter_column", yes, {"is_column_information_relevant": "yes"})
     assert not agree("filter_column", yes, {"is_column_information_relevant": " yes"})  # CHESS drops " yes"
     assert agree("filter_column", no, {"is_column_information_relevant": "Not relevant"})  # both dropped
+    # a cut-off answer parses without the key, and CHESS drops the column: the same decision as a "no"
+    assert agree("filter_column", no, {"chain_of_thought_reasoning": "the column"})
+    assert not agree("filter_column", yes, {"chain_of_thought_reasoning": "the column"})
+    assert not agree("filter_column", yes, {"is_column_information_relevant": None})
     assert agree("select_tables", {"table_names": ["frpm", "schools"]}, {"table_names": ["schools", "frpm"]})
     assert not agree("select_tables", {"table_names": ["Schools"]}, {"table_names": ["schools"]})  # raw names
     assert agree("select_columns",

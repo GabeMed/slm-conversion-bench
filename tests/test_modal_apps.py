@@ -232,6 +232,7 @@ def test_the_apps_build_their_objects_without_an_account(apps):
 
     server = _spec(serve.Server)
     assert server.gpus == config["serving"]["gpu"] and server.cpu == config["serving"]["cpu"]
+    assert server.memory == config["serving"]["memory_gib"] * 1024  # the request is what J8 prices (MiB)
     offline = "Secret.from_dict([HF_HUB_OFFLINE])"  # the server's env: weights only from the volume, never downloaded
     assert _names(server) == ({common.HF_CACHE: hf, common.VLLM_CACHE: vllm, common.ADAPTERS: adapters}, sorted([offline, *key]))
     assert _names(_spec(serve.download)) == ({common.HF_CACHE: hf}, [])

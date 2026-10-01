@@ -27,7 +27,12 @@ def _unquote(name: str) -> str:
 
 
 def _keeps_column(output: Any) -> bool:
-    return output["is_column_information_relevant"].lower() == "yes"
+    """What CHESS does with a filter output (filter_column.py:65-72): the column stays only on a "yes",
+    and an output it cannot read (a cut-off answer still parses) drops the column."""
+    try:
+        return output["is_column_information_relevant"].lower() == "yes"
+    except (KeyError, TypeError, AttributeError):
+        return False
 
 
 def _column_pairs(output: Any) -> FrozenSet[Tuple[str, str]]:

@@ -74,12 +74,16 @@ def auth_headers(api_key: Optional[str], headers: Dict[str, str]) -> Dict[str, s
     return {**headers, **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
 
 
-def build_payloads(calls: List[Dict[str, Any]], model: str, params: Dict[str, Any], stream: bool) -> List[Dict[str, Any]]:
-    """One request body per C1 line, as the agent's client sends it, addressed to `model`."""
+def build_payloads(calls: List[Dict[str, Any]], model: str, params: Dict[str, Any], stream: bool,
+                   call_sites: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One request body per C1 line, as the agent's client sends it, addressed to `model`. The
+    temperature is the call site's (`call_sites`, the configuration's), as the client sends: what C1
+    records is the effective one, which a provider that forces its own may have changed."""
     extra = {k: v for k, v in params.items() if k not in CLIENT_ONLY_PARAMS}
     payloads = []
     for call in calls:
-        body = {"model": model, "messages": call["prompt_messages"], "temperature": call["temperature"]}
+        body = {"model": model, "messages": call["prompt_messages"],
+                "temperature": float(call_sites[call["call_site"]]["temperature"])}
         if params.get("max_tokens") is not None:
             body["max_tokens"] = params["max_tokens"]
         body.update(extra)
@@ -299,7 +303,8 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 raise LoadtestError(f"environment variable {endpoint['api_key_env']} is not set")
         headers = env_headers(endpoint.get("headers_env"))
     source_run = _source_calls(config, source)
-    payloads = build_payloads(source_run["calls"], spec["model"], spec.get("params") or {}, settings["stream"])
+    payloads = build_payloads(source_run["calls"], spec["model"], spec.get("params") or {}, settings["stream"],
+                              config["call_sites"])
     warmup = payloads[:min(settings["warmup_request_count"], len(payloads))]
     tok = _tokenizer(config, engine, tokenizer)
     vllm = endpoint["kind"] == "vllm"

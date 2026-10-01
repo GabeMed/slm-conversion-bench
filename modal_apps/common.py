@@ -27,7 +27,7 @@ RESULTS = "results"     # beside them: <plan id>.json once a training finished, 
 STATE_DIR = "bench-serving"  # on the vLLM-cache volume: what each running server observed about itself
 PORT = 8000
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)  # vllm/config/lora.py:MaxLoRARanks @ v0.30.0
-SERVING_KEYS = ("vllm_version", "base_image", "gpu", "cpu", "max_model_len", "gpu_memory_utilization",
+SERVING_KEYS = ("vllm_version", "base_image", "gpu", "cpu", "memory_gib", "max_model_len", "gpu_memory_utilization",
                 "prefix_caching", "generation_config", "max_concurrent_requests", "startup_timeout_s",
                 "download_timeout_s", "warmup_timeout_s", "unauthenticated")
 DEPLOY_FILE = ROOT / "modal_apps" / "deploy.yaml"

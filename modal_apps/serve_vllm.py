@@ -57,7 +57,8 @@ def download() -> str:
     return path
 
 
-@app.server(image=image, gpu=PLAN["gpu"], cpu=PLAN["cpu"], port=common.PORT, secrets=[api_key],
+@app.server(image=image, gpu=PLAN["gpu"], cpu=PLAN["cpu"], memory=PLAN["memory_gib"] * 1024,  # MiB: what J8 prices
+            port=common.PORT, secrets=[api_key],
             volumes={common.HF_CACHE: hf_cache, common.VLLM_CACHE: vllm_cache, common.ADAPTERS: adapters},
             env={"HF_HUB_OFFLINE": "1"}, min_containers=PLAN["min_containers"], max_containers=1,
             max_concurrency=PLAN["max_concurrent_requests"], scaledown_window=PLAN["scaledown_window_s"],
