@@ -743,8 +743,8 @@ def pipeline(tmp_path, monkeypatch):
     config = teacher_config(config)
     config["roles"]["production_llm"]["model"] = "teacher-model"
     config["prices"] = {"as_of": "2026-09-30", "table": {
-        "teacher-model": {"input_per_mtok": 3.0, "cached_input_per_mtok": 0.3, "output_per_mtok": 12.0, "batch_discount": 0.5},
-        "engine-model": {"input_per_mtok": 0.2, "cached_input_per_mtok": 0.02, "output_per_mtok": 0.6, "batch_discount": 0.5}}}
+        "teacher-model": {"provider": "provider-x", "input_per_mtok": 3.0, "cached_input_per_mtok": 0.3, "output_per_mtok": 12.0, "batch_discount": 0.5},
+        "engine-model": {"provider": "provider-x", "input_per_mtok": 0.2, "cached_input_per_mtok": 0.02, "output_per_mtok": 0.6, "batch_discount": 0.5}}}
     config["cost"].update(p95_slo_cap_ms=1000, slo_from="agent-B0-slo")
     config["modal"] = {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600},  # F3's key
                                       "cpu_usd_per_core_s": 0.0, "memory_usd_per_gib_s": 0.0}}

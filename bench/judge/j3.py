@@ -4,7 +4,8 @@ correct query.
 - **API engines** (`production_llm`, `cheap_alt`): each call's `usage` × `prices.table[<model>]`,
   the model as C1 records it: uncached input, cached input and output tokens, each at its price per
   million. A price is one provider's: the entry carries `provider`, and a call whose C1 `provider`
-  differs from it is refused, never priced at another provider's price (design §6.3, T6).
+  differs from it is refused, never priced at another provider's price (design §6.3, T6). An entry
+  that names no provider prices nothing.
   Variants are recomputed from the same `usage`, never by running again: `standard`,
   `no_cache` (cached tokens at the input price) and `batch` (standard less the entry's
   `batch_discount`, when the table has one). Retries are calls and are priced (SPEC §2).
@@ -98,7 +99,7 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
         entry = table.get(call["model"])
         if entry is None:
             raise JudgmentError(f"prices.table has no entry for model {call['model']!r}")
-        if call.get("provider") != entry.get("provider"):
+        if entry.get("provider") is None or call.get("provider") != entry["provider"]:
             raise JudgmentError(f"call {call['call_id']} was served by provider {call.get('provider')!r}, and the price "
                                 f"entry of {call['model']!r} is of provider {entry.get('provider')!r}: a price is one provider's")
         counts["cache_not_reported"] += use["source"] == "api" and use["cached_input"] is None

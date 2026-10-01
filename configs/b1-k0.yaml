@@ -1,0 +1,7 @@
+# B1's few-shot choice (SPEC 6.4, D23; RUNBOOK step 7): the pilot replay on cheap_alt with no examples.
+# Also what the smoke test runs B1 with, before any teacher log exists to take examples from.
+extends: ../config.yaml
+
+arms:
+  B1:
+    few_shot: {k: 0}

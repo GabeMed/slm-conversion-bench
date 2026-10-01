@@ -18,8 +18,8 @@ from fixtures.world import GOLD_SITES, gold_correct, per_call_eval, replay, teac
 
 QUESTIONS = [str(q) for q in range(1000, 1200)]
 PRICES = {"as_of": "2026-09-30", "table": {
-    "teacher-model": {"input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0, "batch_discount": 0.5},
-    "engine-model": {"input_per_mtok": 0.5, "cached_input_per_mtok": 0.05, "output_per_mtok": 1.5, "batch_discount": 0.5}}}
+    "teacher-model": {"provider": "provider-x", "input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0, "batch_discount": 0.5},
+    "engine-model": {"provider": "provider-x", "input_per_mtok": 0.5, "cached_input_per_mtok": 0.05, "output_per_mtok": 1.5, "batch_discount": 0.5}}}
 
 
 def loadtest(run_id, concurrency, p95_ms, rps):

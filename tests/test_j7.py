@@ -166,7 +166,7 @@ def cluster_of(c):
 
 def allocation_world(tmp_path, monkeypatch):
     config_path, config = repo(tmp_path, monkeypatch, {
-        "prices": {"as_of": "2026-09-30", "table": {"engine-model": {"input_per_mtok": 0.5, "cached_input_per_mtok": 0.05,
+        "prices": {"as_of": "2026-09-30", "table": {"engine-model": {"provider": "provider-x", "input_per_mtok": 0.5, "cached_input_per_mtok": 0.05,
                                                                      "output_per_mtok": 1.5, "batch_discount": 0.5}}},
         "allocation": {"min_calls": 5}, "stats": {"n_boot": 100}})
     embedding = {"model": "fake-embedder", "revision": "0" * 40, "max_seq_length": 64, "truncation": "tail", "text": "prompt"}

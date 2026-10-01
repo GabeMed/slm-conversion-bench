@@ -420,9 +420,13 @@ Cada uma com a ação de corte correspondente:
 
 | | Manhã | Tarde / noite |
 |---|---|---|
-| **Dia 1** | Estágio 0 (6.1), pré-condições (7.1), piloto, projeção de tempo e gasto, pré-registro | K1 (logs), S2 e S3; disparar os treinos do S5 para rodar à noite |
-| **Dia 2** | S6 (uma volta) e K2 e K4 no teste | custo, estatística, relatório |
+| **Dia 1** | Estágio 0 (6.1), pré-condições (7.1), piloto, projeção de tempo e gasto | K1 (logs), a escolha do k do B1, S2, S3 e S4; disparar os treinos do S5 para rodar à noite |
+| **Dia 2** | S6 (uma volta), o pré-registro, e K2 e K4 no teste | custo, estatística, relatório |
 
+- **O pré-registro vem depois do S6 e antes de qualquer pergunta do teste.**
+  - Ele registra a configuração final, e ela nomeia o que os braços usam: a escolha do S4, os centróides, os adaptadores e a alocação. Tudo isso só existe depois do treino.
+  - Os exemplos do B1 saem dos logs de treino, então a escolha do seu k (6.4) também vem depois do K1.
+  - As regras de veredito estão publicadas e carimbadas desde o Estágio 0. Entre o Estágio 0 e o pré-registro só mudam esses fatos e os valores que uma regra já fixada calcula, e a diferença entre os dois commits é pública.
 - **Se o tempo ou o orçamento apertarem,** cortam-se as extensões na ordem inversa da lista, e depois a volta de re-treino do S6 (declarada; o K4 roda sem ela).
 - **Nunca se cortam:**
   - K2 (a comparação com o caminho sem treino);
@@ -577,6 +581,7 @@ Antes de qualquer execução paga, o desenho passou por uma auditoria de validad
 | O treino sobre todas as chamadas do filtro de colunas não cabia em 2 dias | S2 e D21 |
 | Uma execução interrompida já contava como segunda execução; a data do registro dependia só do git | 6.1 e D22 |
 | O few-shot do B1 seria fixado sem dado | D23 |
+| O pré-registro estava na manhã do Dia 1, antes de existir o que a configuração final nomeia (os adaptadores, a alocação, o k do B1) | 7.3 |
 | O piloto era mais fácil que o teste | 6.4 |
 | O mapa não dizia o alcance | seção 5 |
 | "Latência justa" prometia um perfil de carga igual, que API e GPU própria não têm | 6.7 |

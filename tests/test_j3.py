@@ -8,8 +8,8 @@ from bench.judge.base import JudgmentError, canonical, read_result, write_result
 from fixtures.fake import call, repo, usage, write_run
 
 PRICES = {"as_of": "2026-09-30", "table": {
-    "teacher-model": {"input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0, "batch_discount": 0.5},
-    "cheap-model": {"input_per_mtok": 0.2, "cached_input_per_mtok": 0.2, "output_per_mtok": 0.6}}}
+    "teacher-model": {"provider": "provider-x", "input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0, "batch_discount": 0.5},
+    "cheap-model": {"provider": "provider-x", "input_per_mtok": 0.2, "cached_input_per_mtok": 0.2, "output_per_mtok": 0.6}}}
 SLM = {"20%": 0.010, "50%": 0.004, "100%": 0.002}
 
 
@@ -185,14 +185,17 @@ def test_a_call_is_priced_only_at_its_own_providers_price():
     """T6: the price entry of an API model carries `provider`, and a call another provider served is
     refused, never priced at the wrong provider's price."""
     prices = {"as_of": "2026-09-30", "table": {"teacher-model": {**PRICES["table"]["teacher-model"], "provider": "provider-a"}}}
-    served_by = lambda provider: {**teacher_call("1"), "provider": provider}  # noqa: E731
+    served_by = lambda provider: teacher_call("1", provider=provider)  # noqa: E731
     assert j3.judge([served_by("provider-a")], ["1"], None, prices, "teacher-model")["total"]["standard"] == pytest.approx(2.2)
     with pytest.raises(JudgmentError, match="served by provider 'provider-b'.*is of provider 'provider-a'"):
         j3.judge([served_by("provider-b")], ["1"], None, prices, "teacher-model")
     with pytest.raises(JudgmentError, match="served by provider None"):  # a C1 line that records no provider
-        j3.judge([teacher_call("1")], ["1"], None, prices, "teacher-model")
-    with pytest.raises(JudgmentError, match="is of provider None"):       # an entry that names none
-        j3.judge([served_by("provider-a")], ["1"], None, PRICES, "teacher-model")
+        j3.judge([served_by(None)], ["1"], None, prices, "teacher-model")
+    unnamed = {"as_of": "2026-09-30", "table": {"teacher-model": {k: v for k, v in PRICES["table"]["teacher-model"].items()
+                                                                  if k != "provider"}}}
+    for provider in ("provider-a", None):  # an entry that names none prices nothing, a call that names none included
+        with pytest.raises(JudgmentError, match="is of provider None"):
+            j3.judge([served_by(provider)], ["1"], None, unnamed, "teacher-model")
     slm = {**call("r", "1", "filter_column", "t.a", parsed={}, role="slm", engine="slm:q+lora:c0", model="m",
                   use=usage(1000, 0, 0)), "provider": None}
     assert j3.judge([slm], ["1"], None, prices, "teacher-model", SLM)["slm_calls"] == 1  # the SLM has no price entry

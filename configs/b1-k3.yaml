@@ -1,0 +1,7 @@
+# B1's few-shot choice (SPEC 6.4, D23; RUNBOOK step 7): the pilot replay on cheap_alt with 3 examples
+# per call site, taken from config.yaml's arms.B1.few_shot.source_run (the teacher's run on train).
+extends: ../config.yaml
+
+arms:
+  B1:
+    few_shot: {k: 3}
