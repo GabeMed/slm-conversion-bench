@@ -112,6 +112,7 @@ seeds:                         # distinct values, so a seed read for another's p
   schema_shuffle: 20260931
   bootstrap: 20260932
   few_shot: 20260933           # B1's examples (arms.B1.few_shot)
+  curation_sample: 20260934    # S2's cap (curation.max_per_question_call_site)
 
 splits:
   calib_size: 200
@@ -161,7 +162,10 @@ eval:
 
 stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are in thresholds and seeds
   n_boot: 10000                # paired-bootstrap resamples for the one-sided lower bound
-  pilot_size: 50               # calibration ids that measure d before the test (bench.data.pilot_sample)
+  pilot_size: 50               # calibration ids that measure d before the test (bench.data.pilot_ids)
+  # how many pilot ids of each difficulty, summing to pilot_size: the test's mix (30/50/20%), not the
+  # calibration's, which is mostly simple; drawn within each difficulty, a short one is an error
+  pilot_mix: {simple: 15, moderate: 25, challenging: 10}
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
@@ -204,7 +208,7 @@ serving:                       # vLLM, one candidate per server, its adapters be
 
 train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
   gpu: L40S
-  timeout_s: 21600
+  timeout_s: 39600             # 11 h: one adapter, alone in its container
   seed: 20260930
   precision: bf16              # on a GPU; a CPU run trains in float32
   lora: {r: 16, alpha: 32, dropout: 0.05,
@@ -233,7 +237,9 @@ loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's 
 
 preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
   lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
-  schedule: {train_hours_max: 12}   # all adapters must train overnight (SPEC 7.3, Day 1 night)
+  # the adapters train at the same time, one container each, so the largest one's projected hours are
+  # what must fit the night (SPEC 7.3, Day 1 night)
+  schedule: {train_hours_max: 12}
 
 # ---------------------------------------------------------------- F4: S2, S3, the judgments, the report
 # (bench/curate.py, bench/embed.py, bench/judge/j2-j8, bench/report.py). `prices.table` above is read
@@ -249,6 +255,10 @@ curation:                      # S2 (SPEC §4 S2)
     # full of long numeric ids (e.g. 14-digit school codes) that are data, not payment cards
     card: {pattern: '(?<![\w-])\d{4}(?:[ -]\d{4}){3}(?:[ -]\d{1,3})?(?![\w-])', placeholder: '[CARD]', check: luhn}
   near_duplicate: {shingle_words: 5, num_perm: 128, threshold: 0.9, template_share: 0.5}
+  # after the filter and the duplicates, at most this many invocations of each (question, call site),
+  # a uniform sample with seeds.curation_sample: the column filter runs once per column of the
+  # database, and whole it does not train in a night (lower it when preflight's training_time fails)
+  max_per_question_call_site: 4
   rule_of_thumb: [10000, 100000]  # examples per task (paper p.9), reported against, not a floor
 clustering:                    # S3 (J5) and the `embed` execution
   # the embedding J5 writes into the centroids fact, and so the one `assign` uses (the orchestrator's
