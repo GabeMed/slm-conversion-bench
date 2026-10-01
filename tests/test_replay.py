@@ -210,3 +210,15 @@ def test_a_source_whose_snapshot_changed_is_refused(monkeypatch, repo, source):
     snapshot.write_text(json.dumps(config))
     with pytest.raises(runner.data.DataError, match="does not match its manifest"):
         replay(str(repo), source, engine="production_llm")
+
+
+def test_the_cli_passes_the_ids_and_the_workers(monkeypatch, capsys):
+    from bench import cli
+    from bench.agent import replay as replay_module
+    seen = {}
+    monkeypatch.setattr(replay_module, "replay", lambda config, source, **kwargs: seen.update(replay=(source, kwargs)) or "r")
+    monkeypatch.setattr(runner, "run_agent", lambda config, arm, split, **kwargs: seen.update(run=kwargs) or "a")
+    assert cli.main(["replay", "agent-B0-calib-x", "--engine", "cheap_alt", "--ids", "7", "8"]) == 0
+    assert seen["replay"] == ("agent-B0-calib-x", {"engine": "cheap_alt", "arm": None, "call_sites": None, "ids": ["7", "8"]})
+    assert cli.main(["run", "--arm", "B0", "--split", "calib", "--workers", "8"]) == 0
+    assert cli.main(["run", "--arm", "B0", "--split", "calib"]) == 0 and seen["run"]["workers"] == 1  # the default

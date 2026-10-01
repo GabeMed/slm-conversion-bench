@@ -32,6 +32,8 @@ def main(argv=None) -> int:
     group.add_argument("--ids", nargs="+", help="question ids, all inside the split")
     group.add_argument("--limit", type=int, help="the first N questions of the split, by id")
     p.add_argument("--engine", choices=("production_llm", "cheap_alt"), help="B2 only: the engine of the single call")
+    p.add_argument("--workers", type=int, default=1,
+                   help="answer the questions in this many processes: still one run and one manifest (default 1)")
 
     # ---- F1: replay and the call-site registry
     p = sub.add_parser("replay", help="resend the first attempt of every invocation of a B0 run to another engine")
@@ -88,7 +90,8 @@ def main(argv=None) -> int:
             preprocess(args.config, args.db)
         elif args.command == "run":
             from bench.agent.runner import run_agent
-            print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine))
+            print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
+                            workers=args.workers))
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,

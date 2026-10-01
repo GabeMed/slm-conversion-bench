@@ -19,7 +19,9 @@ Two kinds of failure, kept apart:
   `take_harness_errors()` to fail the run instead of recording it as done.
 
 State is process-global: one run and one question at a time per process. The tools of a question
-call the model from several threads; the writer and the counters are shared under a lock.
+call the model from several threads; the writer and the counters are shared under a lock. A run
+split over worker processes (`bench run --workers`) gives each its own C1 file and one shared
+`stop` flag: once any worker's question fails, every worker refuses its next model call.
 """
 import json
 import os
@@ -61,9 +63,9 @@ class HarnessError(RuntimeError):
 
 
 class RunAborted(RuntimeError):
-    """A model call refused because its run has already failed (a harness error, recorded once):
-    a failed run spends nothing more, within the question as after it. Not recorded again, and
-    CHESS swallows it like any tool error."""
+    """A model call refused because its run has already failed (a harness error, recorded once, or
+    a question that failed in another worker): a failed run spends nothing more, within the question
+    as after it. Not recorded again, and CHESS swallows it like any tool error."""
 
 
 @dataclass
@@ -78,6 +80,7 @@ class _RunState:
     occurrences: Dict[tuple, int] = field(default_factory=dict)
     harness_errors: List[str] = field(default_factory=list)
     unregistered_call_sites: set = field(default_factory=set)
+    stop: Any = None  # an Event shared by the worker processes of one run: set when a question failed in any
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -116,9 +119,10 @@ def max_workers() -> int:
 
 def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Optional[str] = None,
               few_shot: Optional[Dict[str, List[Dict[str, str]]]] = None,
-              allowed_call_sites: Optional[List[str]] = None) -> None:
+              allowed_call_sites: Optional[List[str]] = None, stop: Any = None) -> None:
     """`engine` fixes the engine of every call (no routing); `few_shot` is the prefix per call site
-    for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site."""
+    for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site; `stop`
+    is the flag the worker processes of one run share (set: no further model call)."""
     global _run
     if _config is None:
         raise HarnessError("hooks.configure() must run before start_run()")
@@ -128,7 +132,8 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
     calls_path.touch()
     prefix = None if few_shot is None else {site: _lc_messages(messages) for site, messages in few_shot.items()}
     _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, few_shot=prefix,
-                     allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites))
+                     allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites),
+                     stop=stop)
 
 
 def set_question(question_id: str) -> None:
@@ -430,6 +435,8 @@ def _refuse_if_failed(run: _RunState, call_site: str) -> None:
     with run.lock:
         if run.harness_errors:
             raise RunAborted(f"{call_site}: the run has failed ({run.harness_errors[0][:200]}): no further model call")
+    if run.stop is not None and run.stop.is_set():
+        raise RunAborted(f"{call_site}: the run has failed in another worker: no further model call")
 
 
 def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any], parser: Any) -> Any:

@@ -43,7 +43,7 @@ def test_extends_cycle(tmp_path):
 
 def test_the_shipped_engine_settings_are_the_decided_ones():
     """The API roles' token budget covers the reasoning and the answer and their timeout a long
-    reasoning (16384 and 900 s); the SLM candidates keep 4096."""
+    reasoning (16384 and 900 s); the SLM candidates keep 4096; and 32 calls of one step may be in flight."""
     config = load_config(BASE)
     for role in ("production_llm", "cheap_alt"):
         params = config["roles"][role]["params"]
@@ -51,6 +51,7 @@ def test_the_shipped_engine_settings_are_the_decided_ones():
         assert config["roles"][role]["reasoning"]["enabled"] is True
     assert config["roles"]["cheap_alt"]["params"]["reasoning_effort"] == "medium"
     assert {c["params"]["max_tokens"] for c in config["roles"]["slm_candidates"]} == {4096}
+    assert config["agent"]["max_workers"] == 32
 
 
 ROUTING = {"only": ["a-provider"], "allow_fallbacks": False, "require_parameters": True, "quantizations": ["fp8"]}

@@ -381,3 +381,26 @@ def test_the_agent_package_switches_tracing_off_and_runs_drop_chroma_servers(mon
     monkeypatch.setenv("chroma_server_ssl_enabled", "true")  # Chroma reads its variables in any case
     runner._prepare_chess(load_config(SMOKE), tmp_path)
     assert "CHROMA_SERVER_HOST" not in os.environ and "chroma_server_ssl_enabled" not in os.environ
+
+
+def test_a_run_stopped_by_another_worker_makes_no_further_model_call(tmp_path, monkeypatch):
+    """`bench run --workers`: the workers of a run share one flag. Once it is set (a question failed
+    in any of them), a call is refused before the model is asked, as after this process's own failure:
+    no C1 line, and nothing recorded as this worker's harness error."""
+    import threading
+    stop = threading.Event()
+    hooks.configure(load_config(SMOKE))
+    hooks.start_run("test-run", "B0", tmp_path / "calls.w1.jsonl", stop=stop)
+    hooks.set_question("1470")
+    model = ScriptedModel()
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: model)
+    try:
+        model.script = ['{"table_names": ["t"]}'] * 2
+        hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+        stop.set()
+        with pytest.raises(hooks.RunAborted, match="failed in another worker"):
+            hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
+        assert model.calls == 1 and len(read_calls(tmp_path / "calls.w1.jsonl")) == 1
+        assert hooks.take_harness_errors() == []
+    finally:
+        hooks.end_run()

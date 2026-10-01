@@ -74,7 +74,7 @@ roles:
 # by C4. Temperatures live in `call_sites`, never here.
 agent:
   setting_name: CHESS_IR_SS_CG
-  max_workers: 8               # LLM calls of one step in flight at once (patch 9); published: unbounded
+  max_workers: 32              # LLM calls of one step in flight at once (patch 9); published: unbounded
   # the order the agents run in (CHESS takes it from the order of team_agents, which a serializer
   # may sort; it is explicit here, and part of the configuration's identity)
   team_order: [information_retriever, schema_selector, candidate_generator]
