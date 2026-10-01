@@ -1,4 +1,5 @@
-"""Front R's options of the `bench` command (design §6.3): `judge j7 --teacher-self-replay`."""
+"""Front R's options of the `bench` command (design §6.3): `judge j7 --teacher-self-replay` and
+`prereg --replace --reason`."""
 import pytest
 
 from bench import cli
@@ -24,3 +25,19 @@ def test_judge_j7_without_the_self_replay_is_refused(tmp_path, monkeypatch, caps
     with pytest.raises(SystemExit) as refused:
         cli.main(J7 + ["--config", str(config_path)])
     assert refused.value.code == 2 and "--teacher-self-replay" in capsys.readouterr().err
+
+
+def test_prereg_passes_the_reason_of_a_replacement(tmp_path, monkeypatch, capsys):
+    from bench import prereg
+    config_path, _ = repo(tmp_path, monkeypatch)
+    seen = {}
+
+    def register(config, replace=False, reason=None):
+        seen.update(config=config, replace=replace, reason=reason)
+        return {"hash": "h" * 64, "commit": "c" * 40, "new": True, "unset": []}
+    monkeypatch.setattr(prereg, "register", register)
+    assert cli.main(["prereg", "--config", str(config_path), "--replace", "--reason", "the pilot was not stratified"]) == 0
+    assert (seen["replace"], seen["reason"]) == (True, "the pilot was not stratified")
+    assert cli.main(["prereg", "--config", str(config_path)]) == 0
+    assert (seen["replace"], seen["reason"]) == (False, None)
+    assert capsys.readouterr().out.count("committed at") == 2

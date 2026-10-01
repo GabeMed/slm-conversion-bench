@@ -3,6 +3,7 @@ configuration and no other, once the author pushes it; and `bench eval` scores a
 the run was made under the registration in force."""
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 
@@ -27,6 +28,7 @@ def git(cwd, *args):
 
 
 CODE = paths.ROOT  # this repository, taken before any test points bench.paths elsewhere
+REASON = "the first registration hashed the wrong splits"  # what --replace must say (T13)
 ANALYSIS = ["bench/data.py", "bench/evaluate.py", "bench/judge/__init__.py", "bench/judge/j1.py", "bench/judge/j4.py",
             "bench/paths.py", *git(CODE, "ls-files", "bench/contracts").splitlines()]
 
@@ -110,8 +112,40 @@ def test_registering_again_changes_nothing_and_replacing_needs_asking(repo):
     git(repo, "commit", "-q", "-am", "spec v2")
     with pytest.raises(PreregError, match="--replace"):
         register("config.yaml", root=repo)
-    second = register("config.yaml", root=repo, replace=True)
+    second = register("config.yaml", root=repo, replace=True, reason=REASON)
     assert second["hash"] != first["hash"] and (repo / "prereg" / "HASH").read_text().strip() == second["hash"]
+
+
+def test_replacing_a_registration_needs_its_reason_which_becomes_a_line_of_deviations(repo):
+    """T13: `--replace` needs `--reason`; the defect is one dated line of prereg/DEVIATIONS.md, committed
+    with the new manifest and HASH."""
+    deviations = repo / "prereg" / "DEVIATIONS.md"
+    first = register("config.yaml", root=repo)
+    assert not deviations.exists()  # a first registration deviates from nothing
+    (repo / "SPEC.md").write_text("protocol, v2\n")
+    git(repo, "commit", "-q", "-am", "spec v2")
+    head = git(repo, "rev-parse", "HEAD")
+    for no_reason in (None, "", "  \n "):
+        with pytest.raises(PreregError, match="--replace needs --reason"):
+            register("config.yaml", root=repo, replace=True, reason=no_reason)
+    with pytest.raises(PreregError, match="a different pre-registration is in force"):
+        register("config.yaml", root=repo, reason=REASON)  # a reason alone replaces nothing
+    assert git(repo, "rev-parse", "HEAD") == head and not deviations.exists() and git(repo, "status", "--porcelain") == ""
+    second = register("config.yaml", root=repo, replace=True, reason="the SPEC named\n the wrong pilot ")
+    (line,) = deviations.read_text().splitlines()
+    assert re.fullmatch(rf"- \d{{4}}-\d{{2}}-\d{{2}} · {second['hash']} replaces {first['hash']}: the SPEC named the wrong pilot", line)
+    assert git(repo, "status", "--porcelain") == ""  # committed with the registration, in one commit
+    assert sorted(git(repo, "show", "--name-only", "--format=", "HEAD").split()) == [
+        "prereg/DEVIATIONS.md", "prereg/HASH", "prereg/manifest.json"]
+    # registering the same inputs again replaces nothing: no new line, with or without --replace
+    assert register("config.yaml", root=repo, replace=True, reason=REASON)["new"] is False
+    assert deviations.read_text().splitlines() == [line]
+    (repo / "SPEC.md").write_text("protocol, v3\n")
+    git(repo, "commit", "-q", "-am", "spec v3")
+    third = register("config.yaml", root=repo, replace=True, reason=REASON)
+    assert deviations.read_text().splitlines()[0] == line and len(deviations.read_text().splitlines()) == 2
+    assert deviations.read_text().splitlines()[1].endswith(f"· {third['hash']} replaces {second['hash']}: {REASON}")
+    check_registered_analysis_code(repo)  # the file changes nothing the barrier or the registered code reads
 
 
 def test_register_refuses_a_configuration_outside_the_repository_or_without_stats(repo, tmp_path):
@@ -134,7 +168,7 @@ def test_editing_any_analysis_file_changes_the_registration(repo, rel):
     git(repo, "commit", "-q", "-m", f"edit {rel}")
     with pytest.raises(PreregError, match="--replace"):
         register("config.yaml", root=repo)
-    second = register("config.yaml", root=repo, replace=True)
+    second = register("config.yaml", root=repo, replace=True, reason=REASON)
     manifest = json.loads((repo / "prereg" / "manifest.json").read_text())
     assert second["hash"] != first["hash"] and manifest["analysis_code"][rel] == sha256(path)
 
@@ -174,7 +208,8 @@ def test_a_malformed_registration_is_replaced_only_on_request(repo):
         register("config.yaml", root=repo)
     with pytest.raises(PreregError, match="not a JSON object: no analysis code is registered"):
         check_registered_analysis_code(repo)
-    assert register("config.yaml", root=repo, replace=True)["new"]
+    assert register("config.yaml", root=repo, replace=True, reason=REASON)["new"]
+    assert (repo / "prereg" / "DEVIATIONS.md").read_text().endswith(f" replaces a broken registration: {REASON}\n")
 
 
 @pytest.mark.parametrize("damage", [b"0" * 64 + b"\n", b"\xff\xfe\n", None])  # wrong, not UTF-8, missing
@@ -190,7 +225,7 @@ def test_a_registration_whose_hash_is_not_its_manifests_is_repaired_only_on_requ
     git(repo, "commit", "-q", "-m", "a damaged HASH")
     with pytest.raises(PreregError, match="the registration in prereg/ is broken"):
         register("config.yaml", root=repo)
-    repaired = register("config.yaml", root=repo, replace=True)  # a new registration (it records its own commit), intact
+    repaired = register("config.yaml", root=repo, replace=True, reason=REASON)  # a new registration (it records its own commit), intact
     manifest_sha = hashlib.sha256((repo / "prereg" / "manifest.json").read_bytes()).hexdigest()
     assert repaired["new"] and repaired["hash"] == hash_path.read_text().strip() == manifest_sha != registered["hash"]
 
@@ -243,7 +278,7 @@ def test_the_extends_chain_resolves_each_parent_from_its_own_file(repo):
     commit_config(repo, "sub/deeper/mid2.yaml", "extends: ../../local.yaml\n")
     commit_config(repo, "sub/child2.yaml", "extends: deeper/mid2.yaml\n")
     with pytest.raises(PreregError, match="local.yaml is not tracked"):  # checked at every depth
-        register("sub/child2.yaml", root=repo, replace=True)
+        register("sub/child2.yaml", root=repo, replace=True, reason=REASON)
 
 
 def test_register_accepts_a_tracked_extends_chain(repo):

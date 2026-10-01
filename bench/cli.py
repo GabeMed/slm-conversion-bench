@@ -53,7 +53,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("prereg", help="write and commit prereg/manifest.json and prereg/HASH (push to publish)")
     p.add_argument("--config", default="config.yaml")
-    p.add_argument("--replace", action="store_true", help="register anew over a different registration")
+    p.add_argument("--replace", action="store_true", help="register anew over a different registration (needs --reason)")
+    p.add_argument("--reason", help="with --replace: the defect that made a new registration necessary; it becomes "
+                                    "a dated line of prereg/DEVIATIONS.md, which the report prints")
 
     # F3 · training, load test and preflight (bench/train.py, bench/loadtest.py, bench/preflight.py)
     p = sub.add_parser("train", help="S5: one LoRA adapter for a cluster; registers the adapters fact once every cluster has one")
@@ -100,7 +102,7 @@ def main(argv=None) -> int:
         elif args.command == "prereg":
             from pathlib import Path
             from bench.prereg import register
-            registered = register(str(Path(args.config).resolve()), replace=args.replace)
+            registered = register(str(Path(args.config).resolve()), replace=args.replace, reason=args.reason)
             if registered["unset"]:
                 print(f"bench prereg: registered with null values: {', '.join(registered['unset'])}", file=sys.stderr)
             print(f"{registered['hash']} ({'committed' if registered['new'] else 'already registered'} at "

@@ -7,10 +7,15 @@ It writes the two files the test barrier reads (`bench/barrier.py` documents the
 commits them on a clean tree. It never pushes: publishing is the author's act, and the barrier
 opens only once `origin/main` has the registration. `commit` is informational (design §5): each
 test execution records its own.
+
+A registration that replaces another is a deviation, and says why (design §6.3 T13): `--replace` needs
+`--reason`, the defect that made it necessary, which becomes one dated line of `prereg/DEVIATIONS.md`,
+committed with the new registration. The report prints that file.
 """
 import hashlib
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +34,7 @@ from bench.judge import j4
 ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py", "bench/contracts",
                  "bench/paths.py")
 REQUIRED_ANALYSIS = ("bench/judge/j4.py", "bench/evaluate.py", "bench/data.py")
+DEVIATIONS = "prereg/DEVIATIONS.md"  # one line per registration that replaced another: its date and the defect
 
 
 class PreregError(DataError):
@@ -142,11 +148,18 @@ def check_registered_analysis_code(root: Path) -> None:
                           + (f" and {len(changed) - 10} more" if len(changed) > 10 else ""))
 
 
-def register(config_path: str, root: Optional[Path] = None, replace: bool = False) -> Dict[str, Any]:
+def register(config_path: str, root: Optional[Path] = None, replace: bool = False,
+             reason: Optional[str] = None) -> Dict[str, Any]:
     """Write and commit the pre-registration of `config_path` (relative to `root` unless absolute).
     Registering the same inputs again changes nothing; registering different ones over an
-    existing registration needs `replace`, because test runs made under it stop being scorable."""
+    existing registration needs `replace`, because test runs made under it stop being scorable, and
+    `replace` needs `reason`: the defect, recorded as a dated line of prereg/DEVIATIONS.md in the same
+    commit."""
     root = Path(root or paths.ROOT).resolve()
+    reason = " ".join((reason or "").split())  # one line
+    if replace and not reason:
+        raise PreregError(f"--replace needs --reason: the defect that made a new registration necessary, "
+                          f"which becomes a line of {DEVIATIONS}")
     if _git(root, "status", "--porcelain"):
         raise PreregError("the working tree has uncommitted changes: commit them, so the registration "
                           "hashes what the repository holds")
@@ -162,10 +175,12 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
                 "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config),
                 "analysis_code": analysis_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
+    replaced = None  # the registration this one replaces, as the deviation line names it
     if manifest_path.exists() or hash_path.exists():
         existing = barrier.read_registered(root)  # both halves, as the barrier reads them
         intact = existing is not None and hash_path.is_file() and \
             hash_path.read_bytes().strip() == _sha256(manifest_path).encode()
+        replaced = hash_path.read_bytes().strip().decode() if intact else "a broken registration"
         if not intact:
             if not replace:
                 raise PreregError(f"the registration in prereg/ is broken ({barrier.PREREG_MANIFEST} is not a JSON object, "
@@ -181,7 +196,11 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     manifest_path.parent.mkdir(exist_ok=True)
     manifest_path.write_bytes(raw)
     hash_path.write_text(digest + "\n")
-    files = (barrier.PREREG_MANIFEST, barrier.PREREG_HASH)
+    files = [barrier.PREREG_MANIFEST, barrier.PREREG_HASH]
+    if replaced:
+        with (root / DEVIATIONS).open("a") as deviations:
+            deviations.write(f"- {datetime.now(timezone.utc):%Y-%m-%d} · {digest} replaces {replaced}: {reason}\n")
+        files.append(DEVIATIONS)
     _git(root, "add", "--", *files)
     _git(root, "commit", "-q", "-m", f"Pre-registration {digest}\n\nSPEC.md, {manifest['config_path']}, the splits, "
          f"the data manifest, the delta rule and the analysis code, before the test split is touched. Push to publish.", "--", *files)
