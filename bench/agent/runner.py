@@ -87,6 +87,13 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
 
 
+def _write_manifest(run_dir: Path, manifest: Dict[str, Any], config: Dict[str, Any]) -> None:
+    """A run's manifest, redacted as a whole: provider text reaches it through every field that keeps an
+    error (stopped_by, problems, failures, tool_errors, harness_errors), so no credential is written."""
+    from bench.provenance import redact
+    (run_dir / "manifest.json").write_text(redact(json.dumps(manifest, indent=2, ensure_ascii=False), config) + "\n")
+
+
 def new_outcome() -> Dict[str, Dict]:
     return {"predictions": {}, "failures": {}, "harness_errors": {}, "tool_errors": {}}
 
@@ -313,7 +320,7 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "config.json", config)
-    _write_json(run_dir / "manifest.json", manifest)
+    _write_manifest(run_dir, manifest, config)
     return run_dir, manifest, None if test is None else test["call_sites"]
 
 
@@ -408,14 +415,14 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
     })
     if manifest["split"] == "test":
         manifest["unregistered_call_sites"] = outcome.get("unregistered_call_sites", [])
-    _write_json(run_dir / "manifest.json", manifest)
+    _write_manifest(run_dir, manifest, config)
     if manifest["split"] == "test":
         try:
             registry.commit_manifest(run_dir, config)
         except registry.RegistryError as e:  # never a `done` run the registry does not show
             manifest["status"] = "failed"
             manifest["problems"].append(scrub(f"the manifest could not be committed to the registry: {e}"))
-            _write_json(run_dir / "manifest.json", manifest)
+            _write_manifest(run_dir, manifest, config)
             if stopped_by is None:  # otherwise the exception that stopped the run goes on
                 raise
 

@@ -282,7 +282,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     import os
 
     from bench.contracts.config import config_sha256, engine_spec, load_config
-    from bench.provenance import git_state, scrub
+    from bench.provenance import git_state, redact, scrub
 
     config = load_config(config_path)
     settings = config["loadtest"]
@@ -347,7 +347,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 "config_sha256": config_sha256(config), **git_state(),
                 "started_at": started.isoformat(), "finished_at": None, "status": "running",
             }
-            (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+            (run_dir / "manifest.json").write_text(redact(json.dumps(manifest, indent=2), config) + "\n")
             args = {"url": url, "model": spec["model"], "concurrency": level, "request_count": settings["request_count"],
                     "warmup": warmup, "tokenizer": tok, "timeout_s": settings["request_timeout_s"],
                     "stream": settings["stream"], "base_url": endpoint["base_url"],
@@ -375,7 +375,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 raise
             finally:
                 manifest.update({"status": status, "finished_at": datetime.now(timezone.utc).isoformat()})
-                (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+                (run_dir / "manifest.json").write_text(redact(json.dumps(manifest, indent=2), config) + "\n")
             run_dirs.append(run_dir)
             if status != "done":
                 raise LoadtestError(f"AIPerf failed at concurrency {level} (runs/{run_id}/aiperf.out)")

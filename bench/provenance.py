@@ -29,8 +29,9 @@ _KEY_LIKE = re.compile(r"\b(sk|hf)[-_][A-Za-z0-9_\-*.]{6,}")
 
 
 def redact(text: str, config: Dict[str, Any]) -> str:
-    """What reaches a record never carries a credential (provider error text included, whatever the
-    record: a committed manifest, calls.jsonl, a preflight report): the values of every
+    """No record the harness writes carries a credential (a run's manifest, written whole through this, a
+    C1 line's error, a harness error, a load test's and a preflight's report; CHESS's own history files under
+    runs/<run>/chess/ are vendor code and keep its text: local and never published as they are): the values of every
     credential variable of the configuration (API keys and `headers_env` values, C2's
     `credential_envs`), and anything shaped like a key (provider error bodies sometimes echo a
     masked one)."""

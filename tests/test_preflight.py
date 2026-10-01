@@ -651,3 +651,15 @@ def test_without_the_agent_environment_the_engines_are_pending(monkeypatch):
     monkeypatch.setitem(sys.modules, "langchain_openai", None)  # as in env/train, where LangChain is absent
     check = check_engines(engines_config("http://127.0.0.1:9/v1", monkeypatch))
     assert check["status"] == PENDING and all("agent environment" in p["why"] for p in check["evidence"])
+
+
+def test_the_preflight_report_never_carries_a_credential(tmp_path, monkeypatch):
+    import bench.preflight as preflight
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "embeddings-key-0001")
+    echoed = preflight._check("lora_parity", "P-4", FAIL, {"error": "PreflightError: HTTP 401 b'bad key embeddings-key-0001'"},
+                              "serve it")  # served_generate's error body, as check_lora_parity records it
+    monkeypatch.setattr(preflight, "run_checks", lambda config, parity_cluster=None, on="modal": [echoed])
+    preflight.preflight(str(config_path))
+    report = next(paths.RUNS.glob("preflight-*/report.json")).read_text()
+    assert "embeddings-key-0001" not in report and "<redacted>" in report

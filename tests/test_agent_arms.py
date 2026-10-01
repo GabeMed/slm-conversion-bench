@@ -142,6 +142,27 @@ def test_k_zero_is_an_explicit_empty_prefix(monkeypatch, repo):
 
 # ---------------------------------------------------------------- B2
 
+@pytest.mark.parametrize("status", [400, 401])  # the model's failure (failures) and the harness's (stopped_by)
+def test_a_providers_error_echoing_a_key_never_reaches_the_manifest(monkeypatch, repo, status):
+    import contextlib
+
+    import httpx
+    import openai
+    monkeypatch.setenv("OPENAI_API_KEY", "embeddings-key-0001")  # a credential of every configuration (C2)
+    error = {400: openai.BadRequestError, 401: openai.AuthenticationError}[status]
+
+    class Refusing(ScriptedChess):
+        def invoke(self, messages):
+            raise error(f"Error code: {status} - the key embeddings-key-0001 was refused", body=None,
+                        response=httpx.Response(status, request=httpx.Request("POST", "http://x")))
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Refusing())
+    with contextlib.suppress(Exception):
+        runner.run_agent(str(repo), "B2", "train", ids=["1"], engine="production_llm")
+    (run_dir,) = paths.RUNS.glob("agent-B2-production_llm-train-*")
+    manifest = (run_dir / "manifest.json").read_text()
+    assert "embeddings-key-0001" not in manifest and "<redacted>" in manifest
+
+
 @pytest.mark.parametrize("engine", ["production_llm", "cheap_alt"])
 def test_b2_is_one_call_per_question_on_the_complete_schema(monkeypatch, repo, engine):
     run_dir, manifest, calls = run(monkeypatch, repo, "B2", ("1", "2"), engine=engine)
