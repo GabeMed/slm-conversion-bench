@@ -54,7 +54,7 @@ def eval_index(rows: Iterable[dict]) -> Dict[Identity, bool]:
     return index
 
 
-def _correct(identity: Identity, attempts: Optional[List[dict]], results: Dict[Identity, bool], who: str) -> bool:
+def call_correct(identity: Identity, attempts: Optional[List[dict]], results: Dict[Identity, bool], who: str) -> bool:
     if attempts is None or not final(attempts)["parsed_ok"]:
         return False  # no output, no SQL: wrong
     if identity not in results:
@@ -131,8 +131,8 @@ def compare(teacher_calls: List[dict], replay_calls: List[dict], replay_eval: Op
                 raise JudgmentError(f"{call_site} is judged by execution: pass the per-call evaluations of both runs")
             gold = entry["gold"] = entry["gold"] or {"n": 0, "correct_replay": 0, "correct_teacher": 0,
                                                      "by_question": {"replay": {}, "teacher": {}}}
-            engine_ok = _correct(identity, mine, replay_eval, "replay")
-            teacher_ok = _correct(identity, teacher[identity], teacher_eval, "teacher")
+            engine_ok = call_correct(identity, mine, replay_eval, "replay")
+            teacher_ok = call_correct(identity, teacher[identity], teacher_eval, "teacher")
             gold["n"] += 1
             gold["correct_replay"] += engine_ok
             gold["correct_teacher"] += teacher_ok

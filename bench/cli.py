@@ -162,6 +162,10 @@ def _f4(args) -> int:
             replays = {engine: next(iter(_pairs([value]).items())) for engine, value in
                        (("cheap_alt", args.cheap_alt), ("slm", args.slm))}
             print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
+        elif args.judgment == "b1k":
+            from bench.judge import b1k
+            k0, k3 = (next(iter(_pairs([value]).items())) for value in (args.k0, args.k3))
+            print(b1k.run(k0, k3, args.teacher_eval, config))
         elif args.judgment == "j8":
             from bench.judge import j8
             print(j8.run(args.loadtest, config, args.sweep, slo_from=args.slo_from))
@@ -236,6 +240,10 @@ def f4_commands(sub) -> None:
     p.add_argument("--sweep", action="append", help="the sweep to use when an engine has several (repeatable)")
     p.add_argument("--slo-from", required=True, help="the pilot's B0 execution on calib: the SLO is the stricter of "
                                                      "cost.p95_slo_cap_ms and its p95 latency per call")
+    p = judgments.add_parser("b1k", help="B1's few-shot k, chosen on the pilot: 3 only if it beats 0 on the gold call sites")
+    p.add_argument("--k0", required=True, metavar="REPLAY=EVAL", help="the pilot replay on cheap_alt with k = 0, and its per-call eval")
+    p.add_argument("--k3", required=True, metavar="REPLAY=EVAL", help="the same replay with k = 3, and its per-call eval")
+    p.add_argument("--teacher-eval", required=True, help="the per-call eval of the replays' source")
     for p in judgments.choices.values():
         p.add_argument("--config", default="config.yaml")
     judge.set_defaults(f4=_f4)
