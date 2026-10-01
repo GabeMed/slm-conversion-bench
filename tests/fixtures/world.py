@@ -1,5 +1,5 @@
 """A synthetic benchmark world: the teacher (B0) on a split, replays of its invocations on other
-engines with a chosen quality, per-call evaluations, and a J4 stand-in. Deterministic."""
+engines with a chosen quality, and per-call evaluations. Deterministic."""
 import hashlib
 import math
 from typing import Any, Callable, Dict, List, Optional

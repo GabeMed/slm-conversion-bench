@@ -28,11 +28,12 @@ included: J3's `standard` price for cheap_alt; J8's cost per request for the SLM
 utilization of `cost.utilizations` (the most expensive SLM, so the SLM is preferred only when it is
 cheaper even there).
 """
+import hashlib
 from typing import Any, Callable, Dict, List, Optional
 
 from bench.contracts.facts import read_fact, write_fact
 from bench.judge import j2, j3
-from bench.judge.base import (Identity, JudgmentError, calls_of, invocations, n_boot, read_result, reference,
+from bench.judge.base import (Identity, JudgmentError, calls_of, canonical, invocations, n_boot, read_result, reference,
                               require_done, result_reference, write_result)
 
 JUDGMENT = "J7"
@@ -226,6 +227,8 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
                                                 "allocation": {c: d["engine"] for c, d in decided.items()}})
     result = {"allocation": {c: d["engine"] for c, d in decided.items()}, "clusters": decided,
               "centroids": centroids_sha, "adapters": adapters_sha, "allocation_fact": {"sha256": fact.parent.name},
-              "pilot_ids": sorted(pilot_ids, key=int), "slm_cost_utilization": lowest, "slm_cost_basis": "extrapolated from per-adapter load tests",
+              "pilot_ids": sorted(pilot_ids, key=int), "slm_cost_utilization": lowest,
+              "prices": {"as_of": config["prices"].get("as_of"),
+                         "sha256": hashlib.sha256(canonical(config["prices"].get("table") or {})).hexdigest()}, "slm_cost_basis": "extrapolated from per-adapter load tests",
               "slm_cost_combined": j8.get("combined"), "settings": settings}
     return write_result(JUDGMENT, reads, result), fact

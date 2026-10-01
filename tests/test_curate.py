@@ -239,3 +239,16 @@ def test_curation_runs_the_sql_at_the_pre_registered_date(tmp_path, monkeypatch)
                                                       parsed={"SQL": GOLD})], question_ids=["2"])
     with pytest.raises(CurationError, match="different fixed dates"):
         run_curate([first, second], str(config_path))
+
+
+def test_sources_run_under_different_fixed_dates_are_refused(tmp_path, monkeypatch):
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    first = teacher_config(config)
+    other = json.loads(json.dumps(first))
+    other["eval"]["fixed_date"] = "2001-02-03"
+    one = [call("agent-1", "1", "select_tables", parsed={"table_names": ["gas_t"]})]
+    two = [call("agent-2", "2", "select_tables", parsed={"table_names": ["gas_t"]})]
+    a = b0_train_run(first, "agent-1", one, question_ids=["1"])
+    b = b0_train_run(other, "agent-2", two, question_ids=["2"])
+    with pytest.raises(CurationError, match="different fixed dates"):
+        run_curate([a, b], str(config_path))
