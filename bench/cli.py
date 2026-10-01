@@ -147,10 +147,7 @@ def _f4(args) -> int:
             print(report.run(args.plan, config))
         elif args.judgment == "j2":
             from bench.judge import j2
-            from bench.judge.base import write_result
-            reads, result = (j2.judge_run(args.run) if args.run else
-                             j2.judge_replay(args.replay, args.replay_eval, args.teacher_eval))
-            print(write_result(j2.JUDGMENT, reads, result))
+            print(j2.run(args.run, args.replay, args.replay_eval, args.teacher_eval))
         elif args.judgment == "j3":
             from bench.judge import j3
             print(j3.run(args.run, args.eval, args.j8, config))
@@ -165,13 +162,22 @@ def _f4(args) -> int:
             replays = {engine: next(iter(_pairs([value]).items())) for engine, value in
                        (("cheap_alt", args.cheap_alt), ("slm", args.slm))}
             print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
+        elif args.judgment == "b1k":
+            from bench.judge import b1k
+            k0, k3 = (next(iter(_pairs([value]).items())) for value in (args.k0, args.k3))
+            print(b1k.run(k0, k3, args.teacher_eval, config))
         elif args.judgment == "j8":
             from bench.judge import j8
-            print(j8.run(args.loadtest, config, args.sweep))
+            print(j8.run(args.loadtest, config, args.sweep, slo_from=args.slo_from))
     except (JudgmentError, FactError, ConfigError, DataError, TestSplitLocked) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2
     return 0
+
+
+def _verify(args) -> int:
+    from bench import verify
+    return verify.cli(args)
 
 
 def f4_commands(sub) -> None:
@@ -195,6 +201,12 @@ def f4_commands(sub) -> None:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--plan", required=True, help="a YAML plan naming the executions and judgments (bench/report.py)")
     p.set_defaults(f4=_f4)
+
+    p = sub.add_parser("verify", help="recompute every stored judgment the report or an arm's fact reads; "
+                                      "list the ones that do not come out the same, and fail on any")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--plan", required=True, help="the report's plan (bench/report.py)")
+    p.set_defaults(f4=_verify)
 
     judge = sub.add_parser("judge", help="the judgments J2, J3, J5-J8 (pure functions over executions)")
     judgments = judge.add_subparsers(dest="judgment", required=True)
@@ -226,6 +238,12 @@ def f4_commands(sub) -> None:
     p = judgments.add_parser("j8", help="load: SLM cost per request at each utilization")
     p.add_argument("--loadtest", action="append", required=True)
     p.add_argument("--sweep", action="append", help="the sweep to use when an engine has several (repeatable)")
+    p.add_argument("--slo-from", required=True, help="the pilot's B0 execution on calib: the SLO is the stricter of "
+                                                     "cost.p95_slo_cap_ms and its p95 latency per call")
+    p = judgments.add_parser("b1k", help="B1's few-shot k, chosen on the pilot: 3 only if it beats 0 on the gold call sites")
+    p.add_argument("--k0", required=True, metavar="REPLAY=EVAL", help="the pilot replay on cheap_alt with k = 0, and its per-call eval")
+    p.add_argument("--k3", required=True, metavar="REPLAY=EVAL", help="the same replay with k = 3, and its per-call eval")
+    p.add_argument("--teacher-eval", required=True, help="the per-call eval of the replays' source")
     for p in judgments.choices.values():
         p.add_argument("--config", default="config.yaml")
     judge.set_defaults(f4=_f4)

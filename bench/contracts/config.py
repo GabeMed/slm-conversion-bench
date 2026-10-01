@@ -134,6 +134,27 @@ def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
     return errors
 
 
+def cost_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """What J8 prices the SLM with: the SLO's cap, the container's CPU and memory prices, and the memory
+    it is priced at. A key that is given must be a usable number; J8 refuses to run without one."""
+    def section(*keys: str) -> Dict[str, Any]:
+        node: Any = config
+        for key in keys:
+            node = node.get(key) if isinstance(node, dict) else None
+        return node if isinstance(node, dict) else {}
+    errors = []
+    for where, key, positive in ((("cost",), "p95_slo_cap_ms", True), (("serving",), "memory_gib", True),
+                                 (("modal", "gpu_prices"), "cpu_usd_per_core_s", False),
+                                 (("modal", "gpu_prices"), "memory_usd_per_gib_s", False)):
+        if key not in section(*where):
+            continue
+        value = section(*where)[key]
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not number or value < 0 or (positive and value == 0):
+            errors.append(f"{'.'.join(where)}.{key} must be a number {'> 0' if positive else '>= 0'}")
+    return errors
+
+
 def validate_config(config: Dict[str, Any]) -> List[str]:
     errors = [f"missing key: {k}" for k in REQUIRED if k not in config]
     if errors:
@@ -175,7 +196,7 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
             errors.append(f"data.{name} needs url and sha256")
     if not errors:  # the agent's settings read the keys checked above
         errors += agent_settings_errors(config)
-    return errors + data_training_errors(config)
+    return errors + data_training_errors(config) + cost_settings_errors(config)
 
 
 def data_training_errors(config: Dict[str, Any]) -> List[str]:

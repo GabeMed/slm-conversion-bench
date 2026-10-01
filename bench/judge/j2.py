@@ -15,6 +15,12 @@ another engine, with the same retry policy (design §5.1). J2 pairs the two by i
 - **Format validity** for every call site: the share of the engine's invocations whose final attempt
   parsed (SPEC §6.3). An invocation whose last attempt did not parse has no output: it disagrees,
   and its SQL is wrong.
+- **Truncation** for every call site of one execution: of the calls that returned an answer (every
+  attempt is a call), the share that was cut off, so a cut-off answer is not read as the model's
+  failure. A call is truncated when the API stopped it at the token limit (`finish_reason` is
+  `length`) or its content is empty. A C1 line without `finish_reason` (written before the field
+  existed) is unknown, and so is one whose provider reported none; the rate is over the calls that
+  are known.
 
 Invocations are grouped by call site, or by any other key (J7 groups them by cluster). A replay
 that declares its `call_sites` (F1's `replay --call-site`) is judged on those only: the teacher's
@@ -26,9 +32,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from bench.contracts.concordance import GOLD_CALL_SITES, agree
 from bench.judge.base import (Identity, JudgmentError, calls_of, final, invocations, manifest as run_manifest,
-                              read_jsonl, reference, require_done, run_dir)
+                              read_jsonl, reference, require_done, run_dir, write_result)
 
 JUDGMENT = "J2"
+CONFIG_KEYS = ()  # J2 reads no configuration key; its result's `reads` says so (design §6.2)
 Group = Callable[[Identity, List[dict]], Optional[str]]
 
 
@@ -47,7 +54,7 @@ def eval_index(rows: Iterable[dict]) -> Dict[Identity, bool]:
     return index
 
 
-def _correct(identity: Identity, attempts: Optional[List[dict]], results: Dict[Identity, bool], who: str) -> bool:
+def call_correct(identity: Identity, attempts: Optional[List[dict]], results: Dict[Identity, bool], who: str) -> bool:
     if attempts is None or not final(attempts)["parsed_ok"]:
         return False  # no output, no SQL: wrong
     if identity not in results:
@@ -68,6 +75,27 @@ def format_validity(calls: List[dict], group: Group = by_call_site) -> Dict[str,
         entry["attempts"] += len(attempts)
     for entry in out.values():
         entry["rate"] = entry["valid"] / entry["n"]
+    return dict(sorted(out.items()))
+
+
+def truncation(calls: Iterable[dict]) -> Dict[str, Dict[str, Any]]:
+    """Per call site: answers, how many were truncated and how many are unknown, and the rate over
+    the known ones (see the module docstring). A call that failed before any answer is not counted."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for call in calls:
+        if call["response_text"] is None:
+            continue
+        entry = out.setdefault(call["call_site"], {"answers": 0, "truncated": 0, "unknown": 0})
+        entry["answers"] += 1
+        if "finish_reason" not in call:
+            entry["unknown"] += 1
+        elif call["finish_reason"] == "length" or not call["response_text"].strip():
+            entry["truncated"] += 1
+        elif call["finish_reason"] is None:
+            entry["unknown"] += 1
+    for entry in out.values():
+        known = entry["answers"] - entry["unknown"]
+        entry["rate"] = entry["truncated"] / known if known else None
     return dict(sorted(out.items()))
 
 
@@ -103,8 +131,8 @@ def compare(teacher_calls: List[dict], replay_calls: List[dict], replay_eval: Op
                 raise JudgmentError(f"{call_site} is judged by execution: pass the per-call evaluations of both runs")
             gold = entry["gold"] = entry["gold"] or {"n": 0, "correct_replay": 0, "correct_teacher": 0,
                                                      "by_question": {"replay": {}, "teacher": {}}}
-            engine_ok = _correct(identity, mine, replay_eval, "replay")
-            teacher_ok = _correct(identity, teacher[identity], teacher_eval, "teacher")
+            engine_ok = call_correct(identity, mine, replay_eval, "replay")
+            teacher_ok = call_correct(identity, teacher[identity], teacher_eval, "teacher")
             gold["n"] += 1
             gold["correct_replay"] += engine_ok
             gold["correct_teacher"] += teacher_ok
@@ -177,11 +205,20 @@ def judge_replay(replay_run_id: str, replay_eval_run_id: Optional[str], teacher_
 
 
 def judge_run(run_id: str):
-    """Format validity of one execution (an agent arm, or a replay) by call site."""
+    """Format validity and truncation of one execution (an agent arm, or a replay) by call site."""
     found = require_done(run_id, type=("agent", "replay"))
+    calls = calls_of(run_id)
     return {"run": reference(run_id)}, {"mode": "run", "split": found.get("split"), "arm": found.get("arm"),
                                          "engine": found.get("engine"),
-                                         "format_validity": format_validity(calls_of(run_id))}
+                                         "format_validity": format_validity(calls), "truncation": truncation(calls)}
+
+
+def run(run_id: Optional[str] = None, replay_run_id: Optional[str] = None, replay_eval_run_id: Optional[str] = None,
+        teacher_eval_run_id: Optional[str] = None):
+    """The J2 result of one execution (`run_id`), or of a replay against its teacher. Returns its path."""
+    reads, result = (judge_run(run_id) if run_id else
+                     judge_replay(replay_run_id, replay_eval_run_id, teacher_eval_run_id))
+    return write_result(JUDGMENT, {**reads, "config": list(CONFIG_KEYS)}, result)
 
 
 def engine_of(run_id: str) -> str:

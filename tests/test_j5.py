@@ -41,7 +41,9 @@ def test_clusters_call_sites_writes_a_valid_prompt_space_fact(tmp_path, monkeypa
     assert result["assignment"]["train_in_sample"] == 1.0 and result["assignment"]["calib"]["rate"] == 1.0
     assert result["assignment"]["calib"]["n"] == len(calib_calls)
     assert sorted(result["sizes"].values()) == [12, 12, 12] and set(result["members"]) == {e["call_id"] for e in examples}
-    assert set(payload["reads"]) == {"curate", "embed", "embed_calib"}
+    assert set(payload["reads"]) == {"curate", "embed", "embed_calib", "config"}
+    assert payload["reads"]["config"] == ["clustering.k_min", "clustering.k_max", "clustering.seed", "clustering.n_init",
+                                          "clustering.silhouette_sample"]  # the configuration keys J5 read
 
     centroids, sha = facts.read_fact(str(fact), "centroids")  # validated: unit, one dimension, pinned embedding
     assert sha == result["centroids"]["sha256"] and centroids["embedding"] == config["clustering"]["embedding"]

@@ -177,9 +177,11 @@ arms:                          # the facts each arm uses: judgments/<J>/<sha256>
 # F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
 # bench/preflight.py). Values are proposals; the author confirms them before runs.
 modal:
-  gpu_prices:                  # modal.com/pricing, per GPU-second; the manifests' cost = seconds x price
-    as_of: "2026-09-30"
-    usd_per_s: {L40S: 0.000542, H100: 0.001097}
+  gpu_prices:                  # modal.com/pricing, per second. Modal bills a container's GPU, CPU and memory:
+    as_of: "2026-09-30"        # J8 prices the serving container all-in, GPU + serving.cpu x CPU + serving.memory_gib x memory
+    usd_per_s: {L40S: 0.000542, H100: 0.001097}   # per GPU-second; the training manifests' cost = seconds x this
+    cpu_usd_per_core_s: 0.0000131                 # per core-second (fetched 2026-10-01)
+    memory_usd_per_gib_s: 0.00000222              # per GiB-second (fetched 2026-10-01)
   volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
   secrets:
     vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
@@ -193,6 +195,7 @@ serving:                       # vLLM, one candidate per server, its adapters be
   base_image: nvidia/cuda:13.0.3-devel-ubuntu24.04   # CUDA 13, as vLLM 0.30's wheels
   gpu: L40S
   cpu: 8
+  memory_gib: 32               # the memory J8 prices the container at (Modal bills the higher of request and usage)
   max_model_len: 32768
   gpu_memory_utilization: 0.90
   prefix_caching: true         # SPEC 6.6: the load test runs with the prefix cache on
@@ -227,7 +230,7 @@ train:                         # S5: one LoRA adapter per cluster on the chosen 
 
 loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's input
   aiperf_version: 0.13.0
-  concurrency: [1, 4, 8, 16, 32]   # one run per level
+  concurrency: [4, 8, 16, 32, 64, 128]   # one run per level
   request_count: 500           # per level: that many calls, each level its own (no prompt replayed twice,
   warmup_request_count: 20     # so the prefix cache holds only what real traffic would share); warm-up calls apart
   stream: false                # the agent does not stream (bench/agent/hooks.py): latency is the whole request
@@ -280,8 +283,11 @@ selection:                     # S4 (J6): higher per-call-site score on calib; t
   triage: []                   # before runs: the desk triage (SPEC §4 S4a), one mapping per candidate
 allocation:                    # S6 (J7)
   min_calls: null              # before runs: fewest calib calls of a cluster part to count as evidence
-cost:                          # J3 and J8 (SPEC §6.6); the GPU's price is F3's modal.gpu_prices
-  p95_slo_ms: null             # before runs: sustained throughput is the highest with p95 latency within this
+cost:                          # J3 and J8 (SPEC §6.6); the container's price is F3's modal.gpu_prices
+  # the SLO is a rule: the stricter of this cap and the production LLM's p95 latency per call in the pilot
+  # (judge j8 --slo-from). The cap is MLPerf's server limit for an 8B model on a ~150-token answer:
+  # 2000 ms to the first token + 100 ms per token. Sustained throughput is the highest with p95 within the SLO.
+  p95_slo_cap_ms: 17000
   utilizations: [0.2, 0.5, 1.0]
 claims:                        # the SPEC §5 map (bench/report.py)
   v3_min_ratio: 3              # V3/A2 confirms at >= 3x cheaper per correct query (SPEC §5)

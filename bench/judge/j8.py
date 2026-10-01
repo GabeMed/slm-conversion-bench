@@ -7,9 +7,22 @@ reads two blocks (AIPerf's JSON export schema): `request_latency` (unit `ms`, wi
 `request_throughput` (unit `requests/sec`, with `avg`); any other unit is refused.
 
 **Sustained throughput within the p95** is read as: the highest request throughput among the load
-levels whose p95 request latency is within `cost.p95_slo_ms`, a pre-registered bound. No level
-within it is an error, not a number. Every level must have run with the prefix cache on (SPEC §6.6).
-Then, with the GPU's price (F3's dated `modal.gpu_prices.usd_per_s`, keyed by the manifest's `gpu`):
+levels whose p95 request latency is within the SLO. No level within it is an error, not a number.
+Every level must have run with the prefix cache on (SPEC §6.6).
+
+**The SLO is a rule, not a number chosen after a load test**: the stricter of
+`cost.p95_slo_cap_ms`, an external reference, and the production LLM's own p95 latency per call,
+over the first attempts of the pilot's B0 execution on calib (`slo_from`, named by whoever runs
+J8). The SLM must answer at least as fast as the API it replaces, and never slower than the
+reference. Every first attempt counts, a failed one too: it is the latency the agent met. That p95
+is the 95th percentile by linear interpolation between order statistics, the definition AIPerf's
+`request_latency.p95` follows on the SLM's side. The result records the cap, the LLM's p95 and
+the SLO used (`slo`).
+
+**The price is the serving container's, all-in**: Modal bills the GPU, the CPU and the memory, so
+the price per second is the GPU's (F3's dated `modal.gpu_prices.usd_per_s`, keyed by the
+manifest's `gpu`) plus `serving.cpu` cores at `cpu_usd_per_core_s` plus `serving.memory_gib` GiB at
+`memory_usd_per_gib_s`. Then:
 
     cost per request at utilization u = price per hour / (sustained requests per hour × u)
 
@@ -32,12 +45,15 @@ on one server, which no single-engine load test measures, so their SLM cost from
 """
 import hashlib
 import json
+from fractions import Fraction
 from typing import Any, Dict, List, Optional
 
-from bench.judge.base import JudgmentError, canonical, reference, require_done, run_dir, write_result
+from bench.judge.base import JudgmentError, calls_of, canonical, reference, require_done, run_dir, write_result
 
 JUDGMENT = "J8"
 EXPORT = "profile_export_aiperf.json"
+# the configuration keys J8 reads, recorded in the result's `reads` (design §6.2)
+CONFIG_KEYS = ("cost.p95_slo_cap_ms", "cost.utilizations", "modal.gpu_prices", "serving.cpu", "serving.memory_gib")
 
 
 def level(export: Dict[str, Any]) -> Dict[str, float]:
@@ -63,10 +79,49 @@ def judge(levels: List[Dict[str, Any]], price_per_hour: float, slo_ms: float, ut
             "cost_per_request": {f"{round(u * 100)}%": price_per_hour / (per_hour * u) for u in utilizations}}
 
 
-def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[List[str]] = None):
+def p95(values: List[float]) -> float:
+    """The 95th percentile by linear interpolation between order statistics (numpy's default), the
+    rank computed in integers."""
+    ordered = sorted(values)
+    rank = Fraction(95 * (len(ordered) - 1), 100)
+    low = rank.numerator // rank.denominator
+    if low == len(ordered) - 1:
+        return float(ordered[low])
+    return float(ordered[low] + (rank - low) * (ordered[low + 1] - ordered[low]))
+
+
+def slo(slo_from: str, cap_ms: float) -> Dict[str, Any]:
+    """The SLO rule: the stricter of the cap and the production LLM's p95 latency per call, over the
+    first attempts of the pilot's B0 execution on calib."""
+    require_done(slo_from, type="agent", arm="B0", split="calib")
+    first = [call["latency_ms"] for call in calls_of(slo_from) if call["attempt"] == 1]
+    if not first:
+        raise JudgmentError(f"{slo_from} has no call: the production LLM's p95 latency cannot be measured")
+    measured = p95(first)
+    return {"cap_ms": cap_ms, "llm_p95_ms": measured, "slo_ms": min(cap_ms, measured), "first_attempts": len(first)}
+
+
+def container_price(config: Dict[str, Any], gpu: str) -> Dict[str, float]:
+    """USD per second of one serving container, by what Modal bills: the GPU, the CPU cores and the memory."""
+    prices, serving = (config.get("modal") or {}).get("gpu_prices") or {}, config.get("serving") or {}
+    per_gpu = (prices.get("usd_per_s") or {}).get(gpu)
+    if per_gpu is None or not prices.get("as_of"):
+        raise JudgmentError(f"modal.gpu_prices (F3) has no dated price for {gpu!r}")
+    missing = [key for key, value in (("modal.gpu_prices.cpu_usd_per_core_s", prices.get("cpu_usd_per_core_s")),
+                                      ("modal.gpu_prices.memory_usd_per_gib_s", prices.get("memory_usd_per_gib_s")),
+                                      ("serving.cpu", serving.get("cpu")), ("serving.memory_gib", serving.get("memory_gib")))
+               if value is None]
+    if missing:
+        raise JudgmentError(f"{', '.join(missing)} not set: the container's price counts its CPU and memory, not the GPU alone")
+    return {"gpu": per_gpu, "cpu": serving["cpu"] * prices["cpu_usd_per_core_s"],
+            "memory": serving["memory_gib"] * prices["memory_usd_per_gib_s"]}
+
+
+def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[List[str]] = None, *, slo_from: str):
     cost = config["cost"]
-    if cost.get("p95_slo_ms") is None:
-        raise JudgmentError("cost.p95_slo_ms is not set: sustained throughput needs its pre-registered bound")
+    if cost.get("p95_slo_cap_ms") is None:
+        raise JudgmentError("cost.p95_slo_cap_ms is not set: the SLO needs its pre-registered cap")
+    bound = slo(slo_from, cost["p95_slo_cap_ms"])
     levels = []
     for run_id in sorted(loadtest_run_ids):
         found = require_done(run_id, type="loadtest")
@@ -97,18 +152,18 @@ def run(loadtest_run_ids: List[str], config: Dict[str, Any], sweeps: Optional[Li
     if len(bases) != 1 or len(gpus) != 1:
         raise JudgmentError(f"the load tests must be engines of one base on one GPU: {engines} on {sorted(gpus)}")
     gpu = gpus.pop()
-    prices = (config.get("modal") or {}).get("gpu_prices") or {}
-    per_second = (prices.get("usd_per_s") or {}).get(gpu)
-    if per_second is None or not prices.get("as_of"):
-        raise JudgmentError(f"modal.gpu_prices (F3) has no dated price for {gpu!r}")
-    per_engine = {engine: judge([lv for lv in levels if lv["engine"] == engine], per_second * 3600,
-                                cost["p95_slo_ms"], cost["utilizations"]) for engine in engines}
+    per_second = container_price(config, gpu)
+    per_hour = sum(per_second.values()) * 3600
+    prices = config["modal"]["gpu_prices"]
+    per_engine = {engine: judge([lv for lv in levels if lv["engine"] == engine], per_hour,
+                                bound["slo_ms"], cost["utilizations"]) for engine in engines}
     combined = {u: max(result["cost_per_request"][u] for result in per_engine.values())
                 for u in next(iter(per_engine.values()))["cost_per_request"]}
-    result = {"engine": bases.pop(), "gpu": gpu, "gpu_prices_as_of": prices["as_of"], "price_per_hour": per_second * 3600,
-              "gpu_prices_sha256": hashlib.sha256(canonical(prices)).hexdigest(),
+    result = {"engine": bases.pop(), "gpu": gpu, "gpu_prices_as_of": prices["as_of"], "price_per_hour": per_hour,
+              "price_per_second": per_second, "gpu_prices_sha256": hashlib.sha256(canonical(prices)).hexdigest(),
+              "slo": bound,
               "source_run_ids": sorted({lv.get("source_run_id") for lv in levels if lv.get("source_run_id")}),
               "engines": per_engine, "cost_per_request": combined,
               "combined": {"rule": "the highest cost per request among the engines measured", "engines": engines,
                            "loadtests": sorted(reads), "sweeps": sorted({lv["sweep_id"] for lv in levels})}}
-    return write_result(JUDGMENT, {"loadtests": reads}, result)
+    return write_result(JUDGMENT, {"loadtests": reads, "slo_from": reference(slo_from), "config": list(CONFIG_KEYS)}, result)

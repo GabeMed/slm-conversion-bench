@@ -3,7 +3,7 @@ refusal is exit code 2 with its reason, and a library bug is not swallowed as on
 import pytest
 
 from bench import cli
-from fixtures.fake import repo, write_run
+from fixtures.fake import call, repo, write_run
 
 
 def loadtest(run_id, concurrency, p95_ms, rps):
@@ -15,12 +15,20 @@ def loadtest(run_id, concurrency, p95_ms, rps):
 
 
 def test_a_judgment_runs_and_prints_its_result(tmp_path, monkeypatch, capsys):
-    config_path, _ = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_ms": 1000},
+    config_path, _ = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_cap_ms": 1000},
                                                   "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.001}}}})
     runs = [loadtest("lt-1", 1, 300, 2.0), loadtest("lt-8", 8, 800, 9.0)]
-    assert cli.main(["judge", "j8", "--loadtest", runs[0], "--loadtest", runs[1], "--config", str(config_path)]) == 0
+    write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib"},
+              [call("agent-B0-calib", "1", "select_tables", latency_ms=500)])
+    judge = ["judge", "j8", "--loadtest", runs[0], "--loadtest", runs[1], "--config", str(config_path)]
+    with pytest.raises(SystemExit):  # the SLO rule needs the pilot's B0 run: there is no J8 without --slo-from
+        cli.main(judge)
+    capsys.readouterr()
+    assert cli.main(judge + ["--slo-from", "agent-B0-calib"]) == 0
     printed = capsys.readouterr().out.strip()
     assert printed.endswith("result.json") and "/judgments/J8/" in printed
+    from bench.judge.base import read_result
+    assert read_result(printed, "J8")["result"]["slo"]["slo_ms"] == 500.0  # the pilot's p95, stricter than the cap
 
 
 def test_a_refusal_is_exit_code_2_with_its_reason(tmp_path, monkeypatch, capsys):
@@ -48,4 +56,4 @@ def test_a_library_bug_is_not_reported_as_a_refusal(tmp_path, monkeypatch):
     from bench.judge import j8
     monkeypatch.setattr(j8, "run", lambda *a, **k: {}["bug"])
     with pytest.raises(KeyError):
-        cli.main(["judge", "j8", "--loadtest", "x", "--config", str(config_path)])
+        cli.main(["judge", "j8", "--loadtest", "x", "--slo-from", "y", "--config", str(config_path)])
