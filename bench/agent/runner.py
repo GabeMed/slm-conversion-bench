@@ -24,12 +24,15 @@ singleton per process that switches database, so questions cannot share a proces
 every N-th question from the k-th, writes its own C1 file, and the files are merged into the run's
 `calls.jsonl` when all have ended. It is one run, one manifest (`workers`), and the first question
 that fails stops every worker. The number of workers changes no output, so it is not part of the
-configuration's identity.
+configuration's identity. SIGTERM and SIGHUP (a `kill`, a closed terminal) stop such a run as a
+Ctrl-C does, and workers whose parent is gone stop by themselves: nothing is spent for a run nobody
+will close.
 """
 import json
 import multiprocessing
 import multiprocessing.connection
 import os
+import signal
 import sys
 from argparse import Namespace
 from datetime import datetime, timezone
@@ -254,6 +257,20 @@ def worker_parts(dataset: List[Any], workers: int) -> List[List[Any]]:
     return [part for part in (dataset[k::workers] for k in range(workers)) if part]
 
 
+class _WorkerStop:
+    """The run's stop flag as one worker reads it: also set once the parent process is gone (killed,
+    or its terminal closed), when nobody is left to stop the worker or to merge what it would spend."""
+
+    def __init__(self, flag: Any) -> None:
+        self.flag, self.parent = flag, multiprocessing.parent_process()
+
+    def is_set(self) -> bool:
+        return self.flag.is_set() or not self.parent.is_alive()
+
+    def set(self) -> None:
+        self.flag.set()
+
+
 def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: Any) -> None:
     """One worker process: answer its part, then leave what happened in run_dir/outcome.w<k>.json
     (the parent merges it). What carries error text is redacted, as in the manifest it ends up in
@@ -263,7 +280,7 @@ def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: 
     from bench.provenance import redact
     outcome: Dict[str, Any] = new_outcome()
     try:
-        execute(outcome=outcome, part=f".w{k}", stop=stop, **kwargs)
+        execute(outcome=outcome, part=f".w{k}", stop=_WorkerStop(stop), **kwargs)
     except BaseException as e:  # a Ctrl-C included: the parent reports it, this process just ends
         stop.set()
         outcome["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
@@ -273,6 +290,10 @@ def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: 
         _write_json(kwargs["run_dir"] / f"outcome.w{k}.json", {**errors, "predictions": outcome["predictions"]})
 
 
+def _interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt(signal.Signals(signum).name)
+
+
 def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: List[List[Dict[str, Any]]],
                 outcome: Dict[str, Dict]) -> None:
     """Run `execute` on each part of the questions in its own process (spawned: the agent's threads
@@ -280,13 +301,17 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
     `outcome` and their C1 files, in worker order, into run_dir/calls.jsonl. A worker that dies
     (a non-zero exit: it could not set the flag itself) stops the others, and fails the run. A worker
     that stopped for anything but a failed question raises here once everything is merged, as the
-    same failure raises in a run of one process."""
+    same failure raises in a run of one process. SIGTERM and SIGHUP interrupt the wait as a Ctrl-C
+    does (left to their default they would end this process and leave the workers answering); one
+    that is ignored stays ignored, here and in the workers (a run under `nohup` survives its terminal)."""
     run_dir = kwargs["run_dir"]
     context = multiprocessing.get_context("spawn")
     stop = context.Event()
     processes = [context.Process(target=_worker, args=(execute, {**kwargs, "dataset": part}, k, stop))
                  for k, part in enumerate(parts)]
     started: List[Any] = []
+    handlers = {signum: signal.signal(signum, _interrupt) for signum in (signal.SIGTERM, signal.SIGHUP)
+                if signal.getsignal(signum) != signal.SIG_IGN}
     try:
         try:
             for process in processes:
@@ -306,6 +331,8 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
                 process.join()
             raise
     finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
         stopped = _merge_workers(run_dir, processes, outcome)
     if stopped:
         from bench.agent.hooks import HarnessError
