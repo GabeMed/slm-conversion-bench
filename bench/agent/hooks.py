@@ -19,7 +19,9 @@ Two kinds of failure, kept apart:
   `take_harness_errors()` to fail the run instead of recording it as done.
 
 State is process-global: one run and one question at a time per process. The tools of a question
-call the model from several threads; the writer and the counters are shared under a lock.
+call the model from several threads; the writer and the counters are shared under a lock. A run
+split over worker processes (`bench run --workers`) gives each its own C1 file and one shared
+`stop` flag: once any worker's question fails, every worker refuses its next model call.
 """
 import json
 import os
@@ -61,9 +63,9 @@ class HarnessError(RuntimeError):
 
 
 class RunAborted(RuntimeError):
-    """A model call refused because its run has already failed (a harness error, recorded once):
-    a failed run spends nothing more, within the question as after it. Not recorded again, and
-    CHESS swallows it like any tool error."""
+    """A model call refused because its run has already failed (a harness error, recorded once, or
+    a question that failed in another worker): a failed run spends nothing more, within the question
+    as after it. Not recorded again, and CHESS swallows it like any tool error."""
 
 
 @dataclass
@@ -78,6 +80,7 @@ class _RunState:
     occurrences: Dict[tuple, int] = field(default_factory=dict)
     harness_errors: List[str] = field(default_factory=list)
     unregistered_call_sites: set = field(default_factory=set)
+    stop: Any = None  # an Event shared by the worker processes of one run: set when a question failed in any
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -116,9 +119,10 @@ def max_workers() -> int:
 
 def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Optional[str] = None,
               few_shot: Optional[Dict[str, List[Dict[str, str]]]] = None,
-              allowed_call_sites: Optional[List[str]] = None) -> None:
+              allowed_call_sites: Optional[List[str]] = None, stop: Any = None) -> None:
     """`engine` fixes the engine of every call (no routing); `few_shot` is the prefix per call site
-    for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site."""
+    for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site; `stop`
+    is the flag the worker processes of one run share (set: no further model call)."""
     global _run
     if _config is None:
         raise HarnessError("hooks.configure() must run before start_run()")
@@ -128,7 +132,8 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
     calls_path.touch()
     prefix = None if few_shot is None else {site: _lc_messages(messages) for site, messages in few_shot.items()}
     _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, few_shot=prefix,
-                     allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites))
+                     allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites),
+                     stop=stop)
 
 
 def set_question(question_id: str) -> None:
@@ -232,6 +237,12 @@ def chat_model(engine: str, temperature: float):
                 headers[header] = os.environ.get(variable)
                 if not headers[header]:
                     raise HarnessError(f"engine {engine}: environment variable {variable} ({header}) is not set")
+            # the request's extra body: the role's own (a provider's reasoning switch) and, through an
+            # aggregator, the routing pin of `provider.routing`
+            extra_body = dict(params.pop("extra_body", None) or {})
+            routing = (spec.get("provider") or {}).get("routing")
+            if routing is not None:
+                extra_body["provider"] = routing
             _models[key] = ChatOpenAI(
                 model=spec["model"],
                 openai_api_base=endpoint["base_url"],
@@ -241,6 +252,7 @@ def chat_model(engine: str, temperature: float):
                 timeout=params.pop("timeout_s"),
                 max_retries=0,  # every attempt is visible in C1; no hidden client retry
                 default_headers=headers or None,
+                extra_body=extra_body or None,
                 model_kwargs=params,
             )
         return _models[key]
@@ -257,17 +269,30 @@ def _lc_messages(messages: List[Dict[str, str]]) -> List[Any]:
     return [kinds[m["role"]](content=m["content"]) for m in messages]
 
 
+NO_USAGE = {"input": None, "cached_input": None, "output": None, "reasoning": None, "source": "missing"}
+
+
 def _usage(output: Any) -> Dict[str, Any]:
     token_usage = (getattr(output, "response_metadata", None) or {}).get("token_usage") or {}
     if token_usage.get("prompt_tokens") is None or token_usage.get("completion_tokens") is None:
-        return {"input": None, "cached_input": None, "output": None, "source": "missing"}
+        return dict(NO_USAGE)
     details = token_usage.get("prompt_tokens_details") or {}
     return {
         "input": token_usage["prompt_tokens"],
         "cached_input": details.get("cached_tokens"),
         "output": token_usage["completion_tokens"],
+        # the reasoning tokens, a part of `output`; null when the provider does not report them
+        "reasoning": (token_usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
         "source": "api",
     }
+
+
+def recorded_temperature(spec: Dict[str, Any], temperature: float) -> float:
+    """The temperature C1 records for a call sent at `temperature` to the engine of `spec`: the one in
+    effect. Where the configuration declares that the provider forces a value (`reasoning.forced_temperature`),
+    it is that value, whatever was sent."""
+    forced = (spec.get("reasoning") or {}).get("forced_temperature")
+    return temperature if forced is None else float(forced)
 
 
 def _jsonable(value: Any) -> Any:
@@ -288,6 +313,7 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
             started_at, latency_ms, temperature, output, parsed, parsed_ok, error) -> None:
     run = _require_run()
     spec = engine_spec(_config, chosen.engine)
+    metadata = (getattr(output, "response_metadata", None) or {}) if output is not None else {}
     line = json.dumps({
         "run_id": run.run_id, "call_id": call_id, "retry_of": retry_of, "attempt": attempt,
         "question_id": run.question_id, "call_site": call_site, "invocation_key": invocation_key,
@@ -296,10 +322,14 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
         "prompt_messages": messages,
         "response_text": output.content if output is not None and isinstance(output.content, str) else None,
         "parsed_output": _jsonable(parsed) if parsed_ok else None, "parsed_ok": parsed_ok,
-        "usage": _usage(output) if output is not None else
-        {"input": None, "cached_input": None, "output": None, "source": "missing"},
-        "latency_ms": latency_ms, "started_at": started_at, "temperature": temperature,
+        "usage": _usage(output) if output is not None else dict(NO_USAGE),
+        "latency_ms": latency_ms, "started_at": started_at,
+        "temperature": recorded_temperature(spec, temperature),
         "error": redact(scrub(error), _config) if error is not None else None,  # no local path, no credential
+        # what the answer says about itself (null when the provider does not say, or nothing answered),
+        # and the provider the configuration pins for this engine
+        "finish_reason": metadata.get("finish_reason"), "model_reported": metadata.get("model_name"),
+        "provider": (spec.get("provider") or {}).get("name"),
     }, ensure_ascii=False)
     with run.lock, open(run.calls_path, "a") as fh:
         fh.write(line + "\n")
@@ -405,6 +435,8 @@ def _refuse_if_failed(run: _RunState, call_site: str) -> None:
     with run.lock:
         if run.harness_errors:
             raise RunAborted(f"{call_site}: the run has failed ({run.harness_errors[0][:200]}): no further model call")
+    if run.stop is not None and run.stop.is_set():
+        raise RunAborted(f"{call_site}: the run has failed in another worker: no further model call")
 
 
 def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any], parser: Any) -> Any:

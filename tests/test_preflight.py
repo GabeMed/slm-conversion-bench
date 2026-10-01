@@ -569,12 +569,14 @@ def test_preflight_on_modal_hands_its_configuration_to_the_modal_reference(tmp_p
 
 
 class FakeEngine:
-    """An OpenAI-compatible endpoint: answers (with or without text and usage), refuses a parameter with
-    HTTP 400 echoing the caller's key, or fails with 503."""
+    """An OpenAI-compatible endpoint: answers (with or without text and usage, complete or cut off, with
+    `reasoning` reasoning tokens reported, None for a provider that reports none), refuses a parameter
+    with HTTP 400 echoing the caller's key, or fails with 503."""
 
-    def __init__(self, refuse=None, content="OK", usage=True, status=200):
+    def __init__(self, refuse=None, content="OK", usage=True, status=200, finish_reason="stop", reasoning=7):
         fake = self
         self.requests, self.refuse, self.content, self.usage, self.status = [], refuse, content, usage, status
+        self.finish_reason, self.reasoning = finish_reason, reasoning
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -590,12 +592,15 @@ class FakeEngine:
                                                               f"(request by {self.headers.get('Authorization')})",
                                                    "type": "invalid_request_error"}}
                 else:
-                    code, answer = 200, {"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
-                                         "choices": [{"index": 0, "finish_reason": "stop",
+                    code, answer = 200, {"id": "x", "object": "chat.completion", "created": 0,
+                                         "model": f"{body['model']}-as-served",
+                                         "choices": [{"index": 0, "finish_reason": fake.finish_reason,
                                                       "message": {"role": "assistant", "content": fake.content}}]}
                     if fake.usage:
-                        answer["usage"] = {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13,
+                        answer["usage"] = {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20,
                                            "prompt_tokens_details": {"cached_tokens": 0}}
+                        if fake.reasoning is not None:
+                            answer["usage"]["completion_tokens_details"] = {"reasoning_tokens": fake.reasoning}
                 raw = json.dumps(answer).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
@@ -646,8 +651,15 @@ def test_every_engine_answers_through_the_agents_own_client(monkeypatch):
                                      *[c["name"] for c in config["roles"]["slm_candidates"]]) for t in temperatures}
     production = next(r for r in server.requests if r["body"]["model"] == config["roles"]["production_llm"]["model"])
     body = production["body"]  # the agent's client's body: its own fields too, not a rebuilt one
-    assert (body["top_p"], body["max_tokens"], body["n"], body["stream"]) == (0.9, 4096, 1, False)
+    assert (body["top_p"], body["max_tokens"], body["n"], body["stream"]) == (0.9, 16384, 1, False)
+    assert not {"reasoning", "provider", "extra_body", "timeout_s"} & set(body)  # what the harness is told is never sent
+    cheap = next(r for r in server.requests if r["body"]["model"] == config["roles"]["cheap_alt"]["model"])
+    assert cheap["body"]["reasoning_effort"] == "medium"  # the reasoning setting, explicit on the wire
     assert production["headers"]["Authorization"] == "Bearer probe-key-0001"
+    probe = next(p for p in check["evidence"] if p["engine"] == "production_llm")
+    assert (probe["finish_reason"], probe["reasoning_declared"], probe["reasoning_tokens"]) == ("stop", True, 7)
+    undeclared = next(p for p in check["evidence"] if p["engine"].startswith("slm:"))
+    assert undeclared["reasoning_declared"] is None and undeclared["status"] == PASS  # nothing declared, nothing asserted
     slm = next(r for r in server.requests if r["body"]["model"] == config["roles"]["slm_candidates"][0]["name"])
     assert slm["headers"]["Modal-Key"] == "slm_modal_key-0001" and slm["headers"]["Authorization"] == "Bearer slm_vllm_api_key-0001"
 
@@ -672,6 +684,88 @@ def test_an_answer_without_text_or_usage_fails(monkeypatch, answer, problem):
     with FakeEngine(**answer) as server:
         check = check_engines(engines_config(server.base_url, monkeypatch))
     assert check["status"] == FAIL and all(problem in p["why"] for p in check["evidence"])
+
+
+def test_a_cut_off_answer_fails_the_probe(monkeypatch):
+    """`finish_reason: length` on a one-line prompt: the reasoning used the token budget up. An execution
+    would log an empty output and score it as the model's failure."""
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine(finish_reason="length") as server:
+        check = check_engines(engines_config(server.base_url, monkeypatch))
+    assert check["status"] == FAIL and "cut-off answer" in check["action"]
+    assert all(p["status"] == FAIL and p["finish_reason"] == "length" and "finish_reason is 'length', not 'stop'" in p["why"]
+               for p in check["evidence"])
+
+
+@pytest.mark.parametrize("reported", [None, 0])
+def test_reasoning_declared_on_and_not_seen_fails_the_probe(monkeypatch, reported):
+    """The role declares reasoning on and the answer carries no reasoning tokens: the setting was not
+    honoured (or cannot be checked). Engines that declare nothing (the SLM candidates) are not asserted."""
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine(reasoning=reported) as server:
+        config = engines_config(server.base_url, monkeypatch)
+        check = check_engines(config)
+    assert all(config["roles"][role]["reasoning"]["enabled"] for role in ("production_llm", "cheap_alt"))
+    assert check["status"] == FAIL
+    for probe in check["evidence"]:
+        if probe["engine"] in ("production_llm", "cheap_alt"):
+            assert probe["status"] == FAIL and "no reasoning tokens although the role declares" in probe["why"]
+        else:
+            assert probe["status"] == PASS
+
+
+def test_reasoning_declared_off_and_seen_fails_the_probe(monkeypatch):
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine(reasoning=7) as server:
+        config = engines_config(server.base_url, monkeypatch)
+        config["roles"]["cheap_alt"]["reasoning"]["enabled"] = False
+        check = check_engines(config)
+    assert check["status"] == FAIL and "cheap_alt" in check["action"] and "production_llm" not in check["action"]
+    assert all("7 reasoning tokens although the role declares reasoning.enabled: false" in p["why"]
+               for p in check["evidence"] if p["engine"] == "cheap_alt")
+    with FakeEngine(reasoning=None) as server:  # off, and none reported (or 0): as declared
+        config = engines_config(server.base_url, monkeypatch)
+        for role in ("production_llm", "cheap_alt"):
+            config["roles"][role]["reasoning"]["enabled"] = False
+        assert check_engines(config)["status"] == PASS
+
+
+def test_the_probe_reports_the_temperature_an_execution_would_record(monkeypatch):
+    """A provider-forced temperature, declared in the configuration, is what C1 will carry: the probe
+    shows it beside the call site's, which is still what is sent."""
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    with FakeEngine() as server:
+        config = engines_config(server.base_url, monkeypatch)
+        config["roles"]["production_llm"]["reasoning"]["forced_temperature"] = 1.0
+        check = check_engines(config)
+    assert check["status"] == PASS
+    production = [p for p in check["evidence"] if p["engine"] == "production_llm"]
+    assert sorted(p["temperature"] for p in production) == temperatures_of(config)
+    assert all(p["temperature_recorded"] == 1.0 for p in production)
+    assert all(p["temperature_recorded"] == p["temperature"] for p in check["evidence"] if p["engine"] != "production_llm")
+    sent = sorted({r["body"]["temperature"] for r in server.requests if r["body"]["model"] == config["roles"]["production_llm"]["model"]})
+    assert sent == temperatures_of(config)
+
+
+def test_the_reasoning_switch_and_the_routing_pin_reach_the_wire(monkeypatch):
+    """`params.extra_body` and `provider.routing` are merged into the request body, as the pinned
+    provider (or the aggregator) reads them."""
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    routing = {"only": ["a-provider"], "allow_fallbacks": False, "require_parameters": True, "quantizations": ["fp8"]}
+    with FakeEngine() as server:
+        config = engines_config(server.base_url, monkeypatch, extra_body={"thinking": {"type": "enabled"}})
+        config["roles"]["cheap_alt"]["provider"]["routing"] = routing
+        assert check_engines(config)["status"] == PASS
+    models = {role: config["roles"][role]["model"] for role in ("production_llm", "cheap_alt")}
+    production = next(r["body"] for r in server.requests if r["body"]["model"] == models["production_llm"])
+    cheap = next(r["body"] for r in server.requests if r["body"]["model"] == models["cheap_alt"])
+    assert production["thinking"] == {"type": "enabled"} and "provider" not in production
+    assert cheap["provider"] == routing and "thinking" not in cheap
 
 
 def test_an_engine_that_does_not_answer_is_retried_then_fails_as_unreachable(monkeypatch):

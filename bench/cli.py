@@ -32,6 +32,8 @@ def main(argv=None) -> int:
     group.add_argument("--ids", nargs="+", help="question ids, all inside the split")
     group.add_argument("--limit", type=int, help="the first N questions of the split, by id")
     p.add_argument("--engine", choices=("production_llm", "cheap_alt"), help="B2 only: the engine of the single call")
+    p.add_argument("--workers", type=int, default=1,
+                   help="answer the questions in this many processes: still one run and one manifest (default 1)")
 
     # ---- F1: replay and the call-site registry
     p = sub.add_parser("replay", help="resend the first attempt of every invocation of a B0 run to another engine")
@@ -41,6 +43,7 @@ def main(argv=None) -> int:
     group.add_argument("--engine", help="a fixed engine: production_llm, cheap_alt, slm:<candidate>[+lora:<served name>]")
     group.add_argument("--arm", choices=AGENT_ARMS, help="route each call as this arm does")
     p.add_argument("--call-sites", nargs="+", help="only these call sites")
+    p.add_argument("--ids", nargs="+", help="only these questions of the source run")
 
     p = sub.add_parser("call-sites", help="add the call sites of done train/calib runs to registry/call_sites.json")
     p.add_argument("run_ids", nargs="+")
@@ -89,10 +92,12 @@ def main(argv=None) -> int:
             preprocess(args.config, args.db)
         elif args.command == "run":
             from bench.agent.runner import run_agent
-            print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine))
+            print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
+                            workers=args.workers))
         elif args.command == "replay":
             from bench.agent.replay import replay
-            print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites))
+            print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,
+                         ids=args.ids))
         elif args.command == "call-sites":
             from bench.agent.registry import update_call_sites
             print(update_call_sites(args.run_ids))

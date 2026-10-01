@@ -41,6 +41,34 @@ def test_extends_cycle(tmp_path):
         load_config(tmp_path / "a.yaml")
 
 
+def test_the_shipped_engine_settings_are_the_decided_ones():
+    """The API roles' token budget covers the reasoning and the answer and their timeout a long
+    reasoning (16384 and 900 s); the SLM candidates keep 4096; and 32 calls of one step may be in flight."""
+    config = load_config(BASE)
+    for role in ("production_llm", "cheap_alt"):
+        params = config["roles"][role]["params"]
+        assert (params["max_tokens"], params["timeout_s"]) == (16384, 900)
+        assert config["roles"][role]["reasoning"]["enabled"] is True
+    assert config["roles"]["cheap_alt"]["params"]["reasoning_effort"] == "medium"
+    assert {c["params"]["max_tokens"] for c in config["roles"]["slm_candidates"]} == {4096}
+    assert config["agent"]["max_workers"] == 32
+
+
+ROUTING = {"only": ["a-provider"], "allow_fallbacks": False, "require_parameters": True, "quantizations": ["fp8"]}
+
+
+def test_a_decided_provider_pin_is_valid():
+    """The shape the `null  # before runs` values of `roles.*.provider` and `reasoning` take once decided."""
+    config = copy.deepcopy(load_config(BASE))
+    config["roles"]["production_llm"]["reasoning"].update(forced_temperature=1.0)
+    config["roles"]["production_llm"]["params"].update(extra_body={"thinking": {"type": "enabled"}})
+    config["roles"]["production_llm"]["provider"].update(
+        name="a-provider", quantization="fp8", checkpoint={"repo": "org/model", "revision": "a" * 40},
+        reserve={"name": "another-provider", "base_url": "https://reserve.example/v1", "quantization": None})
+    config["roles"]["cheap_alt"]["provider"].update(name="an-aggregator", routing=ROUTING)
+    assert validate_config(config) == []
+
+
 @pytest.mark.parametrize("mutate", [
     lambda c: c["call_sites"].pop("revise"),
     lambda c: c["call_sites"]["revise"].update(temperature=-1),
@@ -64,6 +92,24 @@ def test_extends_cycle(tmp_path):
     lambda c: c["arms"]["B1"].update(few_shot=3),
     lambda c: c["retries"].update(http_backoff_s=2),
     lambda c: c["roles"]["slm_candidates"][0]["endpoint"].update(headers_env={"Modal-Key": ""}),
+    # the API roles' reasoning state and provider pin
+    lambda c: c["roles"]["production_llm"].pop("reasoning"),
+    lambda c: c["roles"]["cheap_alt"]["reasoning"].update(enabled="medium"),
+    lambda c: c["roles"]["production_llm"]["reasoning"].update(forced_temperature=-1),
+    lambda c: c["roles"]["production_llm"]["reasoning"].update(forced_temperature="1.0"),
+    lambda c: c["roles"]["production_llm"]["params"].update(extra_body="thinking"),
+    lambda c: c["roles"]["cheap_alt"].pop("provider"),
+    lambda c: c["roles"]["cheap_alt"]["provider"].pop("reserve"),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(name=3),
+    lambda c: c["roles"]["production_llm"]["provider"].update(checkpoint={"repo": "org/model", "revision": "main"}),
+    lambda c: c["roles"]["production_llm"]["provider"].update(reserve={"name": "other"}),
+    # a routing pin that can fall back, or lets a provider drop a parameter, pins nothing
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={**ROUTING, "allow_fallbacks": True}),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={**ROUTING, "require_parameters": False}),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={**ROUTING, "only": []}),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={k: v for k, v in ROUTING.items() if k != "quantizations"}),
+    lambda c: (c["roles"]["cheap_alt"]["provider"].update(routing=ROUTING),  # two places deciding the routing
+               c["roles"]["cheap_alt"]["params"].update(extra_body={"provider": {"only": ["other"]}})),
 ])
 def test_invalid_configs(mutate):
     config = copy.deepcopy(load_config(BASE))

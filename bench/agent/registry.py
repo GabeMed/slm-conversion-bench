@@ -4,7 +4,9 @@ observed on train and calib (REQ-001; SPEC 7.1).
 Test executions, in git (the history is the record, no ledger file):
 - an execution on `test` starts only when every earlier commit of `registry/` is on origin/main;
 - before an execution on `test` starts, `registry/test/<run_id>.intent.json` is committed (run id,
-  type, arm, the `prereg/HASH` it runs under, time, code commit);
+  type, arm, the `prereg/HASH` it runs under, time, code commit) **and pushed to origin's main**; the
+  execution starts only once a fetch finds that commit there, so the intent is public before the
+  first question, whatever happens to the machine afterwards;
 - when it ends, whatever its status, its `manifest.json` is committed as
   `registry/test/<run_id>.manifest.json`.
 Only these two files are committed, never `calls.jsonl`, predictions or CHESS's outputs. A run that
@@ -130,12 +132,38 @@ def registered_call_sites() -> Dict[str, Any]:
 # ---------------------------------------------------------------- executions on test
 
 def commit_intent(manifest: Dict[str, Any]) -> str:
-    """Nothing in the intent comes from a model or a provider: no redaction needed."""
+    """Commit the intent and publish it: nothing runs on `test` until origin's main shows it.
+    Nothing in the intent comes from a model or a provider: no redaction needed."""
     rel = f"{TEST_DIR}/{manifest['run_id']}.intent.json"
     _write(rel, {key: manifest.get(key) for key in
                  ("run_id", "type", "arm", "engine", "split", "source_run_id", "prereg_hash", "commit", "started_at")})
     _commit(rel, f"registry: intent of test execution {manifest['run_id']}")
+    _publish(_git("rev-parse", "HEAD").stdout.strip(), manifest["run_id"])
     return rel
+
+
+def _publish(commit: str, run_id: str) -> None:
+    """Push `commit` (the intent, with whatever of HEAD origin's main lacks) to origin's main, never
+    forced, and confirm it by what a fetch finds there (`barrier.fetch_origin_main`): the push's own
+    answer is not the evidence. Like the fetch, the push never prompts and times out. On any failure
+    the execution is refused; the intent stays committed here, the record of an attempt, to push by hand."""
+    refusal = (f"refusing to run {run_id} on the test split: its intent is committed but not published "
+               f"(%s): nothing was run; `git push origin HEAD:main`, then start the execution again")
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    try:
+        pushed = subprocess.run(["git", "-C", str(paths.ROOT), "push", "--quiet", "origin", f"{commit}:refs/heads/main"],
+                                capture_output=True, text=True, timeout=barrier.FETCH_TIMEOUT_S, env=env)
+    except subprocess.TimeoutExpired:
+        raise barrier.TestSplitLocked(refusal % f"the push timed out after {barrier.FETCH_TIMEOUT_S} s") from None
+    if pushed.returncode != 0:
+        detail = (pushed.stderr.strip().splitlines() or ["no detail"])[-1]
+        raise barrier.TestSplitLocked(refusal % f"the push to origin/main failed: {detail}")
+    remote_commit, why_not = barrier.fetch_origin_main(paths.ROOT)
+    if remote_commit is None:
+        raise barrier.TestSplitLocked(refusal % why_not)
+    if _git("merge-base", "--is-ancestor", commit, remote_commit).returncode != 0:
+        raise barrier.TestSplitLocked(refusal % "origin/main does not contain it after the push")
 
 
 def commit_manifest(run_dir: Path, config: Dict[str, Any]) -> str:

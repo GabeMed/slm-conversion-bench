@@ -73,6 +73,23 @@ def test_call_sites_filter_what_is_resent(monkeypatch, repo, source):
     assert manifest["call_sites"] == ["generate_candidate", "revise"] and manifest["status"] == "done"
 
 
+def test_ids_keep_only_those_questions_of_the_source(monkeypatch, repo, source):
+    """`--ids`: a replay of a subset of the source's questions (the pilot, inside a calibration run),
+    every invocation of each kept question resent, none of the others."""
+    teacher = read_calls(paths.RUNS / source / "calls.jsonl")
+    _, manifest, calls = replayed(monkeypatch, repo, source, engine="slm:qwen3-8b", ids=["2"])
+    assert {identity(c) for c in calls} == {identity(c) for c in teacher if c["attempt"] == 1 and c["question_id"] == "2"}
+    assert (manifest["question_ids"], manifest["status"], manifest["n_questions_replayed"]) == (["2"], "done", 1)
+    assert manifest["n_invocations"] == len(calls) < len({identity(c) for c in teacher})
+    both, _, _ = replayed(monkeypatch, repo, source, engine="slm:qwen3-8b", ids=["2"], call_sites=["revise"])
+    assert {(c["question_id"], c["call_site"]) for c in read_calls(both / "calls.jsonl")} == {("2", "revise")}
+    from bench.data import DataError
+    with pytest.raises(DataError, match="ids not among the questions of .*: \\['3'\\]"):  # in the split, not in the source
+        replay(str(repo), source, engine="slm:qwen3-8b", ids=["2", "3"])
+    with pytest.raises(DataError, match="more than once"):
+        replay(str(repo), source, engine="slm:qwen3-8b", ids=["2", "2"])
+
+
 def test_the_same_retry_policy_applies(monkeypatch, repo, source):
     class Flaky(Revising):
         def __init__(self):
@@ -193,3 +210,15 @@ def test_a_source_whose_snapshot_changed_is_refused(monkeypatch, repo, source):
     snapshot.write_text(json.dumps(config))
     with pytest.raises(runner.data.DataError, match="does not match its manifest"):
         replay(str(repo), source, engine="production_llm")
+
+
+def test_the_cli_passes_the_ids_and_the_workers(monkeypatch, capsys):
+    from bench import cli
+    from bench.agent import replay as replay_module
+    seen = {}
+    monkeypatch.setattr(replay_module, "replay", lambda config, source, **kwargs: seen.update(replay=(source, kwargs)) or "r")
+    monkeypatch.setattr(runner, "run_agent", lambda config, arm, split, **kwargs: seen.update(run=kwargs) or "a")
+    assert cli.main(["replay", "agent-B0-calib-x", "--engine", "cheap_alt", "--ids", "7", "8"]) == 0
+    assert seen["replay"] == ("agent-B0-calib-x", {"engine": "cheap_alt", "arm": None, "call_sites": None, "ids": ["7", "8"]})
+    assert cli.main(["run", "--arm", "B0", "--split", "calib", "--workers", "8"]) == 0
+    assert cli.main(["run", "--arm", "B0", "--split", "calib"]) == 0 and seen["run"]["workers"] == 1  # the default

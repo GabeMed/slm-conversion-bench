@@ -101,9 +101,74 @@ def _agent_engines(node: Any, where: str = "agent") -> List[str]:
     return errors
 
 
-def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
-    """The agent's own settings: retries, concurrency, the B1 few-shot and local embeddings (F1)."""
+# ---------------------------------------------------------------- the API roles' reasoning and provider pin
+
+PROVIDER_KEYS = ("name", "quantization", "checkpoint", "reserve", "routing")
+
+
+def _text_or_null(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and bool(value))
+
+
+def _routing_errors(where: str, routing: Any) -> List[str]:
+    """An aggregator's routing pin: one that could fall back, or drop a parameter, would pin nothing."""
+    def names(value):
+        return isinstance(value, list) and bool(value) and all(isinstance(v, str) and v for v in value)
+    if not isinstance(routing, dict) or set(routing) != {"only", "allow_fallbacks", "require_parameters", "quantizations"}:
+        return [f"{where}.routing must be null or {{only, allow_fallbacks, require_parameters, quantizations}}"]
+    errors = [f"{where}.routing.{key} must be a non-empty list of names" for key in ("only", "quantizations")
+              if not names(routing[key])]
+    if routing["allow_fallbacks"] is not False or routing["require_parameters"] is not True:
+        errors.append(f"{where}.routing must set allow_fallbacks: false and require_parameters: true")
+    return errors
+
+
+def api_role_errors(config: Dict[str, Any]) -> List[str]:
+    """What each API role declares besides its endpoint: its reasoning state (`reasoning.enabled`, asserted by
+    the preflight probe; `reasoning.forced_temperature`, the value C1 records when the provider forces one)
+    and the provider that serves it (`provider`, whose `name` C1 records)."""
     errors = []
+    for role in SINGLE_MODEL_ROLES:
+        spec, where = config["roles"][role], f"roles.{role}"
+        reasoning = spec.get("reasoning")
+        if not isinstance(reasoning, dict) or not isinstance(reasoning.get("enabled"), bool):
+            errors.append(f"{where}.reasoning.enabled must be true or false")
+        else:
+            forced = reasoning.get("forced_temperature")
+            if forced is not None and (isinstance(forced, bool) or not isinstance(forced, (int, float)) or forced < 0):
+                errors.append(f"{where}.reasoning.forced_temperature must be null or a number >= 0")
+        extra_body = (spec.get("params") or {}).get("extra_body")
+        if extra_body is not None and not isinstance(extra_body, dict):
+            errors.append(f"{where}.params.extra_body must be a mapping")
+        provider = spec.get("provider")
+        if not isinstance(provider, dict) or set(provider) != set(PROVIDER_KEYS):
+            errors.append(f"{where}.provider must have exactly {PROVIDER_KEYS} (null until decided)")
+            continue
+        errors += [f"{where}.provider.{key} must be a string or null" for key in ("name", "quantization")
+                   if not _text_or_null(provider[key])]
+        checkpoint = provider["checkpoint"]
+        if checkpoint is not None and not (isinstance(checkpoint, dict) and set(checkpoint) == {"repo", "revision"}
+                                           and isinstance(checkpoint["repo"], str) and checkpoint["repo"]
+                                           and isinstance(checkpoint["revision"], str) and _COMMIT.match(checkpoint["revision"])):
+            errors.append(f"{where}.provider.checkpoint must be null or {{repo, revision: a 40-hex commit}}")
+        reserve = provider["reserve"]
+        if reserve is not None and not (isinstance(reserve, dict) and set(reserve) == {"name", "base_url", "quantization"}
+                                        and all(isinstance(reserve[k], str) and reserve[k] for k in ("name", "base_url"))
+                                        and _text_or_null(reserve["quantization"])):
+            errors.append(f"{where}.provider.reserve must be null or {{name, base_url, quantization}}")
+        if provider["routing"] is not None:
+            errors += _routing_errors(f"{where}.provider", provider["routing"])
+            if isinstance(extra_body, dict) and "provider" in extra_body:  # one place decides the routing
+                errors.append(f"{where}.params.extra_body.provider is set by {where}.provider.routing")
+    return errors
+
+# ---------------------------------------------------------------- end of the API roles' block
+
+
+def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """The agent's own settings: retries, concurrency, the B1 few-shot, local embeddings (F1), and the API
+    roles' reasoning and provider pin."""
+    errors = api_role_errors(config)
 
     def number(value, minimum, integer=False):
         kinds = (int,) if integer else (int, float)

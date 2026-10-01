@@ -5,8 +5,8 @@ to another engine: `--engine <name>` fixed, or `--arm <arm>` to route each call 
 (C4, with its facts). Each resent invocation keeps the source's `question_id` and `invocation_key`,
 so J2 pairs them, and runs under the same policy as in the agent: the call site's temperature and
 parser (the agent's own rules for the agents' calls), the parse and transport retries, and B1's
-few-shot prefix whenever the engine is `cheap_alt`. `--call-sites` keeps only those call sites.
-`zeroshot` (S4) is a replay with `--engine slm:<candidate>`.
+few-shot prefix whenever the engine is `cheap_alt`. `--call-sites` keeps only those call sites, and
+`--ids` only those questions of the source. `zeroshot` (S4) is a replay with `--engine slm:<candidate>`.
 
 It writes runs/<run_id>/ with `calls.jsonl`, `manifest.json` (`type: replay`, `source_run_id`) and
 the `config.json` snapshot every execution keeps; no predictions, since no SQL is chosen. The
@@ -111,7 +111,7 @@ def readers(config: Dict[str, Any]) -> Callable[[Dict[str, Any]], Callable[[], A
 
 
 def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, arm: Optional[str] = None,
-           call_sites: Optional[List[str]] = None) -> Path:
+           call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None) -> Path:
     config = load_config(config_path)
     hooks.configure(config)
     if (engine is None) == (arm is None):
@@ -123,12 +123,18 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
     unknown = set(call_sites or ()) - set(CALL_SITES)
     if unknown:
         raise data.DataError(f"unknown call sites: {sorted(unknown)}")
+    outside = [q for q in ids or () if q not in source["question_ids"]]
+    if outside:
+        raise data.DataError(f"ids not among the questions of {source_run_id}: {outside}")
+    if len(set(ids or ())) != len(ids or ()):
+        raise data.DataError("an id appears more than once in --ids")
     calls_path = paths.RUNS / source_run_id / "calls.jsonl"
     calls = read_calls(calls_path)
     errors = validate_calls(calls)
     if errors:
         raise data.DataError(f"{source_run_id}: calls.jsonl is not valid C1: {errors[:3]}")
-    records = [c for c in calls if c["attempt"] == 1 and (not call_sites or c["call_site"] in call_sites)]
+    records = [c for c in calls if c["attempt"] == 1 and (not call_sites or c["call_site"] in call_sites)
+               and (not ids or c["question_id"] in ids)]
 
     if engine is not None:
         engine_spec(config, engine)  # a ConfigError names what is wrong with the engine
@@ -161,7 +167,8 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
         raise
     finally:
         empty = [] if records else [f"no invocation to replay: {source_run_id} has none"
-                                    + (f" at the call sites {sorted(call_sites)}" if call_sites else "")]
+                                    + (f" at the call sites {sorted(call_sites)}" if call_sites else "")
+                                    + (f" for the questions {sorted(ids, key=int)}" if ids else "")]
 
         def status(c1_errors, changed):
             if outcome["harness_errors"] or c1_errors or empty:
