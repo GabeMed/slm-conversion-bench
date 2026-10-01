@@ -506,9 +506,17 @@ def pipeline(tmp_path, monkeypatch):
     cheap_calib = replay(calib, "replay-cheap-calib", "cheap_alt", 0.8)
     run("replay-cheap-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib"}, cheap_calib)
     per_call_eval("eval-cheap-calib", "replay-cheap-calib", cheap_calib, lambda c: teacher_ok(c) and unit("cheap", c["question_id"]) < 0.8)
+    # the teacher against itself on the pilot questions (T4): the agreement bar's cap
+    routine_sites = ["agent_ir", "extract_keywords", "filter_column", "select_tables"]
+    self_calls = replay([c for c in calib if c["question_id"] in PILOT and c["call_site"] in routine_sites],
+                        "replay-self-calib", "production_llm", 0.98, model="teacher-model")
+    run("replay-self-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "production_llm",
+                              "split": "calib", "call_sites": routine_sites}, self_calls)
     j7_path, allocation = j7.run(str(centroids), str(adapters), {"cheap_alt": ("replay-cheap-calib", "eval-cheap-calib"),
                                                                 "slm": ("replay-B4-calib", "eval-B4-calib")},
-                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, noninferiority)
+                                 "eval-B0-calib-per-call", str(j8_path), str(j6_path), config, noninferiority,
+                                 teacher_self_replay="replay-self-calib", pilot_ids=PILOT,
+                                 difficulty={q: ("simple", "moderate", "challenging")[int(q) % 3] for q in CALIB_IDS})
     allocated = facts.read_fact(str(allocation), "allocation")[0]["allocation"]
 
     # the arms on test

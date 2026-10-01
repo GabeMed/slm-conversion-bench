@@ -164,7 +164,8 @@ def _f4(args) -> int:
             from bench.judge import j7
             replays = {engine: next(iter(_pairs([value]).items())) for engine, value in
                        (("cheap_alt", args.cheap_alt), ("slm", args.slm))}
-            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
+            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config,
+                          teacher_self_replay=args.teacher_self_replay), sep="\n")
         elif args.judgment == "j8":
             from bench.judge import j8
             print(j8.run(args.loadtest, config, args.sweep))
@@ -222,7 +223,9 @@ def f4_commands(sub) -> None:
     p.add_argument("--slm", required=True, metavar="REPLAY=EVAL", help="the calib replay routed as B4")
     p.add_argument("--teacher-eval", required=True)
     p.add_argument("--j8", required=True)
-    p.add_argument("--j6", required=True, help="the J6 result: its chosen candidate's zero-shot replay is the pilot")
+    p.add_argument("--j6", required=True, help="the J6 result that chose the adapters' base")
+    p.add_argument("--teacher-self-replay", required=True, metavar="RUN",
+                   help="the teacher's calib run replayed on production_llm on the pilot questions: A_tt, the agreement bar's cap")
     p = judgments.add_parser("j8", help="load: SLM cost per request at each utilization")
     p.add_argument("--loadtest", action="append", required=True)
     p.add_argument("--sweep", action="append", help="the sweep to use when an engine has several (repeatable)")
