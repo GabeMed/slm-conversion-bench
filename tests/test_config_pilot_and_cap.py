@@ -17,6 +17,8 @@ def test_the_shipped_configuration_sets_the_pilot_mix_the_cap_and_the_training_t
     assert config["curation"]["max_per_question_call_site"] == 4
     assert len(set(config["seeds"].values())) == len(config["seeds"]) and "curation_sample" in config["seeds"]
     assert config["train"]["timeout_s"] == 39600
+    # a projection that passes preflight leaves the container an hour to load the base and save the adapter
+    assert config["preflight"]["schedule"]["train_hours_max"] * 3600 == config["train"]["timeout_s"] - 3600
 
 
 @pytest.mark.parametrize("mutate, error", [

@@ -238,8 +238,9 @@ loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's 
 preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
   lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
   # the adapters train at the same time, one container each, so the largest one's projected hours are
-  # what must fit the night (SPEC 7.3, Day 1 night)
-  schedule: {train_hours_max: 12}
+  # what must fit (SPEC 7.3, Day 1 night). The projection times the training alone, so the limit stays
+  # an hour under train.timeout_s, which also covers the container loading the base and saving the adapter
+  schedule: {train_hours_max: 10}
 
 # ---------------------------------------------------------------- F4: S2, S3, the judgments, the report
 # (bench/curate.py, bench/embed.py, bench/judge/j2-j8, bench/report.py). `prices.table` above is read

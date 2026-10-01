@@ -459,7 +459,7 @@ def test_training_time_projects_the_largest_dataset_from_the_first_adapters_thro
     measured = check_training_time(config)
     epochs = config["train"]["sft"]["num_train_epochs"]
     assert epochs == 2 and measured["evidence"] == {
-        "train_hours_max": 12, "unreadable_manifests": [], "epochs": 2,
+        "train_hours_max": 10, "unreadable_manifests": [], "epochs": 2,
         "measured_on": {"cluster": "c2", "started_at": "2026-10-01T21:00:00+00:00", "gpu": config["train"]["gpu"],
                         "base": TINY, "tokens_per_second": 50.0},
         "dataset_tokens": {"c0": 4_000, "c1": 90_000, "c2": 9_000}, "largest": "c1",
