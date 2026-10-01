@@ -107,17 +107,37 @@ def test_the_cost_ratio_and_its_interval_by_hand():
     """Two questions, both arms right on both: the reference pays $1 and $3, the SLM arm $1 each. A
     resample of two is (q1, q1), (q1, q2), (q2, q1) or (q2, q2): the ratio of cost per correct query is
     1 (probability 1/4), 2 (1/2) or 3 (1/4). So the point is 2 and the 95% interval, [1, 3]."""
-    base, slm = {"q1": (1.0, True), "q2": (3.0, True)}, {"q1": (1.0, True), "q2": (1.0, True)}
+    base, slm = {"B0": {"q1": (1.0, True), "q2": (3.0, True)}}, {"B4": {"q1": (1.0, True), "q2": (1.0, True)}}
     assert report.cost_ratio_ci(base, slm, seed=7, n_boot=4000) == {"ratio": 2.0, "ci_low": 1.0, "ci_high": 3.0}
     assert report.cost_ratio_ci(base, slm, seed=7, n_boot=4000) == report.cost_ratio_ci(base, slm, seed=7, n_boot=4000)
     # the answers count: with the SLM arm wrong on q2, its cost per correct query doubles and the ratio halves;
     # a resample of q2 alone (probability 1/4) leaves it no correct answer, an infinite cost per correct query: ratio 0
-    wrong = report.cost_ratio_ci(base, {"q1": (1.0, True), "q2": (1.0, False)}, seed=7, n_boot=400)
+    wrong = report.cost_ratio_ci(base, {"B4": {"q1": (1.0, True), "q2": (1.0, False)}}, seed=7, n_boot=400)
     assert wrong["ratio"] == 1.0 and wrong["ci_low"] == 0.0
     with pytest.raises(JudgmentError, match="same questions"):
-        report.cost_ratio_ci(base, {"q1": (1.0, True)}, seed=7, n_boot=10)
+        report.cost_ratio_ci(base, {"B4": {"q1": (1.0, True)}}, seed=7, n_boot=10)
+    with pytest.raises(JudgmentError, match="same questions"):
+        report.cost_ratio_ci(base, {}, seed=7, n_boot=10)
     with pytest.raises(JudgmentError, match="undefined"):
-        report.cost_ratio_ci({"q1": (1.0, False), "q2": (3.0, False)}, slm, seed=7, n_boot=10)
+        report.cost_ratio_ci({"B0": {"q1": (1.0, False), "q2": (3.0, False)}}, slm, seed=7, n_boot=10)
+
+
+def test_the_cost_ratios_interval_covers_the_choice_of_the_arms():
+    """Two reference arms that swap places: X pays $1 and $3, Y pays $3 and $1, the SLM arm $1 each. Each
+    resample takes the cheaper of X and Y again: (q1, q1) gives X at $1, (q2, q2) gives Y at $1, and a
+    mixed resample gives both at $2. So the ratio is 1 or 2, half the time each: the interval is [1, 2].
+    Bootstrapping only the pair the full sample chose (X, on the tie) would give [1, 3]."""
+    bases = {"X": {"q1": (1.0, True), "q2": (3.0, True)}, "Y": {"q1": (3.0, True), "q2": (1.0, True)}}
+    slm = {"B4": {"q1": (1.0, True), "q2": (1.0, True)}}
+    assert report.cost_ratio_ci(bases, slm, seed=7, n_boot=4000) == {"ratio": 2.0, "ci_low": 1.0, "ci_high": 2.0}
+    # and on the SLM side: the cheaper of two SLM arms in each resample
+    slms = {"B4": {"q1": (1.0, True), "q2": (3.0, True)}, "B5": {"q1": (3.0, True), "q2": (1.0, True)}}
+    flat = {"B0": {"q1": (6.0, True), "q2": (6.0, True)}}
+    assert report.cost_ratio_ci(flat, slms, seed=7, n_boot=4000) == {"ratio": 3.0, "ci_low": 3.0, "ci_high": 6.0}
+    # a reference arm with no correct answer in a resample is not the cheapest: the other one is taken
+    lame = {"X": {"q1": (1.0, True), "q2": (1.0, False)}, "Y": {"q1": (2.0, True), "q2": (2.0, True)}}
+    found = report.cost_ratio_ci(lame, slm, seed=7, n_boot=400)
+    assert found["ratio"] == 2.0 and found["ci_low"] == 1.0 and found["ci_high"] == 2.0
 
 
 def test_the_cost_ratios_interval_is_the_two_sided_95_percent_one():
@@ -128,16 +148,16 @@ def test_the_cost_ratios_interval_is_the_two_sided_95_percent_one():
     one would stop at the next values, 4/3 and 14/3."""
     base = {"q1": (1.0, True), "q2": (2.0, True), "q3": (6.0, True)}
     slm = {q: (1.0, True) for q in base}
-    assert report.cost_ratio_ci(base, slm, seed=7, n_boot=4000) == {"ratio": 3.0, "ci_low": 1.0, "ci_high": 6.0}
+    assert report.cost_ratio_ci({"B0": base}, {"B4": slm}, seed=7, n_boot=4000) == {"ratio": 3.0, "ci_low": 1.0, "ci_high": 6.0}
 
 
 def test_the_cost_ratio_is_resampled_paired_by_question():
     """Arms with the same cost and answer on every question: the ratio is 1 in every resample, which
     resampling the two arms apart would not give. An interval that holds the bar exactly meets it."""
     arm = {str(q): (1.0 + q % 3, q % 4 != 0) for q in range(40)}
-    assert report.cost_ratio_ci(arm, dict(arm), seed=3, n_boot=200) == {"ratio": 1.0, "ci_low": 1.0, "ci_high": 1.0}
+    assert report.cost_ratio_ci({"B0": arm}, {"B4": dict(arm)}, seed=3, n_boot=200) == {"ratio": 1.0, "ci_low": 1.0, "ci_high": 1.0}
     thrice = {q: (3 * cost, ok) for q, (cost, ok) in arm.items()}
-    found = report.cost_ratio_ci(thrice, arm, seed=3, n_boot=200)
+    found = report.cost_ratio_ci({"B0": thrice}, {"B4": arm}, seed=3, n_boot=200)
     assert found["ratio"] == pytest.approx(3.0) and found["ci_low"] == pytest.approx(3.0) == found["ci_high"]
 
 

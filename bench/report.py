@@ -69,7 +69,8 @@ Every verdict holds for this workload only: the map opens with a scope line, and
   - V3 (T9): the ratio of cost per correct query, the best arm without training ÷ the cheapest of the
     SLM arms (B4, B5 with SLM calls) that are non-inferior to B0, with a 95% interval from a paired
     bootstrap over the questions (`seeds.bootstrap`, `stats.n_boot`; each question's cost is J3's
-    `by_question`). At one utilization it reads "meets the paper's bar" if the lower bound is at or
+    `by_question`). Each resample takes the cheapest arm of each set again, so the interval covers the
+    choice of the arms too (which arms are non-inferior is J4's verdict, and stays). At one utilization it reads "meets the paper's bar" if the lower bound is at or
     above `claims.v3_min_ratio`, "cheaper, below the bar" if the lower bound is above 1, "refutes V3"
     if the upper bound is at or below 1, and inconclusive otherwise. Over the two ends: the reading
     at the lowest utilization when it is cheaper there (the bar is met only if met there); refutes when
@@ -521,23 +522,29 @@ def best_slm(data, u) -> Tuple[Optional[str], Optional[float]]:
     return (min(options)[1], min(options)[0]) if options else (None, None)
 
 
-def cost_ratio_ci(base: Dict[str, Tuple[float, bool]], slm: Dict[str, Tuple[float, bool]], seed: int,
-                  n_boot: int) -> Dict[str, float]:
-    """The ratio of cost per correct query, `base` ÷ `slm` (each {question: (cost, correct)}, over the
-    same questions), and its 95% interval from a paired bootstrap with the question as the unit: a
-    resample draws questions with replacement and keeps both arms' cost and answer of each together.
-    The bounds are inverted-CDF quantiles, as J4's: the ⌈n_boot/40⌉-th smallest and largest resampled
-    ratio. An SLM arm with no correct answer in a resample costs infinitely per correct query: ratio 0."""
-    if set(base) != set(slm) or not base:
-        raise JudgmentError("a cost ratio pairs two arms on the same questions, and on at least one")
-    rows = [(base[q][0], int(bool(base[q][1])), slm[q][0], int(bool(slm[q][1]))) for q in sorted(base)]
+def cost_ratio_ci(bases: Dict[str, Dict[str, Tuple[float, bool]]], slms: Dict[str, Dict[str, Tuple[float, bool]]],
+                  seed: int, n_boot: int) -> Dict[str, float]:
+    """The ratio of cost per correct query, the cheapest of `bases` ÷ the cheapest of `slms` (each {arm:
+    {question: (cost, correct)}}, every arm over the same questions), and its 95% interval from a paired
+    bootstrap with the question as the unit: a resample draws questions with replacement, keeps every
+    arm's cost and answer of each together, and takes the cheapest arm of each set again, so the interval
+    covers the choice of the arms and not only the ratio of the pair the full sample chose. The bounds
+    are inverted-CDF quantiles, as J4's: the ⌈n_boot/40⌉-th smallest and largest resampled ratio. An arm
+    with no correct answer in a resample costs infinitely per correct query: the ratio is 0 when no SLM
+    arm has one."""
+    arms = [*bases.values(), *slms.values()]
+    if not bases or not slms or not arms[0] or any(set(arm) != set(arms[0]) for arm in arms):
+        raise JudgmentError("a cost ratio pairs its arms on the same questions, and on at least one")
+    rows = [tuple(x for arm in arms for x in (arm[q][0], int(bool(arm[q][1])))) for q in sorted(arms[0])]
 
     def ratio(sample: List[tuple]) -> float:
-        base_cost, base_ok, slm_cost, slm_ok = (sum(column) for column in zip(*sample))
-        if not base_ok or not slm_cost:
-            raise JudgmentError("a cost ratio is undefined when the reference arm has no correct answer or the SLM arm "
-                                "no cost")
-        return (base_cost / base_ok) / (slm_cost / slm_ok) if slm_ok else 0.0
+        sums = [sum(column) for column in zip(*sample)]  # per arm: its cost, its correct answers
+        per_correct = [sums[i] / sums[i + 1] if sums[i + 1] else math.inf for i in range(0, len(sums), 2)]
+        base, slm = min(per_correct[:len(bases)]), min(per_correct[len(bases):])
+        if base == math.inf or not slm:
+            raise JudgmentError("a cost ratio is undefined when no reference arm has a correct answer or the SLM arm "
+                                "has no cost")
+        return base / slm
     rng, n = random.Random(seed), len(rows)
     resampled = sorted(ratio([rows[int(rng.random() * n)] for _ in range(n)]) for _ in range(n_boot))
     k = -(-n_boot * RATIO_ALPHA.numerator // RATIO_ALPHA.denominator)
@@ -547,16 +554,19 @@ def cost_ratio_ci(base: Dict[str, Tuple[float, bool]], slm: Dict[str, Tuple[floa
 def cost_ratios(data, by_question: Dict[str, Dict[str, Dict[str, float]]], correct: Dict[str, Dict[str, bool]],
                 seed: int, n_boot: int) -> Dict[str, Dict[str, Any]]:
     """Per configured utilization, V3's cost ratio with its interval: the best arm without training ÷ the
-    cheapest SLM arm (T9), each read from J3's `by_question` and J1's answers."""
+    cheapest SLM arm (T9), each read from J3's `by_question` and J1's answers. `base` and `slm` name the
+    arms the full sample chose; the interval is over every arm non-inferior to B0, chosen again in each
+    resample."""
     out = {}
     base, _ = best_untrained(data)
+    pairs = lambda arm, scenario: {q: (by_question[arm][q][scenario], correct[arm][q]) for q in correct[arm]}  # noqa: E731
+    untrained = {a: pairs(a, "standard") for a in present(data, UNTRAINED) if _passes_v1(data, a)}
     for u in data["utilizations"]:
         slm, _ = best_slm(data, u)
         if base is None or slm is None:
             continue
-        pairs = lambda arm, scenario: {q: (by_question[arm][q][scenario], correct[arm][q]) for q in correct[arm]}  # noqa: E731
-        out[u] = {"base": base, "slm": slm,
-                  **cost_ratio_ci(pairs(base, "standard"), pairs(slm, f"standard@{u}"), seed, n_boot)}
+        trained = {a: pairs(a, f"standard@{u}") for a in slm_arms(data) if _passes_v1(data, a)}
+        out[u] = {"base": base, "slm": slm, **cost_ratio_ci(untrained, trained, seed, n_boot)}
     return out
 
 
