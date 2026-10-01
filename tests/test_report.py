@@ -17,7 +17,7 @@ from bench.judge.j4 import noninferiority
 from fixtures.world import unit
 
 VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute",
-              "no verdict", "meets the paper's", "cheaper, below", "utilization-dependent")
+              "no verdict", "meets the paper's", "cheaper even at", "utilization-dependent")
 
 
 def j4(ok=True, diff=-0.01, pilot=0.1, ci_low=None, ci_high=None):
@@ -63,6 +63,7 @@ def test_the_verdict_on_each_side_of_minus_5_pp():
     assert report.outcome(j4(True, ci_low=-0.0499)) == "non-inferior"
     assert report.outcome(j4(False, diff=-0.06, ci_low=-0.09, ci_high=-0.0501)) == "worse"
     assert report.outcome(j4(False, diff=-0.06, ci_low=-0.09, ci_high=-0.0499)) == "inconclusive"  # the point is below −Δ, not the bound
+    assert report.outcome(j4(False, diff=-0.06, ci_low=-0.09, ci_high=-0.05)) == "inconclusive"    # a bound at −Δ is not below it
     assert report.outcome(j4(False, ci_low=-0.0501, ci_high=0.01)) == "inconclusive"
 
 
@@ -109,12 +110,25 @@ def test_the_cost_ratio_and_its_interval_by_hand():
     base, slm = {"q1": (1.0, True), "q2": (3.0, True)}, {"q1": (1.0, True), "q2": (1.0, True)}
     assert report.cost_ratio_ci(base, slm, seed=7, n_boot=4000) == {"ratio": 2.0, "ci_low": 1.0, "ci_high": 3.0}
     assert report.cost_ratio_ci(base, slm, seed=7, n_boot=4000) == report.cost_ratio_ci(base, slm, seed=7, n_boot=4000)
-    # the answers count: with the SLM arm wrong on q2, its cost per correct query doubles and the ratio halves
-    assert report.cost_ratio_ci(base, {"q1": (1.0, True), "q2": (1.0, False)}, seed=7, n_boot=400)["ratio"] == 1.0
+    # the answers count: with the SLM arm wrong on q2, its cost per correct query doubles and the ratio halves;
+    # a resample of q2 alone (probability 1/4) leaves it no correct answer, an infinite cost per correct query: ratio 0
+    wrong = report.cost_ratio_ci(base, {"q1": (1.0, True), "q2": (1.0, False)}, seed=7, n_boot=400)
+    assert wrong["ratio"] == 1.0 and wrong["ci_low"] == 0.0
     with pytest.raises(JudgmentError, match="same questions"):
         report.cost_ratio_ci(base, {"q1": (1.0, True)}, seed=7, n_boot=10)
     with pytest.raises(JudgmentError, match="undefined"):
         report.cost_ratio_ci({"q1": (1.0, False), "q2": (3.0, False)}, slm, seed=7, n_boot=10)
+
+
+def test_the_cost_ratios_interval_is_the_two_sided_95_percent_one():
+    """Three questions, the reference paying $1, $2 and $6 and the SLM arm $1 each, all right: a resample's
+    ratio is the mean of three draws from {1, 2, 6}. It is 1 only when all three draws are the first
+    question, and 6 only when all are the third: probability 1/27 = 3.7% each, more than the 2.5% a 95%
+    interval leaves on each side and less than the 5% of a 90% one. So the 95% interval is [1, 6]; a 90%
+    one would stop at the next values, 4/3 and 14/3."""
+    base = {"q1": (1.0, True), "q2": (2.0, True), "q3": (6.0, True)}
+    slm = {q: (1.0, True) for q in base}
+    assert report.cost_ratio_ci(base, slm, seed=7, n_boot=4000) == {"ratio": 3.0, "ci_low": 1.0, "ci_high": 6.0}
 
 
 def test_the_cost_ratio_is_resampled_paired_by_question():
@@ -181,22 +195,36 @@ def test_v3_confirms_at_the_lowest_utilization_and_refutes_at_the_highest():
     met = v3(ratio(4, 3.2, 5), ratio(10, 8, 12), ratio(20, 16, 24))
     assert met["verdict"] == "meets the paper's 3× bar (even at 20% utilization)"
     assert "20%: 4.0× (95% CI [3.2, 5.0]) B0 ÷ B4, meets the paper's 3× bar · 50%: 10.0× (95% CI [8.0, 12.0])" in met["result"]
-    # 2× cheaper at the worst case: the old rule read 'refutes' (below 3×); it supports 'more economical'
-    assert v3(ratio(2, 1.5, 2.5), ratio(5, 4, 6), ratio(10, 8, 12))["verdict"] == "cheaper, below the 3× bar (even at 20% utilization)"
+    # 2× cheaper at the worst case: the old rule read 'refutes' (below 3×); it supports 'more economical'.
+    # The bar is met only if met at the lowest utilization: here it is met at 100%, and the verdict is the 20% one
+    assert v3(ratio(2, 1.5, 2.5), ratio(5, 4, 6), ratio(10, 8, 12))["verdict"] == \
+        "cheaper even at 20% utilization, below the 3× bar there"
     assert v3(ratio(0.5, 0.4, 0.6), ratio(0.7, 0.6, 0.8), ratio(0.9, 0.8, 1.0))["verdict"] == \
         "refutes V3 (not cheaper even at 100% utilization)"
-    assert v3(ratio(1.1, 0.8, 1.4), ratio(1.2, 0.9, 1.5), ratio(1.3, 0.95, 1.6))["verdict"] == \
-        "inconclusive (the cost ratio's interval holds 1 at every utilization)"
-    # not cheaper at 20%, cheaper at 100%: B4's cost is $0.4/u, which meets B0's $1 at u* = 40%
+    # decided at both ends, in opposite ways: not cheaper at 20%, cheaper at 100%. B4's cost is $0.4/u,
+    # which meets B0's $1 at u* = 40%, inside the configured range
     dear = {"B0": {"": 1.0}, "B4": {"20%": 2.0, "50%": 0.8, "100%": 0.4}}
     assert v3(ratio(0.5, 0.4, 0.6), ratio(1.25, 1.1, 1.4), ratio(2.5, 2.2, 2.8), dear)["verdict"] == \
         "utilization-dependent (tipping point u* ≈ 40%)"
-    assert v3(ratio(0.5, 0.4, 0.6), ratio(1.25, 0.9, 1.4), ratio(2.5, 0.9, 2.8), dear)["verdict"] == \
-        "utilization-dependent (tipping point u* ≈ 40%)"  # refuted at the lowest, not at the highest
-    assert v3(ratio(1.1, 0.8, 1.4), ratio(1.2, 0.9, 1.5), ratio(2.5, 2.2, 2.8), dear)["verdict"].startswith("utilization-dependent")
+    steep = {"B0": {"": 1.0}, "B4": {"20%": 2.0, "50%": 0.5, "100%": 0.25}}
+    assert v3(ratio(0.5, 0.4, 0.6), ratio(2, 1.8, 2.2), ratio(4, 3.5, 4.5), steep)["verdict"].startswith("utilization-dependent")
+    # an end the interval does not decide gets no tipping point: the point costs would put it outside the
+    # configured range (here B4's $1.05 at 100% never reaches B0's $1), or below the lowest utilization
+    never = {"B0": {"": 1.0}, "B4": {"20%": 2.0, "50%": 1.3, "100%": 1.05}}
+    assert v3(ratio(0.5, 0.4, 0.6), ratio(0.77, 0.7, 0.85), ratio(0.95, 0.85, 1.06), never)["verdict"] == \
+        "inconclusive (at 20% utilization: not cheaper; at 100%: the interval holds 1)"
+    close = {"B0": {"": 1.0}, "B4": {"20%": 0.9, "50%": 0.55, "100%": 0.4}}
+    assert v3(ratio(1.11, 0.8, 1.4), ratio(1.8, 1.5, 2.1), ratio(2.5, 2.2, 2.8), close)["verdict"] == \
+        "inconclusive (at 20% utilization: the interval holds 1; at 100%: cheaper)"
+    assert v3(ratio(1.11, 0.8, 1.4), ratio(1.8, 1.5, 2.1), ratio(4, 3.5, 4.5), close)["verdict"] == \
+        "inconclusive (at 20% utilization: the interval holds 1; at 100%: meets the 3× bar)"
+    assert v3(ratio(1.1, 0.8, 1.4), ratio(1.2, 0.9, 1.5), ratio(1.3, 0.95, 1.6))["verdict"] == \
+        "inconclusive (at 20% utilization: the interval holds 1; at 100%: the interval holds 1)"
     # no SLM arm non-inferior to B0: no ratio, and the comparisons say why
     failing = v3(None, None, None, tests=j4_results(False, False))
     assert failing["verdict"] == "inconclusive (planned power 0.80, 0.80) (no SLM arm is non-inferior to B0)"
+    both_worse = {"B0|B4": j4(False, diff=-0.2), "B0|B5": j4(False, diff=-0.2)}  # decided, not inconclusive: V1 and A6 refute
+    assert v3(None, None, None, tests=both_worse)["verdict"] == "not testable (every SLM arm is worse than B0)"
     assert row(report.claims_map(data_with(j4_results(), {"B0": {"": 1.0}})), "V3")["verdict"] == "no data"
 
 
@@ -227,8 +255,15 @@ def test_a6_takes_b5_against_b0_under_the_utilization_bracket():
     assert a6({"20%": 2.0, "50%": 1.6, "100%": 1.0})["verdict"].startswith("refutes")  # the same cost is not cheaper
     # cheaper at 100% only: $0.4/u meets $1 at u* = 40% (the old rule read 'refutes' at 20% and 'confirms' at 100%)
     assert a6({"20%": 2.0, "50%": 0.8, "100%": 0.4})["verdict"] == "utilization-dependent (tipping point u* ≈ 40%)"
+    assert a6({"20%": 1.0, "50%": 0.4, "100%": 0.2})["verdict"] == "utilization-dependent (tipping point u* ≈ 20%)"  # the same cost at 20%
     # cheaper everywhere, but not shown non-inferior to B0: no confirmation
     assert a6({"20%": 0.4, "100%": 0.05}, tests=j4_results(ok5=False))["verdict"] == "inconclusive (planned power 0.80)"
+    # B5 against B0 is this row's (T7): a B5 that is worse than B0 refutes it, however cheap
+    worse = {"B0|B4": j4(True), "B0|B5": j4(False, diff=-0.2)}
+    assert a6({"20%": 0.4, "100%": 0.05}, tests=worse)["verdict"] == "refutes (B5 is worse than B0)"
+    # allocated to an SLM, and no call of the execution reached one: an LLM system, which says nothing of A6
+    llm_only = a6({"": 0.4}, j7={"allocation": {"c0": "slm"}})
+    assert llm_only["verdict"] == "not testable (B5's execution made no SLM call)"
     assert a6({"20%": 0.4, "100%": 0.05}, tests=j4_results(ok4=False))["verdict"].startswith("confirms")  # B4 is V1's, not A6's
     assert row(report.claims_map(data_with(tests, {"B0": {"": 1.0}})), "A6")["verdict"] == "no data"
 
@@ -348,6 +383,7 @@ def test_cost_verdicts_carry_their_labels_and_an_upper_bound_is_inconclusive():
     data["arms"]["B5"]["slm_cost_basis"] = "extrapolated from per-adapter load tests"
     assert row(report.claims_map(data), "V3")["verdict"] == \
         "meets the paper's 3× bar (even at 20% utilization) [costs: extrapolated from per-adapter load tests (B5)]"
+    assert "delta_pp" not in data  # every test carries its own margin
     data["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)
     v3 = row(report.claims_map(data), "V3")["verdict"]
     assert v3.startswith("inconclusive (rests on an upper-bound cost) [costs: ") and \

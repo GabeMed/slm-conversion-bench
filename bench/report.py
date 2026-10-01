@@ -71,10 +71,15 @@ Every verdict holds for this workload only: the map opens with a scope line, and
     bootstrap over the questions (`seeds.bootstrap`, `stats.n_boot`; each question's cost is J3's
     `by_question`). At one utilization it reads "meets the paper's bar" if the lower bound is at or
     above `claims.v3_min_ratio`, "cheaper, below the bar" if the lower bound is above 1, "refutes V3"
-    if the upper bound is at or below 1, and inconclusive otherwise.
+    if the upper bound is at or below 1, and inconclusive otherwise. Over the two ends: the reading
+    at the lowest utilization when it is cheaper there (the bar is met only if met there); refutes when
+    not cheaper at the highest; utilization-dependent, with u*, when not cheaper at the lowest and
+    cheaper at the highest; and when an end's interval holds 1 and neither rule decides, inconclusive,
+    saying how each end reads (no u* is printed for an end the data does not decide). Not testable
+    when every SLM arm is worse than B0: there is no arm to price.
   - A6: confirms if B5 is cheaper than the best arm without training at the lowest utilization and
-    non-inferior to B0; refutes if it is not cheaper at the highest. Not testable when B5's allocation
-    gave no cluster to an SLM.
+    non-inferior to B0; refutes if B5 is worse than B0, or not cheaper at the highest. Not testable
+    when B5's allocation gave no cluster to an SLM, or its execution made no SLM call.
   - AV2 wins (the paper is refuted) only if B1 costs no more than the cheaper SLM arm at the highest
     utilization too; it does not refute if the SLM arm is cheaper at the lowest. The fixed cost and
     its payback (SPEC §6.6) are not a J1–J8 output and are left out, which the row says.
@@ -281,7 +286,7 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
         finished = manifest(eval_run_id).get("finished_at")
         if first is not None and (not finished or datetime.fromisoformat(finished) >= first):
             raise JudgmentError(f"the pilot's {label} evaluation {eval_run_id} did not finish before the first test "
-                                f"execution started ({first.isoformat()}): its margin would not be pre-registered")
+                                f"execution started ({first.isoformat()}): the pilot is read before the test is touched")
     return replay_several
 
 
@@ -415,7 +420,7 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     thresholds = config["thresholds"]
     data = {"split": split, "scope": SCOPE, "arms": arms, "tests": tests, "d_pilot": d_pilot,
             "pilot_ids": sorted(pilot_ids, key=int), "gold_tests": gold_tests, "repair_test": gold_tests.get("revise"),
-            "per_call_uncovered": uncovered, "formats": formats, "judgments": judged, "delta_pp": thresholds["delta_pp"],
+            "per_call_uncovered": uncovered, "formats": formats, "judgments": judged,
             "format_tolerance_pp": thresholds["format_tolerance_pp"], "min_calls": config["allocation"]["min_calls"],
             "v3_min_ratio": config["claims"]["v3_min_ratio"],
             "utilizations": [f"{round(u * 100)}%" for u in sorted(config["cost"]["utilizations"])],
@@ -705,9 +710,13 @@ def _a6(data, t5) -> Dict[str, str]:
     quality = f"{_against_b0('B5', t5)}, {outcome(t5)}"
     if at_low is None or at_high is None or base_cost is None:
         return {**row, "result": quality, "verdict": cost_verdict(data, "no data", arms)}
+    if "B5" not in slm_arms(data):  # allocated to an SLM, and no call reached one: an LLM system all the same
+        return {**row, "result": quality, "verdict": several_of(data, arms) or "not testable (B5's execution made no SLM call)"}
     result = (f"{quality}; cost per correct query: B5 {_usd(at_low)} at {low} utilization and {_usd(at_high)} at {high}, "
               f"against {_usd(base_cost)} of the best arm without training ({base})")
-    if at_high >= base_cost:
+    if outcome(t5) == "worse":
+        verdict = "refutes (B5 is worse than B0)"
+    elif at_high >= base_cost:
         verdict = f"refutes (B5 is not cheaper even at {high} utilization)"
     elif at_low >= base_cost:
         verdict = f"utilization-dependent ({tipping_point(data, ['B5'], base_cost)})"
@@ -723,6 +732,8 @@ def _v3(data, t4, t5) -> Dict[str, str]:
     row = {"claim": "V3 / A2 (this workload): a 7B SLM is 10–30× cheaper (p.4)", "power": _power(t4, t5)}
     said = {"meets": f"meets the paper's {bar:g}× bar", "cheaper": f"cheaper, below the {bar:g}× bar",
             "refutes": "refutes V3", "inconclusive": "inconclusive"}
+    end = {"meets": f"meets the {bar:g}× bar", "cheaper": "cheaper", "refutes": "not cheaper",
+           "inconclusive": "the interval holds 1"}  # how one end of the bracket reads inside a verdict
     low, high = _bracket(data)
     arms = present(data, TRAINED) + present(data, UNTRAINED)
     base, base_cost = best_untrained(data)
@@ -737,17 +748,21 @@ def _v3(data, t4, t5) -> Dict[str, str]:
     if base is None or not slm_arms(data):
         verdict = "no data"
     elif not passing:
-        verdict = f"{_inconclusive(t4, t5)} (no SLM arm is non-inferior to B0)"
+        worse = all(outcome(data["tests"].get(f"B0|{a}")) == "worse" for a in slm_arms(data))
+        verdict = ("not testable (every SLM arm is worse than B0)" if worse
+                   else f"{_inconclusive(t4, t5)} (no SLM arm is non-inferior to B0)")
     elif low not in ratios or high not in ratios:
         verdict = "no data"
-    elif readings[low] in ("meets", "cheaper"):
-        verdict = f"{said[readings[low]]} (even at {low} utilization)"
+    elif readings[low] == "meets":
+        verdict = f"meets the paper's {bar:g}× bar (even at {low} utilization)"
+    elif readings[low] == "cheaper":
+        verdict = f"cheaper even at {low} utilization, below the {bar:g}× bar there"
     elif readings[high] == "refutes":
         verdict = f"refutes V3 (not cheaper even at {high} utilization)"
-    elif readings[low] == readings[high] == "inconclusive":
-        verdict = "inconclusive (the cost ratio's interval holds 1 at every utilization)"
-    else:
+    elif readings[low] == "refutes" and readings[high] != "inconclusive":  # decided at both ends, in opposite ways
         verdict = f"utilization-dependent ({tipping_point(data, passing, base_cost)})"
+    else:  # an end the interval does not decide: no tipping point is read off the point costs
+        verdict = f"inconclusive (at {low} utilization: {end[readings[low]]}; at {high}: {end[readings[high]]})"
     return {**row, "result": result, "verdict": cost_verdict(data, verdict, arms)}
 
 
