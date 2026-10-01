@@ -1,5 +1,7 @@
 """S2 · `bench curate` and `bench datasets`: the production-signal filter, masking, exact and
-near-duplicate removal, the do-not-train rule, and the per-cluster training files."""
+near-duplicate removal, the cap per (question, call site) with its coverage report, the do-not-train
+rule, and the per-cluster training files."""
+import hashlib
 import json
 
 import pytest
@@ -7,13 +9,16 @@ import pytest
 pytest.importorskip("datasketch")
 
 from bench import paths  # noqa: E402
-from bench.curate import CurationError, Masker, curate, near_duplicates, run_curate, write_datasets  # noqa: E402
+from bench.curate import (CurationError, Masker, cap, coverage, curate, near_duplicates, run_curate,  # noqa: E402
+                          write_datasets)
 from bench.contracts.config import config_sha256, load_config  # noqa: E402
 from bench.judge.base import JudgmentError, read_jsonl, reference, write_result  # noqa: E402
 from fixtures.fake import call, prompt, write_run  # noqa: E402
 from synthetic import GOLD, make_repo  # noqa: E402
 
 SETTINGS = load_config(paths.ROOT / "config.yaml")["curation"]
+SEED = 7  # the cap's; the examples of these tests are under its ceiling unless they say otherwise
+DB_OF = {str(q): "db" for q in range(1, 10)}  # question id -> database
 KEEP = '{"chain_of_thought_reasoning": "not needed", "is_column_information_relevant": "No"}'
 
 
@@ -38,12 +43,12 @@ def test_success_filter_uses_the_production_signal_never_the_gold():
                  attempt=2, retry_of=first["call_id"])
     examples, counts = curate(calls + [first, retry], SETTINGS, fake_sql({
         "SELECT good": ([(1,)], None), "SELECT broken": (None, "OperationalError: no such column"),
-        "SELECT nothing": ([], None)}))
+        "SELECT nothing": ([], None)}), SEED, DB_OF)
     assert {(e["question_id"], e["call_site"]) for e in examples} == {("1", "generate_candidate"), ("4", "revise"),
                                                                       ("6", "select_tables")}
     assert counts["per_call_site"]["generate_candidate"] | {} == {
         "invocations": 3, "unparsed": 0, "sql_error": 1, "sql_empty": 1, "passed_filter": 1, "masked_sql": 0,
-        "exact_duplicates": 0, "near_duplicates": 0, "kept": 1}
+        "exact_duplicates": 0, "near_duplicates": 0, "over_cap": 0, "kept": 1}
     assert counts["per_call_site"]["filter_column"]["unparsed"] == 1
     six = next(e for e in examples if e["question_id"] == "6")
     assert six["completion"] == [{"role": "assistant", "content": '{"table_names": ["t"]}'}]  # the attempt that parsed
@@ -54,18 +59,18 @@ def test_success_filter_uses_the_production_signal_never_the_gold():
 def test_masking_that_would_change_a_sql_completion_drops_the_example():
     sql = "SELECT * FROM users WHERE email = 'bob@corp.com'"
     c = call("r", "1", "generate_candidate", "t:0", response=sql, parsed={"SQL": sql})
-    examples, counts = curate([c], SETTINGS, fake_sql({sql: ([(1,)], None)}))
+    examples, counts = curate([c], SETTINGS, fake_sql({sql: ([(1,)], None)}), SEED, DB_OF)
     assert examples == [] and counts["per_call_site"]["generate_candidate"]["masked_sql"] == 1
     ids = "SELECT * FROM schools WHERE CDSCode = '01100170109835'"  # a 14-digit id, not a card
     c = call("r", "2", "generate_candidate", "t:0", response=ids, parsed={"SQL": ids})
-    examples, _ = curate([c], SETTINGS, fake_sql({ids: ([(1,)], None)}))
+    examples, _ = curate([c], SETTINGS, fake_sql({ids: ([(1,)], None)}), SEED, DB_OF)
     assert examples[0]["completion"][0]["content"] == ids
 
 
 def test_an_unparsed_last_attempt_is_dropped_even_if_an_earlier_one_parsed():
     first = call("r", "1", "select_tables", response="{}", parsed={"table_names": []})
     second = call("r", "1", "select_tables", response="x", parsed_ok=False, attempt=2, retry_of=first["call_id"])
-    examples, counts = curate([first, second], SETTINGS, fake_sql({}))
+    examples, counts = curate([first, second], SETTINGS, fake_sql({}), SEED, DB_OF)
     assert examples == [] and counts["total"]["unparsed"] == 1
 
 
@@ -83,7 +88,7 @@ def test_masking_replaces_in_prompt_and_completion_and_counts():
 
     c = call("r", "1", "select_tables", messages=prompt("select_tables", "who is bob@corp.com?"),
              response='{"table_names": ["users"]} bob@corp.com', parsed={"table_names": ["users"]})
-    examples, counts = curate([c], SETTINGS, fake_sql({}))
+    examples, counts = curate([c], SETTINGS, fake_sql({}), SEED, DB_OF)
     assert "bob@corp.com" not in json.dumps(examples) and counts["mask_detections"] == {"email": 2}
 
 
@@ -92,7 +97,7 @@ def test_masking_replaces_in_prompt_and_completion_and_counts():
 def test_exact_duplicates_are_removed_after_masking():
     a = call("r", "1", "select_tables", messages=prompt("select_tables", "a@x.org"), response="{}", parsed={})
     b = call("r", "2", "select_tables", messages=prompt("select_tables", "b@y.org"), response="{}", parsed={})
-    examples, counts = curate([a, b], SETTINGS, fake_sql({}))
+    examples, counts = curate([a, b], SETTINGS, fake_sql({}), SEED, DB_OF)
     assert [e["question_id"] for e in examples] == ["1"]  # the same once the emails are masked
     assert counts["per_call_site"]["select_tables"]["exact_duplicates"] == 1
 
@@ -118,6 +123,92 @@ def test_near_duplicates_need_both_prompt_and_completion_alike():
     answers_differ = [pair[0], filter_example(long + " end!", "t.c", '{"is_column_information_relevant": "Yes", '
                                                                         '"chain_of_thought_reasoning": "needed for the count"}')]
     assert near_duplicates(answers_differ + other, SETTINGS["near_duplicate"]) == []
+
+
+# ---------------------------------------------------------------- the cap
+
+def example(question_id: str, site: str, key: str = "single") -> dict:
+    return {"call_id": f"{question_id}|{site}|{key}", "question_id": question_id, "call_site": site,
+            "invocation_key": key}
+
+
+def test_the_cap_keeps_a_seeded_sample_of_each_question_and_call_site():
+    many = [example("1", "filter_column", f"t.c{i}") for i in range(10)]
+    few = [example("2", "filter_column", f"t.c{i}") for i in range(3)]
+    other = [example("1", "select_tables")]  # the same question, another call site: its own ceiling
+    examples = many + few + other
+    kept = cap(examples, 4, 7)
+    ranked = sorted(many, key=lambda e: hashlib.sha256(f"7:1:filter_column:{e['invocation_key']}".encode()).hexdigest())
+    assert [e for e in kept if e in many] == [e for e in many if e in ranked[:4]]  # the rule, in the order given
+    assert [e for e in kept if e not in many] == few + other  # under the ceiling: all kept
+    assert cap(examples, 4, 7) == kept and cap(examples[::-1], 4, 7) == kept[::-1]  # seeded, whatever the order
+    assert len({tuple(e["call_id"] for e in cap(many, 4, seed)) for seed in range(5)}) > 1  # the seed draws
+    assert cap(examples, 1, 7) == [e for e in examples if e in (ranked[0], *cap(few, 1, 7), *other)]
+
+
+def test_the_cap_is_uniform_so_it_keeps_the_teachers_decisions_as_they_are():
+    """Two columns in ten are kept by the teacher. Over many seeds every invocation is drawn about as
+    often as any other, so the kept share of "yes" stays two in ten (a draw balanced by decision would
+    give five in ten)."""
+    examples = [example("1", "filter_column", f"t.c{i}") for i in range(10)]
+    yes = {examples[0]["call_id"], examples[1]["call_id"]}
+    seeds = range(400)
+    drawn = [e["call_id"] for seed in seeds for e in cap(examples, 4, seed)]
+    assert len(drawn) == 4 * len(seeds)
+    assert all(120 <= drawn.count(e["call_id"]) <= 200 for e in examples)  # 160 expected of each
+    assert 0.15 <= sum(c in yes for c in drawn) / len(drawn) <= 0.25
+
+
+def test_coverage_counts_rows_and_the_filters_tables_columns_and_decisions():
+    examples = [example("1", "filter_column", key) for key in ("a.x", "a.y", "b.z", "a.x@2")] + \
+        [example("2", "filter_column", "a.x"), example("3", "filter_column", "u.v"), example("3", "select_tables")]
+    db_of = {"1": "db1", "2": "db1", "3": "db2"}
+    keeps = {e["call_id"]: e["invocation_key"].startswith("a.x") for e in examples if e["call_site"] == "filter_column"}
+    assert coverage(examples, db_of, keeps) == {
+        "filter_column": {"rows": 6, "yes": 3, "no": 3, "yes_share": 0.5,
+                          # a repeated invocation (`@2`) and another question's are the same column
+                          "databases": {"db1": {"tables": 2, "columns": 3}, "db2": {"tables": 1, "columns": 1}}},
+        "select_tables": {"rows": 1}}
+    assert coverage([examples[-1]], db_of, keeps) == {"select_tables": {"rows": 1}}
+
+
+def column_call(question_id: str, key: str, parsed, response: str = "answer") -> dict:
+    return call("r", question_id, "filter_column", key, messages=prompt("filter_column", f"question {question_id}", key),
+                response=response, parsed=parsed)
+
+
+def test_curation_counts_what_the_cap_drops_and_keeps_what_is_left():
+    """`kept` is what the examples hold, after the cap; what the cap dropped is its own step."""
+    calls = [column_call("1", f"t.c{i}", {"is_column_information_relevant": "No"}) for i in range(6)] + \
+        [column_call("2", "t.c0", {"is_column_information_relevant": "Yes"}),
+         call("r", "1", "select_tables", response='{"table_names": ["t"]}', parsed={"table_names": ["t"]})]
+    examples, counts = curate(calls, {**SETTINGS, "max_per_question_call_site": 2}, fake_sql({}), SEED, DB_OF)
+    assert examples == cap(curate(calls, {**SETTINGS, "max_per_question_call_site": 9}, fake_sql({}), SEED, DB_OF)[0], 2, SEED)
+    assert counts["per_call_site"]["filter_column"] | {} == {
+        "invocations": 7, "unparsed": 0, "sql_error": 0, "sql_empty": 0, "passed_filter": 7, "masked_sql": 0,
+        "exact_duplicates": 0, "near_duplicates": 0, "over_cap": 4, "kept": 3}
+    assert (counts["total"]["over_cap"], counts["total"]["kept"]) == (4, 4) and len(examples) == 4
+    assert counts["cap"] == {
+        "max_per_question_call_site": 2, "seed": SEED,
+        "before": {"filter_column": {"rows": 7, "yes": 1, "no": 6, "yes_share": 0.1429,
+                                     "databases": {"db": {"tables": 1, "columns": 6}}},
+                   "select_tables": {"rows": 1}},
+        "after": {"filter_column": {"rows": 3, "yes": 1, "no": 2, "yes_share": 0.3333,
+                                    "databases": {"db": {"tables": 1, "columns": 2 + (
+                                        "t.c0" not in [e["invocation_key"] for e in examples if e["question_id"] == "1"])}}},
+                  "select_tables": {"rows": 1}}}
+    other = curate(calls, {**SETTINGS, "max_per_question_call_site": 2}, fake_sql({}), SEED + 1, DB_OF)
+    assert other[1]["cap"]["seed"] == SEED + 1 and other[1]["total"] == counts["total"]
+
+
+@pytest.mark.parametrize("unreadable", [{"chain_of_thought_reasoning": "the answer was cut before the decis"},
+                                        {"is_column_information_relevant": True}, ["Yes"]])
+def test_a_filter_output_the_agent_cannot_read_counts_as_a_dropped_column(unreadable):
+    """A cut-off answer still parses (the parser takes partial JSON); the agent then drops the column."""
+    calls = [column_call("1", "t.a", unreadable), column_call("1", "t.b", {"is_column_information_relevant": "YES"})]
+    examples, counts = curate(calls, SETTINGS, fake_sql({}), SEED, DB_OF)
+    assert len(examples) == 2 and counts["cap"]["after"]["filter_column"] | {} == {
+        "rows": 2, "yes": 1, "no": 1, "yes_share": 0.5, "databases": {"db": {"tables": 1, "columns": 2}}}
 
 
 # ---------------------------------------------------------------- the execution
@@ -161,6 +252,50 @@ def test_run_curate_executes_the_sql_on_the_pinned_database(tmp_path, monkeypatc
     examples = read_jsonl(out / "examples.jsonl")
     assert sorted((e["question_id"], e["call_site"]) for e in examples) == [
         ("1", "generate_candidate"), ("3", "generate_candidate"), ("3", "select_tables")]
+
+
+def test_run_curate_caps_each_question_and_call_site_and_reports_the_coverage(tmp_path, monkeypatch):
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    limit = config["curation"]["max_per_question_call_site"]
+    assert limit == 4 and config["seeds"]["curation_sample"] == 20260934
+    columns = ["gas_t.id", "gas_t.country", "gas_t.segment", "other_u.id", "other_u.note"]
+    run = "agent-B0-train-1"
+    calls = [call(run, q, "filter_column", key, messages=prompt("filter_column", f"question {q}", key),
+                  response=answer, parsed={"is_column_information_relevant": answer})
+             for q, keys in (("1", columns), ("2", columns[:2])) for key, answer in zip(keys, ("Yes", "No", "no", "YES", "No"))]
+    calls.append(call(run, "1", "select_tables", response='{"table_names": ["gas_t"]}', parsed={"table_names": ["gas_t"]}))
+    source = b0_train_run(teacher_config(config), calls=calls)
+    out = run_curate([source], str(config_path))
+    manifest, examples = json.loads((out / "manifest.json").read_text()), read_jsonl(out / "examples.jsonl")
+    total = manifest["counts"]["total"]  # one over the ceiling; `kept` is what the examples hold
+    assert (total["over_cap"], total["kept"]) == (1, 7) and manifest["n"] == len(examples) == 7
+    by_group = {}
+    for e in examples:
+        by_group.setdefault((e["question_id"], e["call_site"]), []).append(e["invocation_key"])
+    assert {group: len(keys) for group, keys in by_group.items()} == {
+        ("1", "filter_column"): limit, ("2", "filter_column"): 2, ("1", "select_tables"): 1}
+    dropped = (set(columns) - set(by_group[("1", "filter_column")])).pop()
+    yes = 2 + 1 - (dropped in ("gas_t.id", "other_u.id"))  # the teacher's "Yes"/"YES", read as the agent reads them
+    assert manifest["counts"]["cap"] == {
+        "max_per_question_call_site": limit, "seed": 20260934,
+        "before": {"filter_column": {"rows": 7, "yes": 3, "no": 4, "yes_share": 0.4286,
+                                     "databases": {"tiny": {"tables": 2, "columns": 5}}},
+                   "select_tables": {"rows": 1}},
+        "after": {"filter_column": {"rows": 6, "yes": yes, "no": 6 - yes, "yes_share": round(yes / 6, 4),
+                                    "databases": {"tiny": {"tables": 2, "columns": 5 - (dropped not in columns[:2])}}},
+                  "select_tables": {"rows": 1}}}
+    again = run_curate([source], str(config_path))  # the same seed, the same sample
+    assert read_jsonl(again / "examples.jsonl") == examples
+    raw = json.loads(json.dumps(config))
+    raw["seeds"]["curation_sample"] = next(  # another seed draws another sample
+        seed for seed in range(100) if cap(calls_as_examples(calls), limit, seed) != cap(calls_as_examples(calls), limit, 20260934))
+    config_path.write_text(json.dumps(raw))
+    other = read_jsonl(run_curate([source], str(config_path)) / "examples.jsonl")
+    assert len(other) == 7 and other != examples
+
+
+def calls_as_examples(calls):
+    return [{k: c[k] for k in ("call_id", "question_id", "call_site", "invocation_key")} for c in calls]
 
 
 def test_run_curate_refuses_outputs_it_may_not_train_on(tmp_path, monkeypatch):
