@@ -23,6 +23,13 @@ must have parsed), in this order, with the count of each step, overall and per c
    `template_share` of its prompts is template and is left out of the comparison; two examples
    are near duplicates when what is left of their prompts **and** their completions both reach the
    threshold. Of each group, the first (by question id) is kept.
+5. **The cap** (`curation.max_per_question_call_site`): of what is left, at most that many invocations
+   of each (question, call site), a uniform sample with `seeds.curation_sample`. The column filter
+   runs once per column of the database, so whole it is most of the examples and does not train in
+   a night. The sample is uniform, not stratified by what the teacher answered, so it keeps the
+   distribution of the teacher's decisions. The counts' `cap` reports, before and after it, the
+   rows of each call site and, for the column filter, the tables and columns covered in each
+   database and how many columns the teacher kept and dropped.
 
 **Paraphrase** of entities and numbers is declared **not applied** (SPEC S2, deviation): in
 text-to-SQL the values are part of the right answer.
@@ -45,6 +52,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from bench import barrier, data, paths
 from bench.contracts.calls import CALL_SITES
 from bench.contracts.clusters import prompt_text
+from bench.contracts.concordance import agree
 from bench.contracts.config import config_sha256, load_config
 from bench.judge.base import (JudgmentError, calls_of, canonical, final, invocations, question_order, read_jsonl,
                               read_result, reference, require_done, write_jsonl)
@@ -52,7 +60,7 @@ from bench.provenance import git_state
 
 SQL_OUTPUT_KEY = {"generate_candidate": "SQL", "revise": "refined_sql_query"}  # CHESS's parsers (llm/parsers.py)
 STEPS = ("invocations", "unparsed", "sql_error", "sql_empty", "passed_filter", "masked_sql", "exact_duplicates",
-         "near_duplicates", "kept")
+         "near_duplicates", "over_cap", "kept")
 
 
 class CurationError(JudgmentError):
@@ -144,11 +152,13 @@ def sql_signal(sql: Optional[str], run_sql: Callable[[str], Tuple[Optional[list]
     return "sql_empty" if not rows else None
 
 
-def curate(calls: List[dict], settings: Dict[str, Any], run_sql: Callable[[str, str], Tuple[Optional[list], Optional[str]]]
-           ) -> Tuple[List[dict], Dict[str, Any]]:
+def curate(calls: List[dict], settings: Dict[str, Any], run_sql: Callable[[str, str], Tuple[Optional[list], Optional[str]]],
+           seed: int, db_of: Dict[str, str]) -> Tuple[List[dict], Dict[str, Any]]:
     """The curated examples and the counts of every step. `run_sql(question_id, sql)` executes on
-    the question's database. Pure but for `run_sql`."""
+    the question's database; `seed` draws the cap's sample; `db_of` (question id -> database) is what
+    the cap's coverage is reported by. Pure but for `run_sql`."""
     counts = {site: Counter() for site in CALL_SITES}
+    keeps: Dict[str, bool] = {}  # call id of a column-filter example -> the teacher kept the column
     candidates: Dict[str, List[dict]] = {site: [] for site in CALL_SITES}
     for identity, attempts in sorted(invocations(calls).items(), key=lambda kv: question_order(kv[0])):
         question_id, call_site, invocation_key = identity
@@ -164,13 +174,15 @@ def curate(calls: List[dict], settings: Dict[str, Any], run_sql: Callable[[str, 
                 counts[call_site][dropped_by] += 1
                 continue
         counts[call_site]["passed_filter"] += 1
+        if call_site == "filter_column":
+            keeps[chosen["call_id"]] = keeps_column(chosen["parsed_output"])
         candidates[call_site].append({
             "call_id": chosen["call_id"], "question_id": question_id, "call_site": call_site,
             "invocation_key": invocation_key, "prompt": chosen["prompt_messages"],
             "completion": [{"role": "assistant", "content": chosen["response_text"]}]})
 
     masker = Masker(settings["mask"])
-    examples: List[dict] = []
+    deduplicated: List[dict] = []
     for call_site in CALL_SITES:
         seen, unique = set(), []
         for example in candidates[call_site]:
@@ -188,14 +200,65 @@ def curate(calls: List[dict], settings: Dict[str, Any], run_sql: Callable[[str, 
             unique.append(example)
         dropped = set(near_duplicates(unique, settings["near_duplicate"])) if len(unique) > 1 else set()
         counts[call_site]["near_duplicates"] += len(dropped)
-        kept = [e for i, e in enumerate(unique) if i not in dropped]
-        counts[call_site]["kept"] += len(kept)
-        examples += kept
+        deduplicated += [e for i, e in enumerate(unique) if i not in dropped]
+    limit = settings["max_per_question_call_site"]
+    examples = cap(deduplicated, limit, seed)
+    before, after = (Counter(e["call_site"] for e in rows) for rows in (deduplicated, examples))
+    for call_site in CALL_SITES:
+        counts[call_site]["over_cap"] = before[call_site] - after[call_site]
+        counts[call_site]["kept"] = after[call_site]
     per_site = {site: {step: counts[site][step] for step in STEPS} for site in CALL_SITES if counts[site]["invocations"]}
     total = {step: sum(c[step] for c in per_site.values()) for step in STEPS}
     return examples, {"total": total, "per_call_site": per_site,
+                      "cap": {"max_per_question_call_site": limit, "seed": seed,
+                              "before": coverage(deduplicated, db_of, keeps), "after": coverage(examples, db_of, keeps)},
                       "mask_detections": dict(sorted(masker.detections.items())),
                       "paraphrase": "not applied (SPEC §4 S2: in text-to-SQL the values are part of the answer)"}
+
+
+# ---------------------------------------------------------------- the cap
+
+def keeps_column(parsed_output: Any) -> bool:
+    """The column filter's decision as the agent takes it from an output: kept on "yes", C3's reading.
+    An output the agent cannot read that way (no such key, not a string: a cut-off answer still parses)
+    drops the column, as CHESS does (filter_column.py, the `except` around the same expression)."""
+    try:
+        return agree("filter_column", parsed_output, {"is_column_information_relevant": "yes"})
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def cap(examples: List[dict], limit: int, seed: int) -> List[dict]:
+    """At most `limit` invocations of each (question, call site): the ones with the smallest
+    sha256("<seed>:<question>:<call site>:<invocation>"), a seeded uniform draw that does not depend on
+    the Python version (as `data.calib_sample`). The examples keep their order."""
+    def rank(example: dict) -> str:
+        identity = f"{seed}:{example['question_id']}:{example['call_site']}:{example['invocation_key']}"
+        return hashlib.sha256(identity.encode()).hexdigest()
+    groups: Dict[Tuple[str, str], List[dict]] = {}
+    for example in examples:
+        groups.setdefault((example["question_id"], example["call_site"]), []).append(example)
+    kept = {e["call_id"] for group in groups.values() for e in sorted(group, key=rank)[:limit]}
+    return [e for e in examples if e["call_id"] in kept]
+
+
+def coverage(examples: List[dict], db_of: Dict[str, str], keeps: Dict[str, bool]) -> Dict[str, Any]:
+    """What a set of examples covers, per call site: its rows and, for the column filter, the tables and
+    columns seen in each database and how many columns the teacher kept ("yes") and dropped ("no").
+    `db_of`: question id -> database; `keeps`: call id of a column-filter call -> the teacher kept it."""
+    rows = Counter(e["call_site"] for e in examples)
+    report: Dict[str, Any] = {site: {"rows": rows[site]} for site in CALL_SITES if rows[site]}
+    filtered = [e for e in examples if e["call_site"] == "filter_column"]
+    if filtered:
+        columns: Dict[str, set] = {}
+        for e in filtered:  # the key is `table.column`, with `@<n>` when the agent repeats the invocation
+            columns.setdefault(db_of[e["question_id"]], set()).add(re.sub(r"@\d+$", "", e["invocation_key"]))
+        yes = sum(keeps[e["call_id"]] for e in filtered)
+        report["filter_column"].update(
+            yes=yes, no=len(filtered) - yes, yes_share=round(yes / len(filtered), 4),
+            databases={db: {"tables": len({c.partition(".")[0] for c in seen}), "columns": len(seen)}
+                       for db, seen in sorted(columns.items())})
+    return report
 
 
 # ---------------------------------------------------------------- the execution
@@ -213,6 +276,7 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
     settings = config["curation"]
     calls: List[dict] = []
     databases: Dict[str, Path] = {}  # question id -> the pinned SQLite file of its database
+    db_of: Dict[str, str] = {}  # question id -> its database
     days = set()  # the pre-registered date the SQL runs at
     seen_questions: set = set()
     for run_id in source_run_ids:
@@ -240,6 +304,7 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
         for db_id in sorted({questions[q]["db_id"] for q in found["question_ids"]}):
             data.check_database(snapshot, db_id)
         databases.update({q: paths.sqlite_path(snapshot, questions[q]["db_id"]) for q in found["question_ids"]})
+        db_of.update({q: questions[q]["db_id"] for q in found["question_ids"]})
 
     if len(days) > 1:
         raise CurationError(f"the sources were run under different fixed dates {sorted(days)}")
@@ -251,7 +316,7 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
         return rows, error
 
     started = datetime.now(timezone.utc)
-    examples, counts = curate(calls, settings, run_sql)
+    examples, counts = curate(calls, settings, run_sql, config["seeds"]["curation_sample"], db_of)
     run_id = f"curate-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
     out = paths.RUNS / run_id
     out.mkdir(parents=True)

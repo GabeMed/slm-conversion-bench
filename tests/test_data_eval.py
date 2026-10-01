@@ -1,5 +1,7 @@
-"""Splits and pinned inputs (bench data), the evaluator (bench eval), the barrier at the commands,
-and CHESS's final-SQL rule."""
+"""Splits and pinned inputs (bench data), the pilot stratified by difficulty, the evaluator (bench eval),
+the barrier at the commands, and CHESS's final-SQL rule."""
+import collections
+import copy
 import hashlib
 import json
 import random
@@ -12,9 +14,9 @@ from bench import data, paths
 from bench.agent.runner import final_sql, run_agent
 from bench.barrier import TestSplitLocked
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError, build_splits, calib_sample, pilot_sample
+from bench.data import DataError, build_splits, calib_sample, pilot_ids, pilot_sample
 from bench.evaluate import evaluate, execute, score
-from synthetic import GOLD, make_repo
+from synthetic import GOLD, make_repo, sha256
 
 CONFIG = load_config(paths.ROOT / "config.yaml")
 
@@ -49,7 +51,7 @@ def test_calib_sample_does_not_depend_on_python_random():
     assert calib_sample(list(reversed(pool)), 5, 7) == expected
 
 
-def test_the_pilot_is_the_calibration_ids_with_the_smallest_seeded_hash():
+def test_the_pilots_draw_is_the_ids_with_the_smallest_seeded_hash():
     calib = [str(i) for i in range(60)]
     expected = sorted(sorted(calib, key=lambda q: hashlib.sha256(f"7:pilot:{q}".encode()).hexdigest())[:5], key=int)
     assert pilot_sample(calib, 5, 7) == pilot_sample(list(reversed(calib)), 5, 7) == expected
@@ -58,10 +60,73 @@ def test_the_pilot_is_the_calibration_ids_with_the_smallest_seeded_hash():
         pilot_sample(calib[:3], 5, 7)
 
 
-def test_the_committed_splits_have_a_pilot_of_the_configured_size():
-    calib = json.loads(paths.SPLITS.read_text())["calib"]
-    pilot = pilot_sample(calib, CONFIG["stats"]["pilot_size"], CONFIG["seeds"]["calib_split"])
-    assert CONFIG["stats"]["pilot_size"] == 50 and len(pilot) == 50 and set(pilot) <= set(calib)
+CALIB = {"simple": range(100, 112), "moderate": range(200, 206), "challenging": range(300, 304)}
+
+
+def pilot_repo(tmp_path, monkeypatch, mix, size=None):
+    """A synthetic repository whose calibration split has 12 simple, 6 moderate and 4 challenging
+    questions, beside train questions of every difficulty; the configuration with `mix`."""
+    _, _, config = make_repo(tmp_path, monkeypatch)
+    train = {"simple": range(1, 9), "moderate": range(9, 17), "challenging": range(17, 25)}
+    dev = [{"question_id": i, "db_id": "tiny", "question": "?", "evidence": None, "difficulty": difficulty, "SQL": GOLD}
+           for ids in (train, CALIB) for difficulty, block in ids.items() for i in block]
+    path = paths.RAW / "bird_dev_questions.json"
+    path.write_text(json.dumps(dev))
+    paths.SPLITS.write_text(json.dumps({"train": [str(i) for i in range(1, 25)], "test": ["9"], "excluded": [],
+                                        "calib": [str(i) for block in CALIB.values() for i in block]}))
+    config = copy.deepcopy(config)
+    config["data"]["bird_dev_questions"]["sha256"] = sha256(path)
+    config["stats"].update(pilot_mix=mix, pilot_size=sum(mix.values()) if size is None else size)
+    return config
+
+
+def test_the_pilot_has_the_configured_mix_drawn_within_each_difficulty(tmp_path, monkeypatch):
+    mix = {"simple": 3, "moderate": 4, "challenging": 2}
+    config = pilot_repo(tmp_path, monkeypatch, mix)
+    seed = config["seeds"]["calib_split"]
+    pilot = pilot_ids(config)
+    assert {d: sum(int(q) in CALIB[d] for q in pilot) for d in mix} == mix and len(pilot) == len(set(pilot)) == 9
+    expected = [q for d in mix for q in sorted(map(str, CALIB[d]),
+                                               key=lambda q: hashlib.sha256(f"{seed}:pilot:{q}".encode()).hexdigest())[:mix[d]]]
+    assert pilot == sorted(expected, key=int)  # the seeded rank, within the difficulty
+    assert pilot == pilot_ids(config)
+    other = {**config, "seeds": {**config["seeds"], "calib_split": seed + 1}}
+    assert pilot_ids(other) != pilot and len(pilot_ids(other)) == 9
+    # not the draw over the whole calibration split, which takes the difficulties as they come
+    assert pilot != pilot_sample(json.loads(paths.SPLITS.read_text())["calib"], 9, seed)
+    none_of_one = pilot_repo(tmp_path / "zero", monkeypatch, {"simple": 2, "moderate": 0, "challenging": 0})
+    assert len(pilot_ids(none_of_one)) == 2 and all(int(q) in CALIB["simple"] for q in pilot_ids(none_of_one))
+
+
+def test_a_difficulty_short_of_its_count_is_an_error_never_filled_from_another(tmp_path, monkeypatch):
+    config = pilot_repo(tmp_path, monkeypatch, {"simple": 3, "moderate": 4, "challenging": 5})
+    with pytest.raises(DataError, match="needs 5 challenging calibration questions, there are 4"):
+        pilot_ids(config)
+    config["stats"].update(pilot_mix={"simple": 3, "moderate": 4, "challenging": 4}, pilot_size=11)
+    assert len(pilot_ids(config)) == 11  # every challenging question there is: enough
+
+
+def test_a_mix_that_does_not_sum_to_the_pilot_size_or_misnames_a_difficulty_is_refused(tmp_path, monkeypatch):
+    config = pilot_repo(tmp_path, monkeypatch, {"simple": 3, "moderate": 4, "challenging": 2}, size=10)
+    with pytest.raises(DataError, match="sums to 9, not stats.pilot_size = 10"):
+        pilot_ids(config)
+    for mix in ({"simple": 6, "moderate": 4}, {"simple": 3, "moderate": 4, "challenging": 2, "hard": 1}):
+        config["stats"].update(pilot_mix=mix, pilot_size=10)
+        with pytest.raises(DataError, match="a count for each of"):
+            pilot_ids(config)
+
+
+@pytest.mark.skipif(not (paths.RAW / "bird_dev_questions.json").exists(),
+                    reason="the pinned inputs are not downloaded (run `bench data`)")
+def test_the_registered_pilot_has_the_tests_mix_on_the_committed_splits():
+    """15/25/10 on the difficulty of the file the splits come from, where the calibration split has
+    134 simple, 34 moderate and 32 challenging questions."""
+    questions = data.questions_for(CONFIG, "calib")
+    difficulty = lambda ids: dict(collections.Counter(questions[q]["difficulty"] for q in ids))  # noqa: E731
+    assert difficulty(questions) == {"simple": 134, "moderate": 34, "challenging": 32}
+    pilot = pilot_ids(CONFIG)
+    assert difficulty(pilot) == CONFIG["stats"]["pilot_mix"] == {"simple": 15, "moderate": 25, "challenging": 10}
+    assert CONFIG["stats"]["pilot_size"] == len(pilot) == len(set(pilot)) == 50
 
 
 def test_the_committed_splits():

@@ -175,6 +175,25 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
             errors.append(f"data.{name} needs url and sha256")
     if not errors:  # the agent's settings read the keys checked above
         errors += agent_settings_errors(config)
+    return errors + data_training_errors(config)
+
+
+def data_training_errors(config: Dict[str, Any]) -> List[str]:
+    """The stratified pilot (`stats.pilot_mix`) and the cap on the training examples
+    (`curation.max_per_question_call_site`; its seed, `seeds.curation_sample`, is checked with the seeds),
+    each where it is set: a configuration without them is one that neither draws the pilot nor curates.
+    That the mix names the difficulties and sums to `stats.pilot_size` is checked where the pilot is
+    drawn (bench.data.pilot_ids)."""
+    def count(value: Any, minimum: int) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+    errors = []
+    stats, curation = config.get("stats") or {}, config.get("curation") or {}
+    if "pilot_mix" in stats:
+        mix = stats["pilot_mix"]
+        if not (isinstance(mix, dict) and mix and all(count(n, 0) for n in mix.values())):
+            errors.append("stats.pilot_mix must map each difficulty to an integer >= 0")
+    if "max_per_question_call_site" in curation and not count(curation["max_per_question_call_site"], 1):
+        errors.append("curation.max_per_question_call_site must be an integer >= 1")
     return errors
 
 

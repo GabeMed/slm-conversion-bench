@@ -146,12 +146,36 @@ def calib_sample(pool: List[str], size: int, seed: int) -> List[str]:
 
 
 def pilot_sample(calib: List[str], size: int, seed: int) -> List[str]:
-    """The pilot (SPEC 6.4: the calibration questions that measure d before the test): the `size`
-    calibration ids with the smallest sha256("<seed>:pilot:<id>"), a draw of its own."""
+    """The pilot's draw within one difficulty (`pilot_ids` is the accessor): the `size` ids with the
+    smallest sha256("<seed>:pilot:<id>"), a draw of its own."""
     if not 0 < size <= len(calib):
         raise DataError(f"a pilot of {size} ids needs that many calibration ids, there are {len(calib)}")
     ranked = sorted(calib, key=lambda q: hashlib.sha256(f"{seed}:pilot:{q}".encode()).hexdigest())
     return sorted(ranked[:size], key=int)
+
+
+def pilot_ids(config: dict) -> List[str]:
+    """The pilot questions (SPEC 6.4: the calibration questions that measure d before the test), and
+    the only accessor of them: `stats.pilot_mix[difficulty]` calibration ids of each difficulty, drawn
+    within it by `pilot_sample` with `seeds.calib_split`. The mix is the test's, so what the pilot
+    measures is not taken from the calibration's easier one. The difficulty is the one of the file the
+    splits come from. A difficulty with fewer calibration questions than its count is an error, never
+    filled from another."""
+    mix, size = config["stats"]["pilot_mix"], config["stats"]["pilot_size"]
+    if set(mix) != set(DIFFICULTIES):
+        raise DataError(f"stats.pilot_mix must give a count for each of {DIFFICULTIES}, not {sorted(mix)}")
+    if sum(mix.values()) != size:
+        raise DataError(f"stats.pilot_mix sums to {sum(mix.values())}, not stats.pilot_size = {size}")
+    questions = questions_for(config, "calib")
+    ids: List[str] = []
+    for difficulty in DIFFICULTIES:
+        pool = [q for q, item in questions.items() if item["difficulty"] == difficulty]
+        if len(pool) < mix[difficulty]:
+            raise DataError(f"the pilot needs {mix[difficulty]} {difficulty} calibration questions, "
+                            f"there are {len(pool)}")
+        if mix[difficulty]:
+            ids += pilot_sample(pool, mix[difficulty], config["seeds"]["calib_split"])
+    return sorted(ids, key=int)
 
 
 def build_splits(config: dict, dev: List[dict], test: List[dict]) -> dict:
