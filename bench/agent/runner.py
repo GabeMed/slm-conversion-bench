@@ -290,7 +290,14 @@ def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: 
         _write_json(kwargs["run_dir"] / f"outcome.w{k}.json", {**errors, "predictions": outcome["predictions"]})
 
 
+STOPPING_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
 def _interrupt(signum: int, frame: Any) -> None:
+    """The first of them decides: one that follows (a logout sends both) is ignored, so that it
+    interrupts neither the wait for the workers nor the merge."""
+    for following in STOPPING_SIGNALS:
+        signal.signal(following, signal.SIG_IGN)
     raise KeyboardInterrupt(signal.Signals(signum).name)
 
 
@@ -310,10 +317,11 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
     processes = [context.Process(target=_worker, args=(execute, {**kwargs, "dataset": part}, k, stop))
                  for k, part in enumerate(parts)]
     started: List[Any] = []
-    handlers = {signum: signal.signal(signum, _interrupt) for signum in (signal.SIGTERM, signal.SIGHUP)
-                if signal.getsignal(signum) != signal.SIG_IGN}
+    handlers: Dict[int, Any] = {}
     try:
         try:
+            handlers = {signum: signal.signal(signum, _interrupt) for signum in STOPPING_SIGNALS
+                        if signal.getsignal(signum) != signal.SIG_IGN}
             for process in processes:
                 process.start()
                 started.append(process)
@@ -331,9 +339,9 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
                 process.join()
             raise
     finally:
+        stopped = _merge_workers(run_dir, processes, outcome)
         for signum, handler in handlers.items():
             signal.signal(signum, handler)
-        stopped = _merge_workers(run_dir, processes, outcome)
     if stopped:
         from bench.agent.hooks import HarnessError
         raise HarnessError("; ".join(stopped))

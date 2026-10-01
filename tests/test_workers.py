@@ -309,7 +309,7 @@ def announced_worker(outcome, part, stop, run_dir, dataset, config):
     """A worker that says it has started (run_dir/started<part>), then waits to be stopped: its first
     question is answered `stopped` if it was, and its second never starts."""
     (run_dir / f"started{part}").touch()
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline and not stop.is_set():
         time.sleep(0.02)
     outcome["predictions"][dataset[0]] = "stopped" if stop.is_set() else "never stopped"
@@ -335,7 +335,7 @@ runner._in_workers(announced_worker, {"run_dir": Path(sys.argv[1]), "config": lo
 
 def test_workers_whose_parent_is_killed_stop_by_themselves(tmp_path):
     """Nobody is left to set the flag or to merge: each worker sees its parent gone where it reads
-    the flag (well before the 30 s it would otherwise wait), and ends leaving its own files."""
+    the flag (well before the 60 s it would otherwise wait), and ends leaving its own files."""
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(paths.ROOT), str(paths.ROOT / "tests")])}
     parent = subprocess.Popen([sys.executable, "-c", PARENT, str(tmp_path), str(SMOKE)], env=env)
     try:
@@ -350,27 +350,47 @@ def test_workers_whose_parent_is_killed_stop_by_themselves(tmp_path):
     assert not any("stopped_by" in r for r in reported) and not (tmp_path / "calls.jsonl").exists()
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
-def test_a_terminated_run_stops_its_workers_and_ends_as_an_interrupted_one(tmp_path, signum):
-    """A `kill`, or a closed terminal, reaches the parent: it sets the flag as on a failure, waits for
-    the workers, merges, and the signal goes on as a Ctrl-C does (`run_agent` then closes the
-    manifest with `stopped_by`). Left to its default, the signal would end the parent on the spot."""
-    def unhandled(signum, frame):
-        raise AssertionError("the run left the signal to the process")
+def signalled_run(run_dir, signums, dispositions):
+    """Run two announced workers in this process's `_in_workers` and, once both have started, send
+    this process `signums`. `dispositions` ({signal: handler}) are set for the test and put back
+    after it; returns the run's outcome, what ended it, and what SIGHUP's disposition was meanwhile."""
+    seen = {}
 
-    def terminate():
-        if wait_for([tmp_path / "started.w0", tmp_path / "started.w1"], 60):
-            os.kill(os.getpid(), signum)
+    def send():
+        if wait_for([run_dir / "started.w0", run_dir / "started.w1"], 60):
+            seen["hup"] = signal.getsignal(signal.SIGHUP)
+            for signum in signums:
+                os.kill(os.getpid(), signum)
 
-    outcome, before = runner.new_outcome(), signal.signal(signum, unhandled)
+    outcome, before = runner.new_outcome(), {s: signal.signal(s, handler) for s, handler in dispositions.items()}
+    sender = threading.Thread(target=send)
     try:
-        threading.Thread(target=terminate, daemon=True).start()
-        with pytest.raises(KeyboardInterrupt, match=f"^{signal.Signals(signum).name}$"):
-            runner._in_workers(announced_worker, {"run_dir": tmp_path, "config": load_config(SMOKE)},
+        sender.start()
+        with pytest.raises(KeyboardInterrupt) as ended:
+            runner._in_workers(announced_worker, {"run_dir": run_dir, "config": load_config(SMOKE)},
                                [["1", "3"], ["2", "4"]], outcome)
-        assert signal.getsignal(signum) is unhandled  # the run's handling ends with the run
+        sender.join()
+        assert {s: signal.getsignal(s) for s in dispositions} == dispositions  # the run's handling ends with the run
     finally:
-        signal.signal(signum, before)
+        sender.join()
+        for s, handler in before.items():
+            signal.signal(s, handler)
+    return outcome, str(ended.value), seen["hup"]
+
+
+def unhandled(signum, frame):
+    raise AssertionError("the run left the signal to the process")
+
+
+@pytest.mark.parametrize("signums", [(signal.SIGTERM,), (signal.SIGHUP,), (signal.SIGHUP, signal.SIGTERM)])
+def test_a_terminated_run_stops_its_workers_and_ends_as_an_interrupted_one(tmp_path, signums):
+    """A `kill`, or a hangup, reaches the parent: it sets the flag as on a failure, waits for the
+    workers, merges, and the signal goes on as a Ctrl-C does (`run_agent` then closes the manifest
+    with `stopped_by`). Left to its default, the signal would end the parent on the spot. The first
+    signal decides: one that follows it (a logout sends both) interrupts neither the wait for the
+    workers nor the merge."""
+    outcome, ended_by, _ = signalled_run(tmp_path, signums, {signal.SIGTERM: unhandled, signal.SIGHUP: unhandled})
+    assert ended_by in {signal.Signals(s).name for s in signums}
     assert outcome["predictions"] == {"1": "stopped", "2": "stopped"} and outcome["harness_errors"] == {}
     assert runner.run_status(["1", "2", "3", "4"], outcome, 0, []) == "interrupted"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["calls.jsonl", "started.w0", "started.w1"]  # merged
@@ -379,18 +399,7 @@ def test_a_terminated_run_stops_its_workers_and_ends_as_an_interrupted_one(tmp_p
 def test_a_signal_the_process_ignores_stays_ignored(tmp_path):
     """Under `nohup` SIGHUP is ignored, and the workers inherit that: the run must not start
     handling it, or closing the terminal would end a run that was started to survive it."""
-    def terminate():
-        if wait_for([tmp_path / "started.w0", tmp_path / "started.w1"], 60):
-            os.kill(os.getpid(), signal.SIGHUP)
-            os.kill(os.getpid(), signal.SIGTERM)
-
-    hup, term = signal.signal(signal.SIGHUP, signal.SIG_IGN), signal.getsignal(signal.SIGTERM)
-    try:
-        threading.Thread(target=terminate, daemon=True).start()
-        with pytest.raises(KeyboardInterrupt, match="^SIGTERM$"):  # the SIGHUP sent before it did nothing
-            runner._in_workers(announced_worker, {"run_dir": tmp_path, "config": load_config(SMOKE)},
-                               [["1"], ["2"]], runner.new_outcome())
-        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
-    finally:
-        signal.signal(signal.SIGHUP, hup)
-        signal.signal(signal.SIGTERM, term)
+    outcome, ended_by, hup_meanwhile = signalled_run(tmp_path, (signal.SIGHUP, signal.SIGTERM),
+                                                     {signal.SIGTERM: unhandled, signal.SIGHUP: signal.SIG_IGN})
+    assert hup_meanwhile == signal.SIG_IGN and ended_by == "SIGTERM"
+    assert outcome["predictions"] == {"1": "stopped", "2": "stopped"}
