@@ -3,7 +3,9 @@ correct query.
 
 - **API engines** (`production_llm`, `cheap_alt`): each call's `usage` × `prices.table[<model>]`,
   the model as C1 records it: uncached input, cached input and output tokens, each at its price per
-  million. Variants are recomputed from the same `usage`, never by running again: `standard`,
+  million. A price is one provider's: the entry carries `provider`, and a call whose C1 `provider`
+  differs from it is refused, never priced at another provider's price (design §6.3, T6).
+  Variants are recomputed from the same `usage`, never by running again: `standard`,
   `no_cache` (cached tokens at the input price) and `batch` (standard less the entry's
   `batch_discount`, when the table has one). Retries are calls and are priced (SPEC §2).
 - **`usage.source`**: `missing` on a call that returned a response is refused (the cost would be
@@ -22,6 +24,9 @@ correct query.
   `extrapolated from per-adapter load tests` (`slm_cost_basis`).
 - **Per correct query**: the total over the execution divided by its correct questions, read from
   its `eval` execution (J1's source).
+- **Per question** (`by_question`: {question id: {scenario: cost}}): the cost of each question's calls,
+  in every scenario of `total`; a question without calls costs 0. The report resamples it, paired by
+  question, for the confidence interval of a cost ratio (design §6.2, T9).
 - **Replaceable fraction** (SPEC §5), for an execution with SLM calls: the share of calls the SLM
   served (failed calls counted on both sides), of tokens (billed calls on both sides, a failed call
   has none), and of cost, as the share of the production LLM's price for all the execution's tokens
@@ -34,6 +39,7 @@ from bench.judge.base import (JudgmentError, calls_of, canonical, read_jsonl, re
                               result_reference, run_dir, write_result)
 
 JUDGMENT = "J3"
+CONFIG_KEYS = ["prices", "roles.production_llm.model"]  # the keys of config.yaml this judgment reads (design §6.2)
 API_VARIANTS = ("standard", "no_cache", "batch")
 
 
@@ -92,6 +98,9 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
         entry = table.get(call["model"])
         if entry is None:
             raise JudgmentError(f"prices.table has no entry for model {call['model']!r}")
+        if call.get("provider") != entry.get("provider"):
+            raise JudgmentError(f"call {call['call_id']} was served by provider {call.get('provider')!r}, and the price "
+                                f"entry of {call['model']!r} is of provider {entry.get('provider')!r}: a price is one provider's")
         counts["cache_not_reported"] += use["source"] == "api" and use["cached_input"] is None
         for variant, cost in api_cost(call, entry).items():
             if cost is None:
@@ -138,8 +147,12 @@ def judge(calls: List[dict], question_ids: List[str], correct: Optional[Dict[str
     totals = scenarios(priced)
     n_correct = sum(correct.values()) if correct is not None else None
     by_site: Dict[str, Dict[str, Any]] = {}
+    of_question: Dict[str, List[dict]] = {q: [] for q in question_ids}
     for call in calls:
         by_site.setdefault(call["call_site"], []).append(call)
+        if call["question_id"] not in of_question:
+            raise JudgmentError(f"call {call['call_id']} is of question {call['question_id']}, which the execution does not list")
+        of_question[call["question_id"]].append(call)
     return {
         "prices_as_of": prices.get("as_of"), "label": "estimated" if priced["estimated"] else "measured",
         "prices": {"as_of": prices.get("as_of"), "sha256": hashlib.sha256(canonical(prices.get("table") or {})).hexdigest()},
@@ -152,6 +165,7 @@ def judge(calls: List[dict], question_ids: List[str], correct: Optional[Dict[str
         "per_question": {k: v / len(question_ids) if v is not None and question_ids else None for k, v in totals.items()},
         "per_correct": {k: v / n_correct if v is not None and n_correct else None for k, v in totals.items()},
         "by_call_site": {site: price_calls(site_calls, prices, slm_per_request) for site, site_calls in sorted(by_site.items())},
+        "by_question": {q: scenarios(price_calls(mine, prices, slm_per_request)) for q, mine in of_question.items()},
         "replaceable_fraction": replaceable_fraction(calls, prices, production_model),
     }
 
@@ -190,7 +204,7 @@ def slm_cost_per_request(j8_path: Optional[str], calls: List[dict]) -> Tuple[Opt
 def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config: Dict[str, Any]):
     found = require_done(run_id, type=("agent", "replay"))
     calls = calls_of(run_id)
-    reads: Dict[str, Any] = {"run": reference(run_id)}
+    reads: Dict[str, Any] = {"run": reference(run_id), "config": CONFIG_KEYS}
     correct = None
     if eval_run_id:
         evaluated = require_done(eval_run_id, type="eval")

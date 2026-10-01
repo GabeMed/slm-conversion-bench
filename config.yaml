@@ -241,8 +241,9 @@ preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
 
 # ---------------------------------------------------------------- F4: S2, S3, the judgments, the report
 # (bench/curate.py, bench/embed.py, bench/judge/j2-j8, bench/report.py). `prices.table` above is read
-# by J3 as {<model, as C1 records it>: {input_per_mtok, cached_input_per_mtok, output_per_mtok,
-# batch_discount}} in USD per million tokens, dated by `prices.as_of`.
+# by J3 as {<model, as C1 records it>: {provider, input_per_mtok, cached_input_per_mtok, output_per_mtok,
+# batch_discount}} in USD per million tokens, dated by `prices.as_of`; `provider` is the provider whose
+# price it is (the role's pinned provider), and J3 refuses a call another provider served.
 curation:                      # S2 (SPEC §4 S2)
   sql_timeout_s: 60            # the success filter runs the teacher's SQL, read-only
   mask:                        # sensitive data: pattern -> placeholder, detections counted
