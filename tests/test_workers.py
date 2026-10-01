@@ -190,17 +190,23 @@ def test_a_worker_that_stops_stops_the_others_and_says_why_without_a_credential(
     stop = threading.Event()
     monkeypatch.setenv("OPENAI_API_KEY", "embeddings-key-0001")
 
+    key_shaped = "SELECT hf_AbCdEf123456 FROM t"  # a prediction is the model's SQL, never rewritten
+
     def execute(outcome, part, stop, run_dir, dataset, config):
-        outcome["predictions"]["1"] = "SELECT 1"  # what it finished is kept
-        outcome["failures"]["2"] = "AuthenticationError: bad key embeddings-key-0001"
+        outcome["predictions"]["1"] = key_shaped  # what it finished is kept
+        outcome["failures"]["2"] = "AuthenticationError: bad key embeddings-key-0001 (hf_AbCdEf123456)"
         raise KeyboardInterrupt
 
-    runner._worker(execute, {"run_dir": tmp_path, "dataset": [], "config": load_config(SMOKE)}, 2, stop)
+    config = load_config(SMOKE)
+    from bench.provenance import redact
+    assert redact(key_shaped, config) != key_shaped  # the redaction would rewrite it
+    runner._worker(execute, {"run_dir": tmp_path, "dataset": [], "config": config}, 2, stop)
     written = (tmp_path / "outcome.w2.json").read_text()
     reported = json.loads(written)
     assert stop.is_set() and reported["stopped_by"] == "KeyboardInterrupt: "
-    assert reported["predictions"] == {"1": "SELECT 1"}
-    assert "embeddings-key-0001" not in written and reported["failures"]["2"].endswith("bad key <redacted>")
+    assert reported["predictions"] == {"1": key_shaped}  # as a run of one process writes it
+    assert "embeddings-key-0001" not in written and reported["failures"]["2"] == \
+        "AuthenticationError: bad key <redacted> (<redacted>)"
 
 
 def test_the_merge_keeps_every_workers_lines_and_tells_a_dead_worker_from_a_stopped_one(tmp_path):
@@ -212,14 +218,20 @@ def test_the_merge_keeps_every_workers_lines_and_tells_a_dead_worker_from_a_stop
     (tmp_path / "calls.w2.jsonl").write_text(json.dumps({"call_id": "c"}) + "\n")
     (tmp_path / "outcome.w2.json").write_text(json.dumps({
         **runner.new_outcome(), "tool_errors": {"3": {"revise": "x"}}, "stopped_by": "ImportError: no module"}))
+    (tmp_path / "outcome.w3.json").write_text('{"predictions": {"4": "SEL')  # killed while writing its outcome
+    (tmp_path / "outcome.w4.json").write_text(json.dumps({**runner.new_outcome(), "predictions": {"5": "SELECT 5"}}))
     outcome = runner.new_outcome()
-    stopped = runner._merge_workers(tmp_path, [SimpleNamespace(exitcode=code) for code in (0, -9, 0)], outcome)
+    exits = (0, -9, 0, -9, 1)  # worker 4 reported, then crashed on its way out
+    stopped = runner._merge_workers(tmp_path, [SimpleNamespace(exitcode=code) for code in exits], outcome)
     assert stopped == ["worker 2 stopped: ImportError: no module"]
-    assert list(outcome["harness_errors"]) == ["worker 1"] and "exit code -9" in outcome["harness_errors"]["worker 1"][0]
+    assert outcome["harness_errors"] == {
+        "worker 1": ["the worker did not end cleanly (exit code -9, no outcome reported)"],
+        "worker 3": ["the worker did not end cleanly (exit code -9, no outcome reported)"],
+        "worker 4": ["the worker did not end cleanly (exit code 1)"]}
     assert runner.run_status(["1"], outcome, 0, []) == "failed"  # a dead worker fails the run, whatever was answered
     rows = (tmp_path / "calls.jsonl").read_text().splitlines()
     assert rows[2] == '{"call_id": "cut' and [json.loads(row)["call_id"] for row in rows[:2] + rows[3:]] == ["a", "b", "c"]
-    assert outcome["predictions"] == {"1": "SELECT 1"} and outcome["tool_errors"] == {"3": {"revise": "x"}}
+    assert outcome["predictions"] == {"1": "SELECT 1", "5": "SELECT 5"} and outcome["tool_errors"] == {"3": {"revise": "x"}}
     assert outcome["unregistered_call_sites"] == ["revise"]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["calls.jsonl"]
 
@@ -238,12 +250,24 @@ def scripted_worker(outcome, part, stop, run_dir, dataset, config):
 
 
 def test_a_worker_that_dies_stops_the_others_and_fails_the_run(tmp_path):
-    """A killed worker cannot set the flag itself: the parent sets it on the non-zero exit."""
+    """A killed worker cannot set the flag itself: the parent sets it on the non-zero exit, whichever
+    worker it is (here the last one: a parent waiting for the workers in order would never see it)."""
     outcome = runner.new_outcome()
-    runner._in_workers(scripted_worker, {"run_dir": tmp_path, "config": load_config(SMOKE)}, [["dies"], ["waits"]], outcome)
+    runner._in_workers(scripted_worker, {"run_dir": tmp_path, "config": load_config(SMOKE)}, [["waits"], ["dies"]], outcome)
     assert outcome["predictions"] == {"waits": "stopped"}
-    assert list(outcome["harness_errors"]) == ["worker 0"] and "exit code 9" in outcome["harness_errors"]["worker 0"][0]
-    assert runner.run_status(["dies", "waits"], outcome, 0, []) == "failed"
+    assert outcome["harness_errors"] == {"worker 1": ["the worker did not end cleanly (exit code 9, no outcome reported)"]}
+    assert runner.run_status(["waits", "dies"], outcome, 0, []) == "failed"
+
+
+def test_a_worker_that_cannot_start_stops_the_ones_already_started(tmp_path):
+    """The second worker's part cannot be sent to a process: the first, already answering, is stopped
+    and merged before the failure goes on."""
+    outcome = runner.new_outcome()
+    with pytest.raises(Exception, match="pickle"):
+        runner._in_workers(scripted_worker, {"run_dir": tmp_path, "config": load_config(SMOKE)},
+                           [["waits"], [lambda: None]], outcome)
+    assert outcome["predictions"] == {"waits": "stopped"}
+    assert list(outcome["harness_errors"]) == ["worker 1"]  # never started: no outcome
 
 
 def test_a_worker_stopped_before_its_questions_stops_the_others_and_raises_in_the_parent(tmp_path):

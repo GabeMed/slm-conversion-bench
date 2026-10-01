@@ -256,9 +256,10 @@ def worker_parts(dataset: List[Any], workers: int) -> List[List[Any]]:
 
 def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: Any) -> None:
     """One worker process: answer its part, then leave what happened in run_dir/outcome.w<k>.json
-    (the parent merges it), redacted like the manifest it ends up in: the file outlives a parent that
-    dies before merging. Whatever stops it other than a question that failed stops every worker too
-    and is reported in `stopped_by`."""
+    (the parent merges it). What carries error text is redacted, as in the manifest it ends up in
+    (the file outlives a parent that dies before merging); the predictions are written as they are,
+    as a run of one process writes them. Whatever stops it other than a question that failed stops
+    every worker too and is reported in `stopped_by`."""
     from bench.provenance import redact
     outcome: Dict[str, Any] = new_outcome()
     try:
@@ -267,7 +268,9 @@ def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: 
         stop.set()
         outcome["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
     finally:
-        (kwargs["run_dir"] / f"outcome.w{k}.json").write_text(redact(json.dumps(outcome, ensure_ascii=False), kwargs["config"]))
+        errors = {key: value for key, value in outcome.items() if key != "predictions"}
+        errors = json.loads(redact(json.dumps(errors, ensure_ascii=False), kwargs["config"]))
+        _write_json(kwargs["run_dir"] / f"outcome.w{k}.json", {**errors, "predictions": outcome["predictions"]})
 
 
 def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: List[List[Dict[str, Any]]],
@@ -310,9 +313,9 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
 
 
 def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict]) -> List[str]:
-    """Merge every worker's outcome and C1 file into the run's. A worker that left no outcome died:
-    that is the harness's failure, recorded under `harness_errors` (so the run is `failed`). Returns
-    why workers stopped (`stopped_by`), if any did."""
+    """Merge every worker's outcome and C1 file into the run's. A worker that did not end cleanly (a
+    non-zero exit, or no readable outcome) died: that is the harness's failure, recorded under
+    `harness_errors` (so the run is `failed`). Returns why workers stopped (`stopped_by`), if any did."""
     stopped, unregistered = [], set()
     with open(run_dir / "calls.jsonl", "a") as merged:
         for k, process in enumerate(processes):
@@ -321,12 +324,19 @@ def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict]
                 text = calls_path.read_text()
                 merged.write(text if not text or text.endswith("\n") else text + "\n")  # a killed worker's cut-off
                 calls_path.unlink()                                 # last line never runs into the next worker's first
-            if not outcome_path.exists():
+            reported = None
+            if outcome_path.exists():
+                try:
+                    reported = json.loads(outcome_path.read_text())
+                except ValueError:  # cut off mid-write
+                    pass
+                outcome_path.unlink()
+            if process.exitcode != 0 or reported is None:
                 outcome["harness_errors"][f"worker {k}"] = [
-                    f"the worker ended without reporting (exit code {process.exitcode}): its questions have no outcome"]
+                    f"the worker did not end cleanly (exit code {process.exitcode}"
+                    f"{'' if reported is not None else ', no outcome reported'})"]
+            if reported is None:
                 continue
-            reported = json.loads(outcome_path.read_text())
-            outcome_path.unlink()
             for key in OUTCOME_KEYS:
                 outcome[key].update(reported[key])
             unregistered.update(reported.get("unregistered_call_sites", []))
