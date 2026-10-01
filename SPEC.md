@@ -335,7 +335,7 @@ Tudo aqui é fixado **antes** de qualquer resultado no teste.
 
 ### 6.4 Estatística
 - **Margem: Δ = 5 p.p., fixa.** É a perda de EX que esta POC aceita chamar de "sem perder qualidade", decidida antes de qualquer dado. Uma margem não pode depender do que o estudo consegue detectar.
-- **Piloto:** 50 perguntas da calibração, sorteadas com seed **na mistura de dificuldade do teste** (15 simples, 25 moderadas, 10 difíceis). A calibração tem 76% de perguntas simples e o teste, 30%.
+- **Piloto:** 50 perguntas da calibração, sorteadas com seed **na mistura de dificuldade do teste** (15 simples, 25 moderadas, 10 difíceis). A calibração tem 67% de perguntas simples (134 de 200, pelos rótulos da revisão que os splits usam) e o teste, 30%.
   - O piloto mede d, a discordância pareada entre o SLM zero-shot e o LLM de produção.
   - O d serve só para o **poder planejado** a n = 498, reportado antes do teste.
   - O piloto também dá a projeção de tempo e de gasto (7.1).
