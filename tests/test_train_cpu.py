@@ -12,7 +12,7 @@ from bench import cli, paths  # noqa: E402
 from bench.contracts import facts, router  # noqa: E402
 from bench.train import (TrainError, check_loss_tokens, check_rows, check_target_modules, precheck,  # noqa: E402
                          training_plan, train_lora)
-from test_train_fixtures import TINY, TINY_NAME, make_s5_repo, rel, rows, save  # noqa: E402
+from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, rel, rows, save, write_dataset  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -22,7 +22,7 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(TINY["repo"], revision=TINY["revision"])
 
 
-def test_bench_train_on_cpu_writes_the_adapter_its_manifest_and_then_the_fact(tmp_path, monkeypatch):
+def test_bench_train_on_cpu_writes_the_adapter_its_manifest_and_then_the_fact(tmp_path, monkeypatch, tokenizer):
     _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
     assert cli.main(["train", "--config", str(config_path), "--cluster", "c0", "--on", "local"]) == 0
     adapter = paths.ROOT / "train" / "adapters" / "c0" / "adapter"
@@ -43,10 +43,18 @@ def test_bench_train_on_cpu_writes_the_adapter_its_manifest_and_then_the_fact(tm
     stats = manifest["stats"]
     assert stats["device"] == "cpu" and stats["dtype"] == "float32" and stats["global_step"] == 2
     assert stats["examples_seen"] == 4 and stats["train_seconds"] > 0
+    # 2 steps of 2 rows: the 4 rows once, every token of each, and the rate preflight projects from
+    assert stats["tokens_seen"] == stats["tokens"] == check_rows(tokenizer, rows("c0"), {"enable_thinking": False}, 512)[0]["tokens"]
+    assert stats["tokens"] > stats["completion_tokens"] > 0
+    assert stats["tokens_per_second"] == pytest.approx(stats["tokens_seen"] / stats["train_seconds"], rel=0.01)
     assert stats["versions"]["trl"] == "1.14.1" and stats["versions"]["peft"] == "0.21.1"
     assert not list((paths.ROOT / "judgments").glob("S5/*"))  # c1 has no adapter yet
 
+    write_dataset("c1", rows("c1", 2))  # 2 steps of 2 rows over 2 rows: the dataset twice
     assert cli.main(["train", "--config", str(config_path), "--cluster", "c1", "--on", "local"]) == 0
+    twice = json.loads((paths.ROOT / "train" / "adapters" / "c1" / "manifest.json").read_text())["stats"]
+    assert twice["tokens_seen"] == 2 * twice["tokens"]  # what the trainer ran, not what the dataset holds
+    assert twice["tokens_per_second"] == pytest.approx(twice["tokens_seen"] / twice["train_seconds"], rel=0.01)
     fact_path = next((paths.ROOT / "judgments" / "S5").glob("*/adapters.json"))
     fact, _ = facts.read_fact(str(fact_path), "adapters")
     assert {c: a["sha256"] for c, a in fact["adapters"].items()} == {
@@ -78,6 +86,8 @@ def test_training_renders_what_serving_asks_and_learns_only_the_answer(tokenizer
     assert completion.strip() == row["completion"][0]["content"] + "<|im_end|>"
     assert "<think>" not in completion and tokenizer.decode(prompt).endswith("<think>\n\n</think>\n\n")
     assert stats["completion_tokens"] == len(full) - len(prompt) and completions == [full[len(prompt):]]
+    assert stats["tokens"] == stats["longest_row_tokens"] == len(full)  # the whole row, prompt included
+    assert check_rows(tokenizer, [row, row], kwargs, max_length=512)[0]["tokens"] == 2 * len(full)
 
 
 def test_rows_serving_would_not_render_the_same_way_or_too_long_are_refused(tokenizer):
@@ -141,3 +151,23 @@ def test_precheck_runs_the_template_checks_with_the_candidates_tokenizer(tmp_pat
     assert precheck(plan, rows("c0", 2))["completion_tokens"] > 0
     with pytest.raises(TrainError, match="over train.sft.max_length"):
         precheck({**plan, "hyperparameters": {**plan["hyperparameters"], "sft": {"max_length": 5}}}, rows("c0", 1))
+
+
+def test_preflight_counts_each_datasets_tokens_with_the_candidates_tokenizer(tmp_path, monkeypatch, tokenizer):
+    """The projection's tokens are the ones training counts: every row of the dataset, rendered whole with
+    the serving template kwargs."""
+    from bench.preflight import PASS, check_training_time
+
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    write_dataset("c1", rows("c1", 7))
+    manifest = fake_adapter("c0", config).parent / "manifest.json"
+    manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "where": "modal", "gpu": config["train"]["gpu"],
+                                    "started_at": "2026-10-01T20:00:00+00:00", "stats": {"tokens_per_second": 10.0}}))
+    counted = {c: check_rows(tokenizer, rows(c, n), {"enable_thinking": False}, 512)[0]["tokens"]
+               for c, n in (("c0", 4), ("c1", 7))}
+    check = check_training_time(config)
+    assert check["evidence"]["dataset_tokens"] == counted and check["evidence"]["largest"] == "c1"
+    epochs = config["train"]["sft"]["num_train_epochs"]
+    assert check["evidence"]["projected_train_hours"] == round(counted["c1"] * epochs / 10.0 / 3600, 2)
+    assert check["status"] == PASS
+

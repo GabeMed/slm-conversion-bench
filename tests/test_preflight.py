@@ -11,7 +11,7 @@ from bench import cli, paths
 from bench.preflight import (FAIL, PASS, PENDING, UNDECIDED, PreflightError, check_agent_runs, check_call_sites, check_data,
                              check_lora_parity, check_pilot_spend, check_teacher_terms, check_throughput,
                              check_training_time, compare, lora_parity, parity_verdict, served_generate)
-from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, save, served
+from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, rows, save, served, write_dataset
 
 STOP = [2]
 
@@ -431,21 +431,83 @@ def test_pilot_spend_is_pending_on_what_other_fronts_provide(tmp_path, monkeypat
     assert check_pilot_spend(config)["status"] == PENDING
 
 
-def test_training_time_projects_the_measured_gpu_time_over_every_dataset(tmp_path, monkeypatch):
-    _, _, config = make_s5_repo(tmp_path, monkeypatch)
-    assert check_training_time(config)["status"] == PENDING
-    local = fake_adapter("c0", config).parent / "manifest.json"
-    manifest = json.loads(local.read_text())
-    local.write_text(json.dumps({**manifest, "where": "local", "stats": {"train_seconds": 1, "examples_seen": 1}}))
-    assert check_training_time(config)["status"] == PENDING  # a CPU run does not project GPU time
-    local.write_text(json.dumps({**manifest, "where": "modal", "stats": {"train_seconds": 100, "examples_seen": 50}}))
+def trained(cluster, config, where="modal", started_at="2026-10-01T20:00:00+00:00", gpu=None, **stats):
+    """The manifest of an adapter as `bench train` leaves it (its base in it), with the throughput it measured."""
+    path = fake_adapter(cluster, config).parent / "manifest.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "where": where, "started_at": started_at,
+                                "gpu": gpu or config["train"]["gpu"], "stats": stats}))
+
+
+def count_tokens(monkeypatch, tokens):
+    """Stand in for the tokenizer: `bench.train.precheck` answers `tokens[cluster]` for each dataset."""
+    from bench import train
+
+    monkeypatch.setattr(train, "precheck", lambda plan, rows: {"tokens": tokens[plan["cluster"]]})
+
+
+def test_training_time_projects_the_largest_dataset_from_the_first_adapters_throughput(tmp_path, monkeypatch):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch, clusters=("c0", "c1", "c2"))
+    write_dataset("c2", rows("c2", 9))  # the most rows, but not the most tokens
+    count_tokens(monkeypatch, {"c0": 4_000, "c1": 90_000, "c2": 9_000})
+    pending = check_training_time(config)
+    assert pending["status"] == PENDING and "one adapter trained on Modal" in pending["evidence"]["needs"]
+    assert pending["action"] == "train the smallest cluster first, then run preflight again"  # nothing to lower yet
+    trained("c0", config, where="local", tokens_per_second=1.0)
+    assert check_training_time(config)["status"] == PENDING  # a CPU run does not measure the GPU
+    trained("c1", config, started_at="2026-10-01T23:00:00+00:00", tokens_per_second=1.0)
+    trained("c2", config, started_at="2026-10-01T21:00:00+00:00", tokens_per_second=50.0)  # trained first
     measured = check_training_time(config)
     epochs = config["train"]["sft"]["num_train_epochs"]
-    assert measured["evidence"]["dataset_rows"] == 8 and measured["evidence"]["seconds_per_example"] == 2
-    assert measured["evidence"]["projected_train_hours"] == round(2 * 8 * epochs / 3600, 2)
+    assert epochs == 2 and measured["evidence"] == {
+        "train_hours_max": 12, "unreadable_manifests": [], "epochs": 2,
+        "measured_on": {"cluster": "c2", "started_at": "2026-10-01T21:00:00+00:00", "gpu": config["train"]["gpu"],
+                        "base": TINY, "tokens_per_second": 50.0},
+        "dataset_tokens": {"c0": 4_000, "c1": 90_000, "c2": 9_000}, "largest": "c1",
+        "projected_train_hours": 1.0}  # 90,000 tokens x 2 epochs at 50 tokens/s = 3,600 s
     assert measured["status"] == PASS
-    config["preflight"]["schedule"]["train_hours_max"] = 0.001
-    assert check_training_time(config)["status"] == FAIL
+
+
+@pytest.mark.parametrize("budget_h, status", [(1.0, PASS), (1.001, PASS), (0.999, FAIL)])
+def test_training_time_fails_above_the_schedule_and_says_to_lower_the_cap(tmp_path, monkeypatch, budget_h, status):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    count_tokens(monkeypatch, {"c0": 90_000, "c1": 100})
+    trained("c1", config, tokens_per_second=50.0)  # projects 1 h for c0
+    config["preflight"]["schedule"]["train_hours_max"] = budget_h
+    check = check_training_time(config)
+    assert check["status"] == status and check["evidence"]["projected_train_hours"] == 1.0
+    assert check["action"].startswith("lower curation.max_per_question_call_site")
+
+
+@pytest.mark.parametrize("stale", ["no_rate", "other_gpu", "other_base", "no_datasets"])
+def test_training_time_is_pending_without_a_rate_measured_for_this_training(tmp_path, monkeypatch, stale):
+    """A manifest from before the rate was recorded, from another GPU or from another base does not say how
+    fast this training runs; and without datasets there is nothing to project."""
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    count_tokens(monkeypatch, {"c0": 90_000, "c1": 100})
+    trained("c0", config, tokens_per_second=50.0)
+    assert check_training_time(config)["status"] == PASS
+    if stale == "no_rate":
+        trained("c1", config, train_seconds=100, examples_seen=50)
+        (paths.ROOT / "train" / "adapters" / "c0" / "manifest.json").unlink()
+    elif stale == "other_gpu":
+        config["train"]["gpu"] = "H100"
+    elif stale == "other_base":
+        config["roles"]["slm_candidates"][-1]["hf"]["revision"] = "f" * 40
+    else:
+        for path in (paths.ROOT / "train" / "datasets").glob("*.jsonl"):
+            path.unlink()
+    check = check_training_time(config)
+    assert check["status"] == PENDING and "projected_train_hours" not in check["evidence"]
+
+
+def test_training_time_fails_with_the_reason_on_a_dataset_training_would_refuse(tmp_path, monkeypatch):
+    _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    count_tokens(monkeypatch, {"c0": 1, "c1": 1})
+    trained("c0", config, tokens_per_second=50.0)
+    write_dataset("c1", [])
+    check = check_training_time(config)
+    assert check["status"] == FAIL and check["evidence"]["error"] == "TrainError: c1.jsonl has no rows"
+    assert "projected_train_hours" not in check["evidence"]
 
 
 def test_throughput_lists_only_finished_load_runs_and_leaves_the_judgment_to_j8(tmp_path, monkeypatch):

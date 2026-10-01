@@ -158,26 +158,43 @@ def check_pilot_spend(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
-    """GPU seconds per example seen, measured on Modal, times the examples every cluster's dataset will
-    show (rows x epochs), against the overnight budget."""
+    """The hours the largest dataset takes to train: its tokens, counted as training counts them, times
+    the epochs, at the tokens per second the first adapter trained on Modal measured, on the GPU and the
+    base this configuration trains. The adapters train at the same time, each in its own container, so
+    the largest one decides."""
+    from bench import train
+
     budget_h = config["preflight"]["schedule"]["train_hours_max"]
-    precondition = "the measured training time confirms the schedule: every adapter trains overnight (SPEC 7.1, 7.3)"
-    manifests, unreadable = _manifests("*/manifest.json", paths.ROOT / "train" / "adapters")
-    gpu_runs = [m for m in manifests if m.get("where") == "modal" and m["stats"].get("examples_seen")]
+    precondition = ("the measured training time confirms the schedule: the adapters train at the same time, "
+                    "and the largest one overnight (SPEC 7.1, 7.3)")
+    manifests, unreadable = _manifests("*/manifest.json", train.adapters_dir())
+    gpu_runs = [m for m in manifests if m.get("where") == "modal" and m.get("gpu") == config["train"]["gpu"]
+                and m["stats"].get("tokens_per_second")]
     evidence: Dict[str, Any] = {"train_hours_max": budget_h, "unreadable_manifests": unreadable}
-    if not gpu_runs:
-        evidence["needs"] = "one adapter trained on Modal (bench train --on modal) to measure seconds per example"
-        return _check("training_time", precondition, PENDING, evidence, "apply the cuts of SPEC 7.3")
-    seconds_per_example = (sum(m["stats"]["train_seconds"] for m in gpu_runs)
-                           / sum(m["stats"]["examples_seen"] for m in gpu_runs))
+    try:
+        datasets = sorted(train.datasets_dir().glob("*.jsonl")) if gpu_runs else []
+        plans = {path.stem: train.training_plan(config, path.stem) for path in datasets}
+        gpu_runs = [m for m in gpu_runs if m.get("base") in [plan["base"] for plan, _ in plans.values()]]
+        if not gpu_runs:
+            evidence["needs"] = ("the datasets (bench datasets) and one adapter trained on Modal on this base and GPU "
+                                 "(bench train --on modal), to measure the tokens trained per second")
+            return _check("training_time", precondition, PENDING, evidence,
+                          "train the smallest cluster first, then run preflight again")
+        tokens = {cluster: train.precheck(plan, train.parse_dataset(raw, f"{cluster}.jsonl"))["tokens"]
+                  for cluster, (plan, raw) in plans.items()}
+    except train.TrainError as e:  # a dataset bench train would refuse: nothing to project, and its reason
+        evidence["error"] = f"{type(e).__name__}: {e}"
+        return _check("training_time", precondition, FAIL, evidence, "fix what the error says, then run again")
+    first = min(gpu_runs, key=lambda m: m["started_at"])
     epochs = config["train"]["sft"]["num_train_epochs"]
-    datasets = sorted((paths.ROOT / "train" / "datasets").glob("*.jsonl"))
-    rows = sum(sum(1 for line in p.read_text().splitlines() if line.strip()) for p in datasets)
-    projected_h = seconds_per_example * rows * epochs / 3600
-    evidence.update({"seconds_per_example": round(seconds_per_example, 3), "dataset_rows": rows, "epochs": epochs,
+    largest = max(tokens, key=tokens.get)
+    projected_h = tokens[largest] * epochs / first["stats"]["tokens_per_second"] / 3600
+    evidence.update({"measured_on": {"cluster": first["cluster"], "started_at": first["started_at"], "gpu": first["gpu"],
+                                     "base": first["base"], "tokens_per_second": first["stats"]["tokens_per_second"]},
+                     "epochs": epochs, "dataset_tokens": tokens, "largest": largest,
                      "projected_train_hours": round(projected_h, 2)})
     return _check("training_time", precondition, FAIL if projected_h > budget_h else PASS, evidence,
-                  "apply the cuts of SPEC 7.3")
+                  "lower curation.max_per_question_call_site, then curate, cluster and write the datasets again")
 
 
 def check_throughput() -> Dict[str, Any]:
