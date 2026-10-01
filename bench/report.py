@@ -174,7 +174,6 @@ def registration_in_force(split: str, config: Dict[str, Any]) -> Optional[str]:
     The readings of SPEC §5 cannot change after the test without changing the registration."""
     if split != "test":
         return None
-    from bench import barrier
     from bench.prereg import PreregError, check_registered_analysis_code
     try:
         in_force = barrier.prereg_hash_in_force(config)
@@ -193,7 +192,8 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
       known (several of one configuration: no verdict);
     - every trained arm's run (and the replay routed as B4) recorded the facts the plan's judgments
       name, and a plan without them is refused, never unchecked;
-    - the per-call evaluation replays the plan's B0 run;
+    - the per-call evaluation replays the plan's B0 run, and that teacher run is bound like an arm's
+      (its several runs count with the replay's), even when the plan has no B0 arm;
     - every pilot the report uses (the pilot's evals, J6's zero-shot per-call evals) finished
       before the first test execution started.
     Marks `several_runs` on the arms; returns the replay's several runs, if any; raises otherwise."""
@@ -610,7 +610,6 @@ def _a5(data) -> Dict[str, str]:
     if not sites:
         return {**row, "result": "—", "verdict": "no data"}
     worse = [s for s in sites if b4f[s]["rate"] < b0f[s]["rate"]]
-    several = [arm for arm in ("B0", "B4") if (data["arms"].get(arm) or {}).get("several_runs")]
     result = ("B4 below B0 on " + ", ".join(f"{s} ({_pct(b4f[s]['rate'])} vs {_pct(b0f[s]['rate'])})" for s in worse)
               if worse else f"B4 at least B0 on all {len(sites)} call sites")
     return {**row, "result": result, "verdict": several_of(data, ["B4", "B0"]) or ("refutes" if worse else "confirms")}
