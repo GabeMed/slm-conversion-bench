@@ -293,12 +293,17 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     request body, SDK, headers and credentials an execution uses, by construction), retried as an
     execution retries a transport failure. On a prompt this short a 400 cannot be a context overflow: it is
     the configuration, which an execution would record as the model failing every call, and end `done`.
-    Needs the agent environment (LangChain), like an execution."""
+    The answer must be complete (`finish_reason` is `stop`: on a prompt this short, anything else is a token
+    budget the reasoning used up, which an execution would score as the model's failure) and its reasoning
+    must be in the state the role declares (`reasoning.enabled`: reasoning tokens reported when true, none
+    when false; a role that declares nothing is not asserted). Needs the agent environment (LangChain),
+    like an execution."""
     from bench.contracts.config import engine_spec
     from bench.provenance import redact
 
     spec = engine_spec(config, engine)
     found = {"engine": engine, "model": spec["model"], "temperature": temperature}
+    reasoning = (spec.get("reasoning") or {}).get("enabled")
     if not spec["endpoint"].get("base_url"):
         return {**found, "status": PENDING, "why": "no endpoint.base_url yet"}
     try:
@@ -333,16 +338,28 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     usage = hooks._usage(output)
     if usage["source"] != "api":
         problems.append("no usage (P-2: this engine's cost would be an estimate)")
+    finish_reason = (output.response_metadata or {}).get("finish_reason")
+    if finish_reason != "stop":
+        problems.append(f"finish_reason is {finish_reason!r}, not 'stop' (a cut-off answer: an execution would "
+                        f"score it as the model's failure)")
+    if reasoning is True and not usage["reasoning"]:
+        problems.append("no reasoning tokens although the role declares reasoning.enabled: true (the setting is "
+                        "not honoured, or the provider does not report them)")
+    if reasoning is False and usage["reasoning"]:
+        problems.append(f"{usage['reasoning']} reasoning tokens although the role declares reasoning.enabled: false")
     return {**found, "status": FAIL if problems else PASS, "why": "; ".join(problems) or None,
-            "cached_tokens_reported": usage["cached_input"] is not None}
+            "cached_tokens_reported": usage["cached_input"] is not None,
+            "finish_reason": finish_reason, "reasoning_declared": reasoning, "reasoning_tokens": usage["reasoning"],
+            "temperature_recorded": hooks.recorded_temperature(spec, temperature)}
 
 
 def check_engines(config: Dict[str, Any]) -> Dict[str, Any]:
     """Every engine an arm runs on (the production LLM, the cheap alternative, each SLM candidate's base)
     answers a real call with the parameters configured for it, at every temperature the call sites use."""
     precondition = ("every configured engine answers a real call through the agent's client with its configured "
-                    "parameters: text and usage (P-2), so no execution records a refused parameter as the model's "
-                    "failures (a context window smaller than the prompts is not something a short call can see)")
+                    "parameters: text and usage (P-2), a complete answer (finish_reason stop) and its reasoning in "
+                    "the declared state, so no execution records a refused parameter or a cut-off answer as the "
+                    "model's failures (a context window smaller than the prompts is not something a short call can see)")
     engines = ["production_llm", "cheap_alt"] + [f"slm:{c['name']}" for c in config["roles"].get("slm_candidates") or []]
     temperatures = sorted({spec["temperature"] for spec in config["call_sites"].values()})
     probes = [probe_engine(config, engine, t) for engine in engines for t in temperatures]
@@ -350,7 +367,8 @@ def check_engines(config: Dict[str, Any]) -> Dict[str, Any]:
     if failed:
         return _check("engines", precondition, FAIL, probes,
                       f"fix what each failed probe of {', '.join(failed)} says: a refused parameter, a credential, "
-                      f"or an endpoint that did not answer (a Modal server cold-starts in minutes), then run again")
+                      f"an endpoint that did not answer (a Modal server cold-starts in minutes), a cut-off answer "
+                      f"(raise params.max_tokens) or a reasoning setting not honoured, then run again")
     if any(p["status"] == PENDING for p in probes):
         return _check("engines", precondition, PENDING, probes, "set each engine's base_url and credentials, then run again")
     return _check("engines", precondition, PASS, probes, "")

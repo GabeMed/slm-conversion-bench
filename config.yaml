@@ -4,10 +4,30 @@
 version: 1
 
 roles:
+  # The two API roles, each as its vendor ships it (the author's decision, 2026-10-01):
+  # - `params` is what the request carries besides the call site's temperature (`timeout_s` is the client's).
+  #   `max_tokens` covers the reasoning and the answer together, so it is sized not to bind;
+  # - `reasoning` is what the harness is told about the engine, never sent: `enabled` is the state `bench
+  #   preflight` asserts on a real call (reasoning tokens > 0 when true; none when false), and
+  #   `forced_temperature` is the temperature the provider runs whatever is sent (C1 then records it,
+  #   not the call site's);
+  # - `provider` pins who serves the model (its URL is `endpoint.base_url`); C1 records `provider.name`.
   production_llm:              # the LLM the agent uses = the teacher (SPEC §3, D6)
     model: MiMo-V2.6-Pro
     endpoint: {kind: api, base_url: null, api_key_env: PRODUCTION_LLM_API_KEY}  # provider: before runs
-    params: {max_tokens: 4096, timeout_s: 600}
+    # thinking on, the model's default. Before runs: the pinned provider's own switch for it goes in
+    # `params.extra_body` (sent as the request's extra body), so the setting is explicit on the wire too
+    params: {max_tokens: 16384, timeout_s: 900}
+    reasoning:
+      enabled: true
+      forced_temperature: null # before runs: 1.0 where the provider forces it while thinking
+    provider:
+      name: null               # before runs
+      quantization: null       # before runs: as the provider states it (fp8, bf16, ...)
+      checkpoint: null         # before runs: {repo, revision} of the weights served (the RL or the MOPD checkpoint)
+      reserve: null            # before runs: {name, base_url, quantization}, used only if the provider fails
+      routing: null            # through OpenRouter only: {only: [<provider>], allow_fallbacks: false,
+                               # require_parameters: true, quantizations: [<q>]}, sent as extra_body.provider
     terms:                     # both must allow training on outputs (D6); link and date
       weights_license: null    # before runs
       provider_terms: null     # before runs
@@ -15,7 +35,16 @@ roles:
   cheap_alt:                   # cheaper open-weight generalist, no training (B1)
     model: gpt-oss-120b
     endpoint: {kind: api, base_url: null, api_key_env: CHEAP_ALT_API_KEY}  # provider: before runs
-    params: {max_tokens: 4096, timeout_s: 600}
+    params: {max_tokens: 16384, timeout_s: 900, reasoning_effort: medium}  # medium: the model's documented default
+    reasoning:
+      enabled: true            # gpt-oss always reasons
+      forced_temperature: null
+    provider:
+      name: null               # before runs
+      quantization: null       # before runs
+      checkpoint: null         # before runs: {repo, revision} of the weights served
+      reserve: null            # before runs
+      routing: null            # through OpenRouter only (as above)
   slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
     # served under `name` (--served-model-name); adapters under their own served names
     # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
