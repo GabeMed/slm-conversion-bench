@@ -174,6 +174,16 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     if not isinstance(mix, dict) or sum(mix.values()) != config["stats"]["pilot_size"]:
         raise PreregError("the configuration's stats.pilot_mix does not give stats.pilot_size questions: the pilot "
                           "is drawn by difficulty")
+    # what the report refuses about the registered configuration is refused here: found after the test
+    # runs, either would need a new registration, and every test run made would be superseded
+    if not (config.get("cost") or {}).get("slo_from"):
+        raise PreregError("the configuration has no cost.slo_from: the pilot's B0 execution on calib, on which the "
+                          "SLO is measured, is registered")
+    k = config["arms"]["B1"]["few_shot"]["k"]
+    chosen = {json.loads(path.read_bytes())["result"]["k"] for path in (root / "judgments" / "b1k").glob("*/choice.json")}
+    if chosen and chosen != {k}:
+        raise PreregError(f"arms.B1.few_shot.k is {k}, and the stored choice of it on the pilot (judgments/b1k) is "
+                          f"{sorted(chosen)}: write the chosen k, or remove a choice that is not the pilot's")
     inputs = barrier.REGISTERED
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in inputs.items()},

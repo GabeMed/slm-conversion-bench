@@ -340,6 +340,7 @@ def test_agreement_follows_the_decision_chess_takes():
     assert agree("filter_column", no, {"chain_of_thought_reasoning": "the column"})
     assert not agree("filter_column", yes, {"chain_of_thought_reasoning": "the column"})
     assert not agree("filter_column", yes, {"is_column_information_relevant": None})
+    assert agree("filter_column", no, ["yes"]) and not agree("filter_column", yes, ["yes"])  # not a mapping: dropped
     assert agree("select_tables", {"table_names": ["frpm", "schools"]}, {"table_names": ["schools", "frpm"]})
     assert not agree("select_tables", {"table_names": ["Schools"]}, {"table_names": ["schools"]})  # raw names
     assert agree("select_columns",
@@ -348,6 +349,22 @@ def test_agreement_follows_the_decision_chess_takes():
     assert not agree("select_columns", {"schools": ["cds"]}, {"schools": ["cds", "County"]})
     assert agree("agent_ss", {"tool": "select_tables"}, {"tool": "select_tables"})
     assert not agree("agent_ss", {"tool": "select_tables"}, {"done": True})
+
+
+def test_an_output_of_another_shape_never_raises():
+    """A parsed output need not have its call site's shape (a cut-off answer still parses). Where CHESS has
+    a reading, that is the decision; an output nothing can be read from agrees with nothing, itself included."""
+    none, some = {"chain_of_thought_reasoning": "cut off"}, {"table_names": ["schools"]}
+    assert agree("select_tables", none, {"table_names": []}) and not agree("select_tables", none, some)  # CHESS: no table
+    for odd in (["schools"], {"table_names": None}, {"table_names": [["schools"]]}, "schools"):
+        assert not agree("select_tables", odd, some) and not agree("select_tables", odd, odd)
+    columns = {"schools": ["cds"]}
+    for odd in (["cds"], {"schools": None}, {"schools": [None]}, {"schools": 3}, "cds"):
+        assert not agree("select_columns", odd, columns) and not agree("select_columns", columns, odd)
+    for odd in ([["a"]], 3):
+        assert not agree("extract_keywords", odd, ["a"])
+    with pytest.raises(ValueError, match="unknown call site"):
+        agree("nowhere", {}, {})
 
 
 def test_unparsed_never_agrees_and_gold_sites_refuse():

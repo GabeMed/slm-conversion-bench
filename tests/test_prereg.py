@@ -19,8 +19,9 @@ from bench.prereg import PreregError, check_registered_analysis_code, register
 from synthetic import make_repo, sha256
 
 # distinct seeds, so reading one seed key for another shows
-CONFIG = {**load_config(paths.ROOT / "config.yaml"),
-          "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404}}
+SHIPPED = load_config(paths.ROOT / "config.yaml")
+CONFIG = {**SHIPPED, "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404},
+          "cost": {**SHIPPED["cost"], "slo_from": "agent-B0-calib"}}  # what the pilot fixes before the registration
 
 
 def git(cwd, *args):
@@ -163,6 +164,33 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
     git(repo, "commit", "-q", "-am", "a mix of 49")
     with pytest.raises(PreregError, match="stats.pilot_mix does not give stats.pilot_size questions"):
         register("config.yaml", root=repo)
+    (repo / "config.yaml").write_text(yaml.safe_dump({**CONFIG, "stats": {k: v for k, v in CONFIG["stats"].items()
+                                                                          if k != "pilot_mix"}}))
+    git(repo, "commit", "-q", "-am", "no mix")
+    with pytest.raises(PreregError, match="stats.pilot_mix does not give"):
+        register("config.yaml", root=repo)
+
+
+def test_register_refuses_what_the_report_would_refuse_after_the_test(repo):
+    """The execution the SLO is measured on, and B1's k as the pilot chose it: found wrong by the report,
+    after the test runs, either would need a new registration and every test run would be superseded."""
+    def commit(config, message):
+        (repo / "config.yaml").write_text(yaml.safe_dump(config))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", message)
+    commit({**CONFIG, "cost": {**CONFIG["cost"], "slo_from": None}}, "no SLO execution")
+    with pytest.raises(PreregError, match="no cost.slo_from"):
+        register("config.yaml", root=repo)
+    k = CONFIG["arms"]["B1"]["few_shot"]["k"]
+    choice = repo / "judgments" / "b1k" / ("0" * 64) / "choice.json"
+    choice.parent.mkdir(parents=True)
+    choice.write_text(json.dumps({"judgment": "b1k", "result": {"k": 3 - k}}))
+    commit(CONFIG, "the pilot chose the other k")
+    with pytest.raises(PreregError, match=rf"arms.B1.few_shot.k is {k}, and the stored choice .* is \[{3 - k}\]"):
+        register("config.yaml", root=repo)
+    choice.write_text(json.dumps({"judgment": "b1k", "result": {"k": k}}))
+    commit(CONFIG, "the pilot chose this k")
+    assert register("config.yaml", root=repo)["new"] is True
 
 
 @pytest.mark.parametrize("rel", ANALYSIS + ["bench/report.py", "bench/judge/j9.py"])
@@ -303,6 +331,7 @@ def published(tmp_path, monkeypatch, tmp_path_factory):
     raw["data"]["mini_dev"]["sha256"] = sha256(paths.RAW / "mini_dev.json")
     raw["stats"]["pilot_size"] = 1  # the synthetic calibration split has a single id
     raw["stats"]["pilot_mix"] = {"simple": 1, "moderate": 0, "challenging": 0}
+    raw.setdefault("cost", {})["slo_from"] = "agent-B0-calib"
     config_path.write_text(yaml.safe_dump(raw))
     paths.SPLITS.write_text(json.dumps({"train": ["1", "2"], "calib": ["3"], "test": ["9"], "excluded": []}))
     (root / "SPEC.md").write_text("protocol\n")
