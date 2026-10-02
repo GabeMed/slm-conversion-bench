@@ -24,12 +24,15 @@ singleton per process that switches database, so questions cannot share a proces
 every N-th question from the k-th, writes its own C1 file, and the files are merged into the run's
 `calls.jsonl` when all have ended. It is one run, one manifest (`workers`), and the first question
 that fails stops every worker. The number of workers changes no output, so it is not part of the
-configuration's identity.
+configuration's identity. SIGTERM or SIGHUP (a `kill`, a closed terminal) stops such a run as a
+Ctrl-C does, and workers whose parent is gone stop by themselves: no model is called for a run
+nobody will close.
 """
 import json
 import multiprocessing
 import multiprocessing.connection
 import os
+import signal
 import sys
 from argparse import Namespace
 from datetime import datetime, timezone
@@ -254,16 +257,51 @@ def worker_parts(dataset: List[Any], workers: int) -> List[List[Any]]:
     return [part for part in (dataset[k::workers] for k in range(workers)) if part]
 
 
+STOPPING_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+def _interrupt(signum: int, frame: Any) -> None:
+    """The first of them decides: one that follows (a logout sends both) is ignored, so that it
+    interrupts neither the wait for the workers and the merge, nor a worker reporting its outcome."""
+    for following in STOPPING_SIGNALS:
+        signal.signal(following, signal.SIG_IGN)
+    raise KeyboardInterrupt(signal.Signals(signum).name)
+
+
+def _interrupted_by_stopping_signals() -> Dict[int, Any]:
+    """Have SIGTERM and SIGHUP interrupt this process as a Ctrl-C does. One it ignores stays ignored,
+    here and in the processes it starts (a run under `nohup` survives its terminal). Returns what
+    handled each before."""
+    return {signum: signal.signal(signum, _interrupt) for signum in STOPPING_SIGNALS
+            if signal.getsignal(signum) != signal.SIG_IGN}
+
+
+class _WorkerStop:
+    """The run's stop flag as one worker reads it: also set once the parent process is gone (killed,
+    or its terminal closed), when nobody is left to stop the worker or to merge what it would spend."""
+
+    def __init__(self, flag: Any) -> None:
+        self.flag, self.parent = flag, multiprocessing.parent_process()
+
+    def is_set(self) -> bool:
+        return self.flag.is_set() or not self.parent.is_alive()
+
+    def set(self) -> None:
+        self.flag.set()
+
+
 def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: Any) -> None:
     """One worker process: answer its part, then leave what happened in run_dir/outcome.w<k>.json
     (the parent merges it). What carries error text is redacted, as in the manifest it ends up in
     (the file outlives a parent that dies before merging); the predictions are written as they are,
     as a run of one process writes them. Whatever stops it other than a question that failed stops
-    every worker too and is reported in `stopped_by`."""
+    every worker too and is reported in `stopped_by`: a Ctrl-C, and equally a SIGTERM or SIGHUP,
+    which reach the workers too when sent to the run's process group (a closed terminal)."""
     from bench.provenance import redact
     outcome: Dict[str, Any] = new_outcome()
     try:
-        execute(outcome=outcome, part=f".w{k}", stop=stop, **kwargs)
+        _interrupted_by_stopping_signals()
+        execute(outcome=outcome, part=f".w{k}", stop=_WorkerStop(stop), **kwargs)
     except BaseException as e:  # a Ctrl-C included: the parent reports it, this process just ends
         stop.set()
         outcome["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
@@ -280,15 +318,20 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
     `outcome` and their C1 files, in worker order, into run_dir/calls.jsonl. A worker that dies
     (a non-zero exit: it could not set the flag itself) stops the others, and fails the run. A worker
     that stopped for anything but a failed question raises here once everything is merged, as the
-    same failure raises in a run of one process."""
+    same failure raises in a run of one process. SIGTERM and SIGHUP interrupt the wait as a Ctrl-C
+    does (left to their default they would end this process and leave the workers answering). From
+    the first of them to the end of the merge both are ignored: only a Ctrl-C, or SIGKILL, ends a
+    run whose worker never ends."""
     run_dir = kwargs["run_dir"]
     context = multiprocessing.get_context("spawn")
     stop = context.Event()
     processes = [context.Process(target=_worker, args=(execute, {**kwargs, "dataset": part}, k, stop))
                  for k, part in enumerate(parts)]
     started: List[Any] = []
+    handlers: Dict[int, Any] = {}
     try:
         try:
+            handlers = _interrupted_by_stopping_signals()
             for process in processes:
                 process.start()
                 started.append(process)
@@ -307,6 +350,8 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
             raise
     finally:
         stopped = _merge_workers(run_dir, processes, outcome)
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
     if stopped:
         from bench.agent.hooks import HarnessError
         raise HarnessError("; ".join(stopped))
