@@ -256,6 +256,9 @@ J7 prints the allocation fact. Write its path into `arms.B5.allocation`.
 Check it, keep the output for the report, and register:
 
 ```sh
+mkdir -p reports
+printf 'j8: %s\n' "<J8 result>" > reports/before-registration.yaml
+bench verify --plan reports/before-registration.yaml
 git diff "$(cat prereg/STAGE0)" -- config.yaml SPEC.md
 git add config.yaml judgments/
 git commit -m "The final configuration and the judgments it names"
@@ -267,6 +270,10 @@ git commit -m "Pre-registration: timestamp"
 git push origin main
 ```
 
+- `bench verify` must report 0 divergences: every judgment the arms' facts rest on (J5, J6, J7, J8) is
+  what the final configuration and code compute. A value of `config.yaml` changed after one of them
+  ran (a price, a threshold) shows here, for free. Found by the report after the test, it would need
+  a new registration and the test again.
 - `git status --porcelain` must print nothing: `bench prereg` refuses any uncommitted or untracked
   file. `judgments/` holds numbers and ids only, no prompt and no model output.
 - `bench prereg` refuses a configuration with no `cost.slo_from`, and a `arms.B1.few_shot.k` that
