@@ -16,7 +16,10 @@ what to do when it does not. Nothing here is paid until step 2.
      `endpoint.headers_env`, and the embeddings key. None is written to a file of this repository.
    - In Modal: a token, and the two secrets `modal.secrets` names. `slm-bench-vllm-api-key` holds
      `VLLM_API_KEY`; `slm-bench-proxy-auth` holds the proxy-auth variables of `headers_env`.
-2. **Fill every `before runs` value of `config.yaml`:**
+2. **A hard spending limit on each provider account,** set in the provider's console: together they
+   sum to the API budget (US$ 150). The harness has no spend cap of its own; step 5 projects the
+   spend by hand, and this limit is what stops a projection that was wrong.
+3. **Fill every `before runs` value of `config.yaml`:**
    - each API role's `endpoint.base_url`, `provider` (name, quantization, checkpoint) and, for the
      teacher, `terms` (licence, provider terms, date);
    - `reasoning` for each API role, and the provider's own switch for it in `params.extra_body`;
@@ -24,8 +27,8 @@ what to do when it does not. Nothing here is paid until step 2.
      a price that names no provider, and a call whose provider differs from its price's;
    - `modal.gpu_prices` (GPU, CPU core and GiB of memory per second, with `as_of`);
    - `selection.footprint_gb` and `selection.triage`.
-3. **Data and preprocessing:** `bench data`, then `bench preprocess --db <id>` for every database.
-4. **The two SLM candidates on Modal**, each once:
+4. **Data and preprocessing:** `bench data`, then `bench preprocess --db <id>` for every database.
+5. **The two SLM candidates on Modal**, each once:
    ```sh
    BENCH_CANDIDATE=<name> modal run -m modal_apps.serve_vllm::download
    BENCH_CANDIDATE=<name> modal deploy -m modal_apps.serve_vllm
@@ -56,8 +59,10 @@ gh api -X POST repos/{owner}/{repo}/rulesets --input - <<'EOF'
 EOF
 ```
 
-`ots` is the OpenTimestamps client (`pip install opentimestamps-client`). After this commit,
-`config.yaml` changes only as step 12 lists.
+`ots` is the OpenTimestamps client (`pip install opentimestamps-client`). The stamped commit holds
+the whole repository: the configuration, the SPEC and the code that computes every verdict. After
+it, `config.yaml` changes only as step 12 lists, and the analysis code does not change at all;
+step 12 checks both.
 
 ### 2. Preflight
 
@@ -147,8 +152,19 @@ bench judge j3 --run <B0 calib> --eval <its eval>
 - **Cache:** the share of `usage.cached_input` in the input tokens. If it is zero, the provider is
   not caching: fix that before K1, since it changes every cost of the report.
 
-Over the budget or the two days: apply the cuts of SPEC §7.3 **before** K1. Never cut K2, K5, B5 or
-the per-call-site evaluation.
+**The rule, before K1 starts:**
+
+1. What must run is the core of SPEC §7.2: K1 (the teacher's logs), K2 (B0, B1, B2 and B3 on test),
+   K3 (S2 to S5), K4 (B4, B5 and the per-call-site evaluation) and K5 (the report).
+2. Over the budget or the two days, cut in the order of SPEC §7.3: the extensions, last first, then
+   S6's retraining round. Never K2, K5, B5 or the per-call-site evaluation.
+3. **If the core alone does not fit, stop here: do not start K1.** What changes then (the budget,
+   the teacher's provider, the number of training questions) changes the registered design, and is
+   decided before any more is spent.
+
+A call can hold a worker for up to 90 minutes in the worst case (6 attempts of 900 s). If a run
+stalls, Ctrl-C: no further model call is made, what was answered is merged, and the run ends
+`interrupted`. On train and calib the questions left can be run as another run (`--ids`).
 
 ### 6. K1: the teacher's logs on train
 
@@ -260,6 +276,7 @@ mkdir -p reports
 printf 'j8: %s\n' "<J8 result>" > reports/before-registration.yaml
 bench verify --plan reports/before-registration.yaml
 git diff "$(cat prereg/STAGE0)" -- config.yaml SPEC.md
+git diff --stat "$(cat prereg/STAGE0)" -- bench/judge bench/evaluate.py bench/data.py bench/report.py bench/contracts bench/paths.py
 git add config.yaml judgments/
 git commit -m "The final configuration and the judgments it names"
 git status --porcelain
@@ -274,6 +291,12 @@ git push origin main
   what the final configuration and code compute. A value of `config.yaml` changed after one of them
   ran (a price, a threshold) shows here, for free. Found by the report after the test, it would need
   a new registration and the test again.
+- **The second `git diff` must print nothing:** it is the analysis code, the files the registration
+  freezes. If a defect forced a change to one of them after Stage 0, add a line to
+  `prereg/DEVIATIONS.md` before `bench prereg`, with the date, the files and the defect
+  (`- 2026-10-03 · analysis code changed after Stage 0: bench/judge/j2.py: <the defect>`), and commit
+  it. The report prints that file. Both commits are public and timestamped, so anyone can run the
+  same diff.
 - `git status --porcelain` must print nothing: `bench prereg` refuses any uncommitted or untracked
   file. `judgments/` holds numbers and ids only, no prompt and no model output.
 - `bench prereg` refuses a configuration with no `cost.slo_from`, and a `arms.B1.few_shot.k` that

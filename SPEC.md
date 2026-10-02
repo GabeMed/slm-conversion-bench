@@ -311,7 +311,7 @@ Tudo aqui é fixado **antes** de qualquer resultado no teste.
   - a configuração (modelos por papel, provedores, parâmetros, seeds);
   - as listas de IDs de calibração e de teste;
   - a margem Δ e as regras de veredito (o código de análise que as aplica entra no hash).
-- **Estágio 0, antes do piloto.** A configuração com todas as regras de veredito desta spec é publicada **antes de o piloto ser lido**. Depois do piloto, só entram valores que uma regra já fixada calcula: a barra de concordância, o SLO, o k do B1.
+- **Estágio 0, antes do piloto.** A configuração com todas as regras de veredito desta spec é publicada **antes de o piloto ser lido**. Depois do piloto, só entram valores que uma regra já fixada calcula: a barra de concordância, o SLO, o k do B1. O código de análise que aplica as regras está no mesmo commit do Estágio 0 e não muda até o pré-registro; uma mudança nele só vale para um defeito, e entra na tabela de desvios, que o relatório imprime.
 - **Carimbo independente.** A data do git é escolhida por quem commita. Por isso o hash do Estágio 0 e o do pré-registro recebem um carimbo de tempo de terceiros, e o `main` do repositório não aceita force-push.
 - **Registro do teste:** cada configuração é avaliada uma vez, e todas as avaliações feitas são reportadas.
   - **A intenção é publicada antes da primeira pergunta.** Uma execução no teste que não consegue publicar a sua intenção não começa.
