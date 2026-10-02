@@ -203,7 +203,12 @@ def test_a_worker_that_stops_stops_the_others_and_says_why_without_a_credential(
     config = load_config(SMOKE)
     from bench.provenance import redact
     assert redact(key_shaped, config) != key_shaped  # the redaction would rewrite it
-    runner._worker(execute, {"run_dir": tmp_path, "dataset": [], "config": config}, 2, stop)
+    before = {s: signal.getsignal(s) for s in runner.STOPPING_SIGNALS}
+    try:
+        runner._worker(execute, {"run_dir": tmp_path, "dataset": [], "config": config}, 2, stop)
+    finally:  # a worker is a process of its own: it never puts back what handled the signals before it
+        for s, handler in before.items():
+            signal.signal(s, handler)
     written = (tmp_path / "outcome.w2.json").read_text()
     reported = json.loads(written)
     assert stop.is_set() and reported["stopped_by"] == "KeyboardInterrupt: "
@@ -323,22 +328,46 @@ def wait_for(paths_, seconds=20):
     return all(path.exists() for path in paths_)
 
 
+def answering_worker(outcome, part, stop, run_dir, dataset, config):
+    """A worker that answers its first question, says so (run_dir/started<part>), and is then busy
+    with its second until something stops it."""
+    outcome["predictions"][dataset[0]] = "answered"
+    (run_dir / f"started{part}").touch()
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not stop.is_set():
+        time.sleep(0.02)
+
+
+# a run of two workers in a process of its own, with the signals at their default whatever this
+# session was started under; what `_in_workers` leaves is written to run_dir/merged.json
 PARENT = """
-import sys
+import json, signal, sys
 from pathlib import Path
 from bench.agent import runner
 from bench.contracts.config import load_config
-from test_workers import announced_worker
-runner._in_workers(announced_worker, {"run_dir": Path(sys.argv[1]), "config": load_config(sys.argv[2])},
-                   [["1", "3"], ["2", "4"]], runner.new_outcome())
+import test_workers
+for signum in runner.STOPPING_SIGNALS:
+    signal.signal(signum, signal.SIG_DFL)
+run_dir, outcome = Path(sys.argv[1]), runner.new_outcome()
+try:
+    runner._in_workers(getattr(test_workers, sys.argv[3]), {"run_dir": run_dir, "config": load_config(sys.argv[2])},
+                       [["1", "3"], ["2", "4"]], outcome)
+except KeyboardInterrupt as e:
+    outcome["ended_by"] = str(e)
+(run_dir / "merged.json").write_text(json.dumps(outcome))
 """
+
+
+def start_parent(run_dir, worker):
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(paths.ROOT), str(paths.ROOT / "tests")])}
+    return subprocess.Popen([sys.executable, "-c", PARENT, str(run_dir), str(SMOKE), worker], env=env,
+                            start_new_session=True)  # a process group of its own: the run and its workers
 
 
 def test_workers_whose_parent_is_killed_stop_by_themselves(tmp_path):
     """Nobody is left to set the flag or to merge: each worker sees its parent gone where it reads
     the flag (well before the 60 s it would otherwise wait), and ends leaving its own files."""
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(paths.ROOT), str(paths.ROOT / "tests")])}
-    parent = subprocess.Popen([sys.executable, "-c", PARENT, str(tmp_path), str(SMOKE)], env=env)
+    parent = start_parent(tmp_path, "announced_worker")
     try:
         assert wait_for([tmp_path / "started.w0", tmp_path / "started.w1"], 60)
         parent.kill()
@@ -349,6 +378,25 @@ def test_workers_whose_parent_is_killed_stop_by_themselves(tmp_path):
     reported = [json.loads((tmp_path / f"outcome.w{k}.json").read_text()) for k in range(2)]
     assert [r["predictions"] for r in reported] == [{"1": "stopped"}, {"2": "stopped"}]
     assert not any("stopped_by" in r for r in reported) and not (tmp_path / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
+def test_a_signal_to_the_whole_group_ends_the_run_interrupted_with_what_was_answered(tmp_path, signum):
+    """A closed terminal, `timeout`, a `kill` of the group: the workers get the signal too. Each
+    reports what it had answered and why it stopped, as on a Ctrl-C, instead of dying of it (which
+    would leave its questions with no outcome and the run `failed`)."""
+    parent = start_parent(tmp_path, "answering_worker")
+    try:
+        assert wait_for([tmp_path / "started.w0", tmp_path / "started.w1"], 60)
+        os.killpg(parent.pid, signum)
+        assert parent.wait(timeout=60) == 0
+    finally:
+        parent.kill()
+    outcome = json.loads((tmp_path / "merged.json").read_text())
+    assert outcome["ended_by"] == signal.Signals(signum).name
+    assert outcome["predictions"] == {"1": "answered", "2": "answered"} and outcome["harness_errors"] == {}
+    assert runner.run_status(["1", "2", "3", "4"], outcome, 0, []) == "interrupted"
+    assert (tmp_path / "calls.jsonl").exists() and not list(tmp_path.glob("outcome.w*"))  # merged
 
 
 def signalled_run(run_dir, signums, dispositions):
