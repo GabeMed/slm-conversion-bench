@@ -24,9 +24,9 @@ singleton per process that switches database, so questions cannot share a proces
 every N-th question from the k-th, writes its own C1 file, and the files are merged into the run's
 `calls.jsonl` when all have ended. It is one run, one manifest (`workers`), and the first question
 that fails stops every worker. The number of workers changes no output, so it is not part of the
-configuration's identity. SIGTERM and SIGHUP (a `kill`, a closed terminal) stop such a run as a
-Ctrl-C does, and workers whose parent is gone stop by themselves: nothing is spent for a run nobody
-will close.
+configuration's identity. SIGTERM or SIGHUP sent to the run's process stops such a run as a Ctrl-C
+does, and workers whose parent is gone stop by themselves: nothing is spent for a run nobody will
+close.
 """
 import json
 import multiprocessing
@@ -310,7 +310,9 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
     that stopped for anything but a failed question raises here once everything is merged, as the
     same failure raises in a run of one process. SIGTERM and SIGHUP interrupt the wait as a Ctrl-C
     does (left to their default they would end this process and leave the workers answering); one
-    that is ignored stays ignored, here and in the workers (a run under `nohup` survives its terminal)."""
+    that is ignored stays ignored, here and in the workers (a run under `nohup` survives its terminal).
+    From the first of them to the end of the merge both are ignored: only a Ctrl-C, or SIGKILL, ends a
+    run whose worker never ends."""
     run_dir = kwargs["run_dir"]
     context = multiprocessing.get_context("spawn")
     stop = context.Event()

@@ -255,8 +255,9 @@ def scripted_worker(outcome, part, stop, run_dir, dataset, config):
 def test_a_worker_that_dies_stops_the_others_and_fails_the_run(tmp_path):
     """A killed worker cannot set the flag itself: the parent sets it on the non-zero exit, whichever
     worker it is (here the last one: a parent waiting for the workers in order would never see it)."""
-    outcome = runner.new_outcome()
+    outcome, before = runner.new_outcome(), {s: signal.getsignal(s) for s in runner.STOPPING_SIGNALS}
     runner._in_workers(scripted_worker, {"run_dir": tmp_path, "config": load_config(SMOKE)}, [["waits"], ["dies"]], outcome)
+    assert {s: signal.getsignal(s) for s in runner.STOPPING_SIGNALS} == before  # its handling of signals ended with it
     assert outcome["predictions"] == {"waits": "stopped"}
     assert outcome["harness_errors"] == {"worker 1": ["the worker did not end cleanly (exit code 9, no outcome reported)"]}
     assert runner.run_status(["waits", "dies"], outcome, 0, []) == "failed"
@@ -360,13 +361,13 @@ def signalled_run(run_dir, signums, dispositions):
         if wait_for([run_dir / "started.w0", run_dir / "started.w1"], 60):
             seen["hup"] = signal.getsignal(signal.SIGHUP)
             for signum in signums:
-                os.kill(os.getpid(), signum)
+                signal.pthread_kill(threading.main_thread().ident, signum)  # where the run waits
 
     outcome, before = runner.new_outcome(), {s: signal.signal(s, handler) for s, handler in dispositions.items()}
     sender = threading.Thread(target=send)
     try:
         sender.start()
-        with pytest.raises(KeyboardInterrupt) as ended:
+        with pytest.raises(KeyboardInterrupt, match="^SIG") as ended:  # not a Ctrl-C on the test session
             runner._in_workers(announced_worker, {"run_dir": run_dir, "config": load_config(SMOKE)},
                                [["1", "3"], ["2", "4"]], outcome)
         sender.join()
@@ -382,6 +383,8 @@ def unhandled(signum, frame):
     raise AssertionError("the run left the signal to the process")
 
 
+# two signals at once: CPython may note on stderr that it dropped the second ("ignored due to race condition")
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 @pytest.mark.parametrize("signums", [(signal.SIGTERM,), (signal.SIGHUP,), (signal.SIGHUP, signal.SIGTERM)])
 def test_a_terminated_run_stops_its_workers_and_ends_as_an_interrupted_one(tmp_path, signums):
     """A `kill`, or a hangup, reaches the parent: it sets the flag as on a failure, waits for the
@@ -403,3 +406,29 @@ def test_a_signal_the_process_ignores_stays_ignored(tmp_path):
                                                      {signal.SIGTERM: unhandled, signal.SIGHUP: signal.SIG_IGN})
     assert hup_meanwhile == signal.SIG_IGN and ended_by == "SIGTERM"
     assert outcome["predictions"] == {"1": "stopped", "2": "stopped"}
+
+
+def test_the_first_signal_has_the_ones_that_follow_ignored():
+    """By the system, from then on: a `kill` repeated a second later, or the other signal of a logout
+    arriving late, must find nothing to interrupt."""
+    before = {s: signal.signal(s, unhandled) for s in runner.STOPPING_SIGNALS}
+    try:
+        with pytest.raises(KeyboardInterrupt, match="^SIGHUP$"):
+            runner._interrupt(signal.SIGHUP, None)
+        assert {signal.getsignal(s) for s in runner.STOPPING_SIGNALS} == {signal.SIG_IGN}
+    finally:
+        for s, handler in before.items():
+            signal.signal(s, handler)
+
+
+def test_a_signal_that_follows_does_not_interrupt_the_merge(tmp_path, monkeypatch):
+    """The workers' files are merged before the signals are handled as before the run again."""
+    merge = runner._merge_workers
+
+    def merge_under_a_signal(*args):
+        signal.raise_signal(signal.SIGTERM)
+        return merge(*args)
+    monkeypatch.setattr(runner, "_merge_workers", merge_under_a_signal)
+    outcome, ended_by, _ = signalled_run(tmp_path, (signal.SIGHUP,), {signal.SIGTERM: unhandled, signal.SIGHUP: unhandled})
+    assert ended_by == "SIGHUP" and outcome["predictions"] == {"1": "stopped", "2": "stopped"}
+    assert (tmp_path / "calls.jsonl").exists() and not list(tmp_path.glob("outcome.w*"))
