@@ -330,6 +330,22 @@ def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monke
     assert [p.name for p in (paths.ROOT / "train" / "adapters").iterdir()] == []  # nothing installed
 
 
+def test_a_manifest_is_whole_or_not_there(tmp_path, monkeypatch):
+    """The clusters train at the same time, and the one that registers the set reads the others'
+    manifests: a manifest appears under its name only once it is complete."""
+    import json
+    import os
+
+    from bench import train
+
+    path, seen, replace = tmp_path / "manifest.json", [], os.replace
+    monkeypatch.setattr(train.os, "replace",
+                        lambda src, dst: (seen.append((path.exists(), json.loads(open(src).read()))), replace(src, dst)))
+    train._write_json(path, {"cluster": "c0"})
+    assert seen == [(False, {"cluster": "c0"})]  # complete beside it before it takes the name
+    assert json.loads(path.read_text()) == {"cluster": "c0"} and sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json"]
+
+
 def test_every_cluster_trains_at_the_same_time_each_in_its_own_call(tmp_path, monkeypatch):
     """One `bench train --on modal` per cluster, all running at once: every call is inside its Modal
     function at the same moment, each leaves its own adapter and manifest, and the set is registered."""

@@ -318,7 +318,11 @@ def gpu_cost(config: Dict[str, Any], gpu: Optional[str], seconds: float) -> Dict
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    """Whole or not there: the clusters train at the same time, and one registering the set reads the
+    others' manifests while they are being written."""
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    os.replace(partial, path)
 
 
 def served_name(cluster: str, sha256: str) -> str:
