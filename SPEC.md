@@ -85,6 +85,9 @@ Versão 2.1, de 01/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 - **Logs e treino:** as 1.034 perguntas do BIRD dev que não estão no Mini-Dev, nos 11 bancos do dev.
   - ~200 delas ficam reservadas para **calibração**: piloto, seleção e limiares.
   - As ~834 restantes geram os logs.
+  - Perguntas, evidências e gold vêm da revisão de 06/11/2025 do BIRD dev, sobre os bancos de 2024. Duas ressalvas, medidas na auditoria de 01/10/2026:
+    - essa revisão **trocou 85 perguntas** em relação à anterior, 21 delas na calibração;
+    - o gold dela **não** é o corrigido por especialistas: nos 254 itens do teste com pergunta e evidência idênticas, discorda do gold do Plat-SQL em **18,9%** (48 de 254; IC 95% de 14,6% a 24,2%). Por isso todo veredito é lido no teste, e a calibração serve só ao piloto, à seleção e aos limiares.
 - **Teste:** o **Arcwise-Plat-SQL**: **498 perguntas** do Mini-Dev do BIRD, usadas **como estão no arquivo** (pergunta, evidência e SQL gold corrigido).
   - Em ~81 perguntas e ~68 evidências, o texto foi reescrito em relação ao Mini-Dev, e o gold corresponde ao texto reescrito. O schema é o original.
   - As ids 119 e 120 (ausentes do Plat-SQL) ficam fora de treino e de teste.
@@ -583,6 +586,7 @@ Antes de qualquer execução paga, o desenho passou por uma auditoria de validad
 | O few-shot do B1 seria fixado sem dado | D23 |
 | O pré-registro estava na manhã do Dia 1, antes de existir o que a configuração final nomeia (os adaptadores, a alocação, o k do B1) | 7.3 |
 | O piloto era mais fácil que o teste | 6.4 |
+| Faltava dizer que a revisão de 2025 do BIRD dev trocou 85 perguntas e que o gold dela discorda do corrigido em 18,9% | seção 2 |
 | O mapa não dizia o alcance | seção 5 |
 | "Latência justa" prometia um perfil de carga igual, que API e GPU própria não têm | 6.7 |
 
