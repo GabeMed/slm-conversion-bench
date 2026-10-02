@@ -16,9 +16,10 @@ what to do when it does not. Nothing here is paid until step 2.
      `endpoint.headers_env`, and the embeddings key. None is written to a file of this repository.
    - In Modal: a token, and the two secrets `modal.secrets` names. `slm-bench-vllm-api-key` holds
      `VLLM_API_KEY`; `slm-bench-proxy-auth` holds the proxy-auth variables of `headers_env`.
-2. **A hard spending limit on each provider account,** set in the provider's console: together they
-   sum to the API budget (US$ 150). The harness has no spend cap of its own; step 5 projects the
-   spend by hand, and this limit is what stops a projection that was wrong.
+2. **A spending limit on each provider account:** a prepaid balance, or the provider's own limit
+   where it has one. Together they sum to the API budget (US$ 150). The harness has no spend cap of
+   its own; step 5 projects the spend by hand, and this limit is what stops a projection that was
+   wrong.
 3. **Fill every `before runs` value of `config.yaml`:**
    - each API role's `endpoint.base_url`, `provider` (name, quantization, checkpoint) and, for the
      teacher, `terms` (licence, provider terms, date);
