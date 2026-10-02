@@ -11,19 +11,24 @@ quality, against the LLM the agent uses and against the cheapest alternative tha
 and at what cost per correct answer. The protocol is [`SPEC.md`](SPEC.md) (in Portuguese), fixed
 before any result.
 
-**Status:** the harness is under construction. There are no results yet.
+**Status:** the harness is built and tested against a fake server, a small local model and CPU
+training. No paid run has happened yet, so there are no results. [`RUNBOOK.md`](RUNBOOK.md) is the
+order of the two days of the experiment.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `SPEC.md` | the protocol (v2); `SPEC-v1.md` is kept as the record of what changed |
+| `SPEC.md` | the protocol (v2.1); `SPEC-v1.md` is kept as the record of what changed |
+| `RUNBOOK.md` | the two days of the experiment, command by command |
 | `config.yaml` | C2: every parameter, including the models by role; `configs/` extend it |
 | `bench/contracts/` | the contracts between the parts: C1 `calls.jsonl` (one line per LLM call), C2 configuration, C3 agreement between outputs, C4 the router |
-| `bench/` | the harness: `data`, `run` (agent executions), `eval` (execution accuracy), the test barrier |
+| `bench/` | the harness: `data`, `run` and `replay` (agent executions), `curate` and `embed` (training examples and their clusters), `train`, `loadtest`, `eval` (execution accuracy), `prereg`, `verify`, `report`, the test barrier |
+| `bench/judge/` | the judgments (J1–J8 and the choice of B1's few-shot k): pure functions over what the executions wrote |
+| `modal_apps/` | training and vLLM serving on Modal |
 | `vendor/chess/` | CHESS @ `3d6e835`, patched; every change is in [`vendor/chess/PATCHES.md`](vendor/chess/PATCHES.md) |
 | `data/MANIFEST.json`, `data/splits.json` | hashes of every input and the train / calibration / test splits |
-| `env/agent/requirements.lock` | the agent environment (Python 3.11, CHESS's pinned LangChain 0.2) |
+| `env/` | the three environments: `agent` (Python 3.11, CHESS's pinned LangChain 0.2), `analysis` (the judgments), `train` (training and serving) |
 
 ## Running locally (no paid calls)
 
