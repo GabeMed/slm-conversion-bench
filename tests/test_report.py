@@ -1244,7 +1244,7 @@ def test_the_report_refuses_a_cost_that_cannot_say_what_it_is_or_used_another_lo
         report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
 
-def test_the_report_refuses_an_slo_or_a_few_shot_k_the_configuration_does_not_name(pipeline):
+def test_the_report_refuses_an_slo_or_a_few_shot_k_the_configuration_does_not_name(pipeline, monkeypatch):
     """What the pilot fixed is read from the registered configuration: the execution the SLO is
     measured on (T8), and B1's k, which is the one the rule chose on the pilot questions (T18)."""
     plan = yaml.safe_load(pipeline["plan"].read_text())
@@ -1262,6 +1262,12 @@ def test_the_report_refuses_an_slo_or_a_few_shot_k_the_configuration_does_not_na
     refused({"b1k": b1k_choice(k, PILOT[1:])}, "on other questions than the pilot's")
     refused({"b1k": None}, "a test report with B1 needs the plan's b1k")
     assert plan["b1k"].endswith("choice.json")  # and the plan as written is the one every other test reports on
+    # a configuration that names no execution matches none (`bench prereg` refuses to register one)
+    monkeypatch.setattr(report, "registration_in_force", lambda split, config: pipeline["prereg_hash"])
+    unset = {**pipeline["config"], "cost": {**pipeline["config"]["cost"], "slo_from": None}}
+    pipeline["plan"].write_text(yaml.safe_dump(plan))
+    with pytest.raises(JudgmentError, match=r"another execution than the configuration's cost.slo_from \(None\)"):
+        report.run(str(pipeline["plan"]), unset, ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
 
 
 def test_the_s3_row_reports_the_prompts_cut(pipeline):

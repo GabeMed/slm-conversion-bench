@@ -420,7 +420,7 @@ Cada uma com a ação de corte correspondente:
 
 | | Manhã | Tarde / noite |
 |---|---|---|
-| **Dia 1** | Estágio 0 (6.1), pré-condições (7.1), piloto, projeção de tempo e gasto | K1 (logs), a escolha do k do B1, S2, S3 e S4; disparar os treinos do S5 para rodar à noite |
+| **Dia 1** | Estágio 0 (6.1), pré-condições (7.1), piloto (com a escolha do S4, que o B3 do piloto usa), projeção de tempo e gasto | K1 (logs), a escolha do k do B1, S2 e S3; disparar os treinos do S5 para rodar à noite |
 | **Dia 2** | S6 (uma volta), o pré-registro, e K2 e K4 no teste | custo, estatística, relatório |
 
 - **O pré-registro vem depois do S6 e antes de qualquer pergunta do teste.**
