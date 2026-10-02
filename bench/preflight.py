@@ -158,26 +158,43 @@ def check_pilot_spend(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
-    """GPU seconds per example seen, measured on Modal, times the examples every cluster's dataset will
-    show (rows x epochs), against the overnight budget."""
+    """The hours the largest dataset takes to train: its tokens, counted as training counts them, times
+    the epochs, at the tokens per second the first adapter trained on Modal measured, on the GPU and the
+    base this configuration trains. The adapters train at the same time, each in its own container, so
+    the largest one decides."""
+    from bench import train
+
     budget_h = config["preflight"]["schedule"]["train_hours_max"]
-    precondition = "the measured training time confirms the schedule: every adapter trains overnight (SPEC 7.1, 7.3)"
-    manifests, unreadable = _manifests("*/manifest.json", paths.ROOT / "train" / "adapters")
-    gpu_runs = [m for m in manifests if m.get("where") == "modal" and m["stats"].get("examples_seen")]
+    precondition = ("the measured training time confirms the schedule: the adapters train at the same time, "
+                    "and the largest one overnight (SPEC 7.1, 7.3)")
+    manifests, unreadable = _manifests("*/manifest.json", train.adapters_dir())
+    gpu_runs = [m for m in manifests if m.get("where") == "modal" and m.get("gpu") == config["train"]["gpu"]
+                and m["stats"].get("tokens_per_second")]
     evidence: Dict[str, Any] = {"train_hours_max": budget_h, "unreadable_manifests": unreadable}
-    if not gpu_runs:
-        evidence["needs"] = "one adapter trained on Modal (bench train --on modal) to measure seconds per example"
-        return _check("training_time", precondition, PENDING, evidence, "apply the cuts of SPEC 7.3")
-    seconds_per_example = (sum(m["stats"]["train_seconds"] for m in gpu_runs)
-                           / sum(m["stats"]["examples_seen"] for m in gpu_runs))
+    try:
+        datasets = sorted(train.datasets_dir().glob("*.jsonl")) if gpu_runs else []
+        plans = {path.stem: train.training_plan(config, path.stem) for path in datasets}
+        gpu_runs = [m for m in gpu_runs if m.get("base") in [plan["base"] for plan, _ in plans.values()]]
+        if not gpu_runs:
+            evidence["needs"] = ("the datasets (bench datasets) and one adapter trained on Modal on this base and GPU "
+                                 "(bench train --on modal), to measure the tokens trained per second")
+            return _check("training_time", precondition, PENDING, evidence,
+                          "train the smallest cluster first, then run preflight again")
+        tokens = {cluster: train.precheck(plan, train.parse_dataset(raw, f"{cluster}.jsonl"))["tokens"]
+                  for cluster, (plan, raw) in plans.items()}
+    except train.TrainError as e:  # a dataset bench train would refuse: nothing to project, and its reason
+        evidence["error"] = f"{type(e).__name__}: {e}"
+        return _check("training_time", precondition, FAIL, evidence, "fix what the error says, then run again")
+    first = min(gpu_runs, key=lambda m: m["started_at"])
     epochs = config["train"]["sft"]["num_train_epochs"]
-    datasets = sorted((paths.ROOT / "train" / "datasets").glob("*.jsonl"))
-    rows = sum(sum(1 for line in p.read_text().splitlines() if line.strip()) for p in datasets)
-    projected_h = seconds_per_example * rows * epochs / 3600
-    evidence.update({"seconds_per_example": round(seconds_per_example, 3), "dataset_rows": rows, "epochs": epochs,
+    largest = max(tokens, key=tokens.get)
+    projected_h = tokens[largest] * epochs / first["stats"]["tokens_per_second"] / 3600
+    evidence.update({"measured_on": {"cluster": first["cluster"], "started_at": first["started_at"], "gpu": first["gpu"],
+                                     "base": first["base"], "tokens_per_second": first["stats"]["tokens_per_second"]},
+                     "epochs": epochs, "dataset_tokens": tokens, "largest": largest,
                      "projected_train_hours": round(projected_h, 2)})
     return _check("training_time", precondition, FAIL if projected_h > budget_h else PASS, evidence,
-                  "apply the cuts of SPEC 7.3")
+                  "lower curation.max_per_question_call_site, then curate, cluster and write the datasets again")
 
 
 def check_throughput() -> Dict[str, Any]:
@@ -293,12 +310,17 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     request body, SDK, headers and credentials an execution uses, by construction), retried as an
     execution retries a transport failure. On a prompt this short a 400 cannot be a context overflow: it is
     the configuration, which an execution would record as the model failing every call, and end `done`.
-    Needs the agent environment (LangChain), like an execution."""
+    The answer must be complete (`finish_reason` is `stop`: on a prompt this short, anything else is a token
+    budget the reasoning used up, which an execution would score as the model's failure) and its reasoning
+    must be in the state the role declares (`reasoning.enabled`: reasoning tokens reported when true, none
+    when false; a role that declares nothing is not asserted). Needs the agent environment (LangChain),
+    like an execution."""
     from bench.contracts.config import engine_spec
     from bench.provenance import redact
 
     spec = engine_spec(config, engine)
     found = {"engine": engine, "model": spec["model"], "temperature": temperature}
+    reasoning = (spec.get("reasoning") or {}).get("enabled")
     if not spec["endpoint"].get("base_url"):
         return {**found, "status": PENDING, "why": "no endpoint.base_url yet"}
     try:
@@ -333,16 +355,28 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     usage = hooks._usage(output)
     if usage["source"] != "api":
         problems.append("no usage (P-2: this engine's cost would be an estimate)")
+    finish_reason = (output.response_metadata or {}).get("finish_reason")
+    if finish_reason != "stop":
+        problems.append(f"finish_reason is {finish_reason!r}, not 'stop' (a cut-off answer: an execution would "
+                        f"score it as the model's failure)")
+    if reasoning is True and not usage["reasoning"]:
+        problems.append("no reasoning tokens although the role declares reasoning.enabled: true (the setting is "
+                        "not honoured, or the provider does not report them)")
+    if reasoning is False and usage["reasoning"]:
+        problems.append(f"{usage['reasoning']} reasoning tokens although the role declares reasoning.enabled: false")
     return {**found, "status": FAIL if problems else PASS, "why": "; ".join(problems) or None,
-            "cached_tokens_reported": usage["cached_input"] is not None}
+            "cached_tokens_reported": usage["cached_input"] is not None,
+            "finish_reason": finish_reason, "reasoning_declared": reasoning, "reasoning_tokens": usage["reasoning"],
+            "temperature_recorded": hooks.recorded_temperature(spec, temperature)}
 
 
 def check_engines(config: Dict[str, Any]) -> Dict[str, Any]:
     """Every engine an arm runs on (the production LLM, the cheap alternative, each SLM candidate's base)
     answers a real call with the parameters configured for it, at every temperature the call sites use."""
     precondition = ("every configured engine answers a real call through the agent's client with its configured "
-                    "parameters: text and usage (P-2), so no execution records a refused parameter as the model's "
-                    "failures (a context window smaller than the prompts is not something a short call can see)")
+                    "parameters: text and usage (P-2), a complete answer (finish_reason stop) and its reasoning in "
+                    "the declared state, so no execution records a refused parameter or a cut-off answer as the "
+                    "model's failures (a context window smaller than the prompts is not something a short call can see)")
     engines = ["production_llm", "cheap_alt"] + [f"slm:{c['name']}" for c in config["roles"].get("slm_candidates") or []]
     temperatures = sorted({spec["temperature"] for spec in config["call_sites"].values()})
     probes = [probe_engine(config, engine, t) for engine in engines for t in temperatures]
@@ -350,7 +384,8 @@ def check_engines(config: Dict[str, Any]) -> Dict[str, Any]:
     if failed:
         return _check("engines", precondition, FAIL, probes,
                       f"fix what each failed probe of {', '.join(failed)} says: a refused parameter, a credential, "
-                      f"or an endpoint that did not answer (a Modal server cold-starts in minutes), then run again")
+                      f"an endpoint that did not answer (a Modal server cold-starts in minutes), a cut-off answer "
+                      f"(raise params.max_tokens) or a reasoning setting not honoured, then run again")
     if any(p["status"] == PENDING for p in probes):
         return _check("engines", precondition, PENDING, probes, "set each engine's base_url and credentials, then run again")
     return _check("engines", precondition, PASS, probes, "")

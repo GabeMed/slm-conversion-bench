@@ -1,16 +1,21 @@
 """`bench prereg` (SPEC 6.1): before the test split is touched, register the hash of the SPEC, of the
 configuration, of the splits (the calibration and test ids), of the data manifest, and the rule
-that computes Δ.
+of the non-inferiority tests: the fixed margin Δ, and what the pilot is for.
 
 It writes the two files the test barrier reads (`bench/barrier.py` documents the format):
 `prereg/manifest.json`, and `prereg/HASH`, one line with the sha256 of the manifest's bytes; and it
 commits them on a clean tree. It never pushes: publishing is the author's act, and the barrier
 opens only once `origin/main` has the registration. `commit` is informational (design §5): each
 test execution records its own.
+
+A registration that replaces another is a deviation, and says why (design §6.3 T13): `--replace` needs
+`--reason`, the defect that made it necessary, which becomes one dated line of `prereg/DEVIATIONS.md`,
+committed with the new registration. The report prints that file.
 """
 import hashlib
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +23,7 @@ import yaml
 
 from bench import barrier, paths
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError, pilot_sample
+from bench.data import DataError
 from bench.judge import j4
 
 # The analysis code the registration hashes, so no reading of the results changes without changing
@@ -29,6 +34,7 @@ from bench.judge import j4
 ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py", "bench/contracts",
                  "bench/paths.py")
 REQUIRED_ANALYSIS = ("bench/judge/j4.py", "bench/evaluate.py", "bench/data.py")
+DEVIATIONS = "prereg/DEVIATIONS.md"  # one line per registration that replaced another: its date and the defect
 
 
 class PreregError(DataError):
@@ -95,24 +101,28 @@ def analysis_code(root: Path) -> Dict[str, str]:
     return {rel: _sha256(root / rel) for rel in files}
 
 
-def delta_rule(config: Dict[str, Any], calib: List[str]) -> Dict[str, Any]:
-    """The rule J4 applies (bench/judge/j4.py), in words and parameters, and the pilot it takes d from."""
-    size, seed = config["stats"]["pilot_size"], config["seeds"]["calib_split"]
+def delta_rule(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The rule J4 applies (bench/judge/j4.py), in words and parameters: a fixed margin, and a pilot that
+    gives the planned power only (design §6.3 T3)."""
+    thresholds = config["thresholds"]
     return {
-        "formula": "delta = (z_0.95 + z_0.80) * sqrt(d / n)",
-        "z": {"one_sided_confidence": j4.CONFIDENCE, "power": j4.POWER},
-        "d": "paired discordance, the fraction of questions exactly one of the two arms gets right, "
-             "measured on the pilot",
-        "pilot": {"rule": "the stats.pilot_size calibration ids with the smallest sha256('<seeds.calib_split>:pilot:<id>')",
-                  "size": size, "ids": pilot_sample(calib, size, seed)},
-        "n": "the number of paired test questions (498)",
-        "cap_pp": config["thresholds"]["delta_cap_pp"],
-        "above_cap": "not testable with this n: reported as descriptive only",
-        "noninferior_if": "the one-sided 95% paired-bootstrap lower bound of EX_A - EX_B is above -delta",
+        "margin_pp": thresholds["delta_pp"],
+        "margin": "fixed before any data, the same for every non-inferiority comparison of the report; "
+                  "never derived from a discordance",
+        "selection_margin_pp": thresholds["selection_delta_pp"],
+        "selection_margin": "when choosing engines on the calibration split (B5)",
+        "noninferior_if": "the one-sided 95% paired-bootstrap lower bound of EX_A - EX_B is above -margin",
+        "worse_if": "the one-sided 95% paired-bootstrap upper bound of EX_A - EX_B is below -margin",
+        "otherwise": "inconclusive, reported with the planned power",
+        "planned_power": {"formula": "Phi(margin / sqrt(d / n) - z_0.95)", "one_sided_confidence": j4.CONFIDENCE,
+                          "d": "paired discordance, the fraction of questions exactly one of the two arms gets right, "
+                               "measured on the pilot (B3 against B0)",
+                          "n": "the number of paired test questions (498)"},
+        "pilot": {"accessor": "bench.data.pilot_ids(config)", "size": config["stats"]["pilot_size"],
+                  "mix": config["stats"]["pilot_mix"]},
         "bootstrap": {"unit": "question", "n_boot": config["stats"]["n_boot"], "seed": config["seeds"]["bootstrap"],
                       "quantile": "inverted CDF: ci_low the ceil(n_boot/20)-th smallest resample, ci_high the "
                                   "ceil(n_boot/20)-th largest, from the same resamples"},
-        "calibration_margin": "delta / 2 when choosing engines on the calibration split (B5)",
     }
 
 
@@ -139,11 +149,18 @@ def check_registered_analysis_code(root: Path) -> None:
                           + (f" and {len(changed) - 10} more" if len(changed) > 10 else ""))
 
 
-def register(config_path: str, root: Optional[Path] = None, replace: bool = False) -> Dict[str, Any]:
+def register(config_path: str, root: Optional[Path] = None, replace: bool = False,
+             reason: Optional[str] = None) -> Dict[str, Any]:
     """Write and commit the pre-registration of `config_path` (relative to `root` unless absolute).
     Registering the same inputs again changes nothing; registering different ones over an
-    existing registration needs `replace`, because test runs made under it stop being scorable."""
+    existing registration needs `replace`, because test runs made under it stop being scorable, and
+    `replace` needs `reason`: the defect, recorded as a dated line of prereg/DEVIATIONS.md in the same
+    commit."""
     root = Path(root or paths.ROOT).resolve()
+    reason = " ".join((reason or "").split())  # one line
+    if replace and not reason:
+        raise PreregError(f"--replace needs --reason: the defect that made a new registration necessary, "
+                          f"which becomes a line of {DEVIATIONS}")
     if _git(root, "status", "--porcelain"):
         raise PreregError("the working tree has uncommitted changes: commit them, so the registration "
                           "hashes what the repository holds")
@@ -153,17 +170,32 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     for key in ("n_boot", "pilot_size"):
         if not isinstance((config.get("stats") or {}).get(key), int):
             raise PreregError(f"the configuration has no stats.{key}: the delta rule needs it")
+    mix = config["stats"].get("pilot_mix")
+    if not isinstance(mix, dict) or sum(mix.values()) != config["stats"]["pilot_size"]:
+        raise PreregError("the configuration's stats.pilot_mix does not give stats.pilot_size questions: the pilot "
+                          "is drawn by difficulty")
+    # what the report refuses about the registered configuration is refused here: found after the test
+    # runs, either would need a new registration, and every test run made would be superseded
+    if not (config.get("cost") or {}).get("slo_from"):
+        raise PreregError("the configuration has no cost.slo_from: the pilot's B0 execution on calib, on which the "
+                          "SLO is measured, is registered")
+    k = config["arms"]["B1"]["few_shot"]["k"]
+    chosen = {json.loads(path.read_bytes())["result"]["k"] for path in (root / "judgments" / "b1k").glob("*/choice.json")}
+    if chosen and chosen != {k}:
+        raise PreregError(f"arms.B1.few_shot.k is {k}, and the stored choice of it on the pilot (judgments/b1k) is "
+                          f"{sorted(chosen)}: write the chosen k, or remove a choice that is not the pilot's")
     inputs = barrier.REGISTERED
-    calib = json.loads((root / inputs["splits_sha256"]).read_text()).get("calib") or []
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in inputs.items()},
-                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config, calib),
+                "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config),
                 "analysis_code": analysis_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
+    replaced = None  # the registration this one replaces, as the deviation line names it
     if manifest_path.exists() or hash_path.exists():
         existing = barrier.read_registered(root)  # both halves, as the barrier reads them
         intact = existing is not None and hash_path.is_file() and \
             hash_path.read_bytes().strip() == _sha256(manifest_path).encode()
+        replaced = hash_path.read_bytes().strip().decode() if intact else "a broken registration"
         if not intact:
             if not replace:
                 raise PreregError(f"the registration in prereg/ is broken ({barrier.PREREG_MANIFEST} is not a JSON object, "
@@ -179,7 +211,11 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     manifest_path.parent.mkdir(exist_ok=True)
     manifest_path.write_bytes(raw)
     hash_path.write_text(digest + "\n")
-    files = (barrier.PREREG_MANIFEST, barrier.PREREG_HASH)
+    files = [barrier.PREREG_MANIFEST, barrier.PREREG_HASH]
+    if replaced:
+        with (root / DEVIATIONS).open("a") as deviations:
+            deviations.write(f"- {datetime.now(timezone.utc):%Y-%m-%d} · {digest} replaces {replaced}: {reason}\n")
+        files.append(DEVIATIONS)
     _git(root, "add", "--", *files)
     _git(root, "commit", "-q", "-m", f"Pre-registration {digest}\n\nSPEC.md, {manifest['config_path']}, the splits, "
          f"the data manifest, the delta rule and the analysis code, before the test split is touched. Push to publish.", "--", *files)

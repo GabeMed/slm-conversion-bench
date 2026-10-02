@@ -328,3 +328,56 @@ def test_an_adapter_that_is_not_the_one_modal_trained_is_refused(tmp_path, monke
     with pytest.raises(TrainError, match="not the one trained there"):
         train_cluster(str(config_path), "c0", "modal")
     assert [p.name for p in (paths.ROOT / "train" / "adapters").iterdir()] == []  # nothing installed
+
+
+def test_a_manifest_is_whole_or_not_there(tmp_path, monkeypatch):
+    """The clusters train at the same time, and the one that registers the set reads the others'
+    manifests: a manifest appears under its name only once it is complete."""
+    import json
+    import os
+
+    from bench import train
+
+    path, seen, replace = tmp_path / "manifest.json", [], os.replace
+    monkeypatch.setattr(train.os, "replace",
+                        lambda src, dst: (seen.append((path.exists(), json.loads(open(src).read()))), replace(src, dst)))
+    train._write_json(path, {"cluster": "c0"})
+    assert seen == [(False, {"cluster": "c0"})]  # complete beside it before it takes the name
+    assert json.loads(path.read_text()) == {"cluster": "c0"} and sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json"]
+
+
+def test_every_cluster_trains_at_the_same_time_each_in_its_own_call(tmp_path, monkeypatch):
+    """One `bench train --on modal` per cluster, all running at once: every call is inside its Modal
+    function at the same moment, each leaves its own adapter and manifest, and the set is registered."""
+    import threading
+
+    from bench import train
+    from bench.train import train_cluster
+
+    clusters = ("c0", "c1", "c2")
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch, clusters=clusters)
+    assert config["train"]["timeout_s"] == 39600  # 11 h for one adapter, alone in its container
+    monkeypatch.setattr(train, "precheck", lambda plan, rows: None)
+    files, sha = _adapter_files(tmp_path)
+    together = threading.Barrier(len(clusters), timeout=30)  # broken unless all three are training at once
+
+    def train_adapter(plan, raw, identity):
+        together.wait()
+        return _modal_result(sha, files, {"train_seconds": 1.0}, identity)
+
+    calls = fake_modal_app(monkeypatch, "train", train_adapter=train_adapter)
+    results = {}
+    threads = [threading.Thread(target=lambda c=c: results.update({c: train_cluster(str(config_path), c, "modal")}))
+               for c in clusters]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(results) == list(clusters) and len(calls["app.run"]) == len(calls["train_adapter"]) == 3
+    assert sorted(plan["cluster"] for plan, _, _ in calls["train_adapter"]) == list(clusters)
+    for cluster in clusters:
+        manifest = json.loads((paths.ROOT / "train" / "adapters" / cluster / "manifest.json").read_text())
+        assert manifest["cluster"] == cluster and manifest["adapter_sha256"] == sha
+    fact, missing = register_adapters(config)
+    assert missing == [] and fact in {r["fact"] for r in results.values()}  # whoever finished last registered it
+    assert [p.name for p in (paths.ROOT / "train" / "adapters").iterdir() if p.name not in clusters] == []

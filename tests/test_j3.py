@@ -1,5 +1,6 @@
 """J3 · cost: usage × dated prices, variants from the same usage, missing refused, estimated
-labelled, SLM calls at the load test's cost, per question and per correct query."""
+labelled, SLM calls at the load test's cost, per question and per correct query, each question's
+own cost (`by_question`), and a price that is one provider's."""
 import pytest
 
 from bench.judge import j3
@@ -7,8 +8,8 @@ from bench.judge.base import JudgmentError, canonical, read_result, write_result
 from fixtures.fake import call, repo, usage, write_run
 
 PRICES = {"as_of": "2026-09-30", "table": {
-    "teacher-model": {"input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0, "batch_discount": 0.5},
-    "cheap-model": {"input_per_mtok": 0.2, "cached_input_per_mtok": 0.2, "output_per_mtok": 0.6}}}
+    "teacher-model": {"provider": "provider-x", "input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0, "batch_discount": 0.5},
+    "cheap-model": {"provider": "provider-x", "input_per_mtok": 0.2, "cached_input_per_mtok": 0.2, "output_per_mtok": 0.6}}}
 SLM = {"20%": 0.010, "50%": 0.004, "100%": 0.002}
 
 
@@ -153,3 +154,55 @@ def test_slm_calls_are_priced_at_the_engines_they_used(tmp_path, monkeypatch):
                                    "combined": {"rule": "r", "engines": ["slm:qwen3-8b", "slm:qwen3-8b+lora:c0"]}})
     result = read_result(j3.run("agent-B3y", None, str(both), config), "J3")["result"]
     assert result["total"]["standard@100%"] == pytest.approx(0.1) and result["slm_cost_basis"]["basis"] == "measured"
+
+
+def test_by_question_is_each_questions_cost_in_every_scenario():
+    """T9: {question: {scenario: cost}}, what the report resamples for the cost ratio's interval."""
+    calls = [teacher_call("1"), teacher_call("1", 1), teacher_call("2")]
+    result = j3.judge(calls, ["1", "2", "3"], {"1": True, "2": False, "3": False}, PRICES, "teacher-model")
+    assert result["by_question"]["1"] == {"standard": pytest.approx(4.4), "no_cache": pytest.approx(5.6), "batch": pytest.approx(2.2)}
+    assert result["by_question"]["2"]["standard"] == pytest.approx(2.2)
+    assert result["by_question"]["3"] == {"standard": 0.0, "no_cache": 0.0, "batch": 0.0}  # no call: it costs nothing
+    assert sum(q["standard"] for q in result["by_question"].values()) == pytest.approx(result["total"]["standard"])
+    with pytest.raises(JudgmentError, match="question 2, which the execution does not list"):
+        j3.judge(calls, ["1"], None, PRICES, "teacher-model")
+
+
+def test_by_question_of_an_slm_arm_has_the_utilizations_on_every_question():
+    slm = call("r", "1", "filter_column", "t.a", parsed={}, role="slm", engine="slm:qwen3-8b+lora:c0",
+               model="qwen3-8b-c0", use=usage(1_000_000, 0, 100_000))
+    result = j3.judge([slm, teacher_call("1"), teacher_call("2")], ["1", "2", "3"], None, PRICES, "teacher-model", SLM)
+    assert set(result["by_question"]["1"]) == set(result["by_question"]["2"]) == set(result["by_question"]["3"]) \
+        == set(result["total"])
+    assert result["by_question"]["1"]["standard@20%"] == pytest.approx(2.2 + 0.010)
+    assert result["by_question"]["2"]["standard@20%"] == pytest.approx(2.2)   # an API-only question of an SLM arm
+    assert result["by_question"]["3"]["standard@100%"] == 0.0
+    for scenario in ("standard@20%", "standard@50%", "standard@100%"):
+        assert sum(q[scenario] for q in result["by_question"].values()) == pytest.approx(result["total"][scenario])
+
+
+def test_a_call_is_priced_only_at_its_own_providers_price():
+    """T6: the price entry of an API model carries `provider`, and a call another provider served is
+    refused, never priced at the wrong provider's price."""
+    prices = {"as_of": "2026-09-30", "table": {"teacher-model": {**PRICES["table"]["teacher-model"], "provider": "provider-a"}}}
+    served_by = lambda provider: teacher_call("1", provider=provider)  # noqa: E731
+    assert j3.judge([served_by("provider-a")], ["1"], None, prices, "teacher-model")["total"]["standard"] == pytest.approx(2.2)
+    with pytest.raises(JudgmentError, match="served by provider 'provider-b'.*is of provider 'provider-a'"):
+        j3.judge([served_by("provider-b")], ["1"], None, prices, "teacher-model")
+    with pytest.raises(JudgmentError, match="served by provider None"):  # a C1 line that records no provider
+        j3.judge([served_by(None)], ["1"], None, prices, "teacher-model")
+    unnamed = {"as_of": "2026-09-30", "table": {"teacher-model": {k: v for k, v in PRICES["table"]["teacher-model"].items()
+                                                                  if k != "provider"}}}
+    for provider in ("provider-a", None):  # an entry that names none prices nothing, a call that names none included
+        with pytest.raises(JudgmentError, match="is of provider None"):
+            j3.judge([served_by(provider)], ["1"], None, unnamed, "teacher-model")
+    slm = {**call("r", "1", "filter_column", "t.a", parsed={}, role="slm", engine="slm:q+lora:c0", model="m",
+                  use=usage(1000, 0, 0)), "provider": None}
+    assert j3.judge([slm], ["1"], None, prices, "teacher-model", SLM)["slm_calls"] == 1  # the SLM has no price entry
+
+
+def test_run_records_what_it_read_of_the_configuration(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {"prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}}})
+    write_run("agent-B0", {"type": "agent", "arm": "B0", "split": "calib", "question_ids": ["1"]}, [{**teacher_call("1"), "run_id": "agent-B0"}])
+    reads = read_result(j3.run("agent-B0", None, None, config), "J3")["reads"]
+    assert reads["config"] == ["prices", "roles.production_llm.model"] and reads["run"]["run_id"] == "agent-B0"

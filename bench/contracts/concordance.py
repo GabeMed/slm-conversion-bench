@@ -14,6 +14,11 @@ SQL generation and repair have gold and are judged by execution (J1, J2), never 
 Deliberately stricter than CHESS in three edge cases, so the error is on the side of disagreeing:
 CHESS also de-duplicates columns and tables case-insensitively within one output, and drops the
 columns of tables it did not select; agreement here compares the output as written.
+
+A parsed output need not have the shape its call site asks for (a cut-off answer still parses).
+`agree` never raises on one: where CHESS has a reading for it, that reading is the decision (a
+filter with no answer drops the column, a selection with no `table_names` selects no table), and
+an output of a shape nothing can be read from agrees with nothing.
 """
 from typing import Any, FrozenSet, Tuple
 
@@ -27,7 +32,12 @@ def _unquote(name: str) -> str:
 
 
 def _keeps_column(output: Any) -> bool:
-    return output["is_column_information_relevant"].lower() == "yes"
+    """What CHESS does with a filter output (filter_column.py:65-72): the column stays only on a "yes",
+    and an output it cannot read (a cut-off answer still parses) drops the column."""
+    try:
+        return output["is_column_information_relevant"].lower() == "yes"
+    except (KeyError, TypeError, AttributeError):
+        return False
 
 
 def _column_pairs(output: Any) -> FrozenSet[Tuple[str, str]]:
@@ -36,21 +46,29 @@ def _column_pairs(output: Any) -> FrozenSet[Tuple[str, str]]:
                      for column in columns)
 
 
+def _tables(output: Any) -> FrozenSet[str]:
+    """select_tables.py:88 reads an output with no `table_names` as no table."""
+    return frozenset(output.get("table_names", []))
+
+
 def agree(call_site: str, a: Any, b: Any) -> bool:
     """True when two parsed outputs of `call_site` lead the agent to the same decision.
-    A None (unparsed) output never agrees."""
+    A None (unparsed) output never agrees, nor does one of a shape no decision can be read from."""
     if call_site in GOLD_CALL_SITES:
         raise ValueError(f"{call_site} has gold: judge it by execution, not agreement")
     if a is None or b is None:
         return False
-    if call_site == "extract_keywords":
-        return set(a) == set(b)
-    if call_site == "filter_column":
-        return _keeps_column(a) == _keeps_column(b)
-    if call_site == "select_tables":
-        return set(a["table_names"]) == set(b["table_names"])
-    if call_site == "select_columns":
-        return _column_pairs(a) == _column_pairs(b)
+    try:
+        if call_site == "extract_keywords":
+            return set(a) == set(b)
+        if call_site == "filter_column":
+            return _keeps_column(a) == _keeps_column(b)
+        if call_site == "select_tables":
+            return _tables(a) == _tables(b)
+        if call_site == "select_columns":
+            return _column_pairs(a) == _column_pairs(b)
+    except (TypeError, AttributeError):  # not a mapping, a null where a list goes, a name that is not text
+        return False
     if call_site in AGENT_CALL_SITES:
         return a == b
     raise ValueError(f"unknown call site {call_site!r}")

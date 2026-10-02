@@ -32,6 +32,8 @@ from bench.contracts.facts import write_fact
 from bench.judge.base import (JudgmentError, read_jsonl, reference, relative, require_done, write_result)
 
 JUDGMENT = "J5"
+# the configuration keys J5 reads, recorded in the result's `reads` (design §6.2)
+CONFIG_KEYS = tuple(f"clustering.{key}" for key in ("k_min", "k_max", "seed", "n_init", "silhouette_sample"))
 
 
 def _unit(matrix):
@@ -179,4 +181,4 @@ def judge(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[st
 
 def run(curate_run_id: str, embed_run_id: str, calib_embed_run_id: Optional[str], config: Dict[str, Any]):
     result, reads, fact = judge(curate_run_id, embed_run_id, calib_embed_run_id, config["clustering"])
-    return write_result(JUDGMENT, reads, result), fact
+    return write_result(JUDGMENT, {**reads, "config": list(CONFIG_KEYS)}, result), fact

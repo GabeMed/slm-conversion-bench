@@ -21,12 +21,16 @@ CALLS = json.loads((Path(__file__).parent / "fixtures_calls.json").read_text())
 
 def test_each_call_becomes_the_body_the_agents_client_sends_to_the_engines_model():
     params = {"max_tokens": 64, "timeout_s": 600, "top_p": 0.9}
-    payloads = build_payloads(CALLS, "c3", params, stream=False)
+    # the temperature is the call site's in the configuration, not what C1 recorded: a provider that
+    # forces its own makes the two differ (the fixture's lines all record 0.0)
+    sites = {"agent_ss": {"temperature": 0.3}, "select_tables": {"temperature": 0.7}}
+    payloads = build_payloads(CALLS, "c3", params, False, sites)
     assert len(payloads) == len(CALLS)
     for call, body in zip(CALLS, payloads):
-        assert body == {"model": "c3", "messages": call["prompt_messages"], "temperature": call["temperature"],
-                        "max_tokens": 64, "top_p": 0.9}
-    streamed = build_payloads(CALLS[:1], "c3", {"max_tokens": None, "timeout_s": 1}, stream=True)[0]
+        assert body == {"model": "c3", "messages": call["prompt_messages"],
+                        "temperature": sites[call["call_site"]]["temperature"], "max_tokens": 64, "top_p": 0.9}
+    assert {body["temperature"] for body in payloads} == {0.3, 0.7} and {c["temperature"] for c in CALLS} == {0.0}
+    streamed = build_payloads(CALLS[:1], "c3", {"max_tokens": None, "timeout_s": 1}, True, sites)[0]
     assert streamed["stream"] is True and streamed["stream_options"] == {"include_usage": True}
     assert "max_tokens" not in streamed
 
@@ -81,7 +85,7 @@ def test_the_replayed_body_is_what_the_patched_agent_sends(monkeypatch):
         server.server.shutdown()
     sent = server.bodies[0]
     spec = engine_spec(config, "production_llm")
-    replayed = build_payloads([call], spec["model"], spec["params"], stream=False)[0]
+    replayed = build_payloads([call], spec["model"], spec["params"], False, config["call_sites"])[0]
     assert {k: sent[k] for k in replayed} == replayed
     assert set(sent) - set(replayed) <= {"n", "stream"} and not sent.get("stream")
 
@@ -246,7 +250,7 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     levels = [[json.loads(line) for line in (d / "payloads.jsonl").read_text().splitlines()] for d in run_dirs]
     assert {p["model"] for p in levels[0]} == {"c0"} and levels[0][0]["max_tokens"] == 64
     # the warm-up calls (sent before each level), then level 1 and level 2 each on their own calls
-    expected = build_payloads(SOURCE, "c0", config["roles"]["slm_candidates"][-1]["params"], False)
+    expected = build_payloads(SOURCE, "c0", config["roles"]["slm_candidates"][-1]["params"], False, config["call_sites"])
     assert levels == [expected[2:7], expected[7:12]]
     assert server.posted == expected[:2] * 2
     second = json.loads((run_dirs[1] / "manifest.json").read_text())

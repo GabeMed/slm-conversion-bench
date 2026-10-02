@@ -3,6 +3,7 @@ configuration and no other, once the author pushes it; and `bench eval` scores a
 the run was made under the registration in force."""
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 
@@ -12,14 +13,15 @@ import yaml
 from bench import paths
 from bench.barrier import prereg_published
 from bench.contracts.config import config_sha256, load_config
-from bench.data import DataError, pilot_sample
+from bench.data import DataError
 from bench.evaluate import evaluate, evaluate_per_call
 from bench.prereg import PreregError, check_registered_analysis_code, register
 from synthetic import make_repo, sha256
 
 # distinct seeds, so reading one seed key for another shows
-CONFIG = {**load_config(paths.ROOT / "config.yaml"),
-          "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404}}
+SHIPPED = load_config(paths.ROOT / "config.yaml")
+CONFIG = {**SHIPPED, "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404},
+          "cost": {**SHIPPED["cost"], "slo_from": "agent-B0-calib"}}  # what the pilot fixes before the registration
 
 
 def git(cwd, *args):
@@ -27,6 +29,7 @@ def git(cwd, *args):
 
 
 CODE = paths.ROOT  # this repository, taken before any test points bench.paths elsewhere
+REASON = "the first registration hashed the wrong splits"  # what --replace must say (T13)
 ANALYSIS = ["bench/data.py", "bench/evaluate.py", "bench/judge/__init__.py", "bench/judge/j1.py", "bench/judge/j4.py",
             "bench/paths.py", *git(CODE, "ls-files", "bench/contracts").splitlines()]
 
@@ -74,13 +77,14 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
     assert manifest["spec_sha256"] == sha256(repo / "SPEC.md")
     assert manifest["splits_sha256"] == sha256(repo / "data" / "splits.json")
     assert manifest["data_manifest_sha256"] == sha256(repo / "data" / "MANIFEST.json")
-    rule = manifest["delta_rule"]
-    assert (rule["cap_pp"], rule["bootstrap"]["n_boot"], rule["bootstrap"]["seed"]) == \
-        (CONFIG["thresholds"]["delta_cap_pp"], CONFIG["stats"]["n_boot"], CONFIG["seeds"]["bootstrap"])
+    rule = manifest["delta_rule"]  # the fixed margin (T3); the pilot only gives the planned power
+    assert (rule["margin_pp"], rule["selection_margin_pp"], rule["bootstrap"]["n_boot"], rule["bootstrap"]["seed"]) == \
+        (CONFIG["thresholds"]["delta_pp"], CONFIG["thresholds"]["selection_delta_pp"], CONFIG["stats"]["n_boot"],
+         CONFIG["seeds"]["bootstrap"]) == (5, 2.5, 10000, 303)
+    assert "cap_pp" not in rule and "sqrt(d / n)" in rule["planned_power"]["formula"]
+    assert rule["pilot"] == {"accessor": "bench.data.pilot_ids(config)", "size": 50,
+                             "mix": {"simple": 15, "moderate": 25, "challenging": 10}}
     assert manifest["analysis_code"] == {rel: sha256(repo / rel) for rel in ANALYSIS}
-    calib = [str(i) for i in range(100, 160)]
-    assert rule["pilot"]["ids"] == pilot_sample(calib, 50, CONFIG["seeds"]["calib_split"])
-    assert (rule["pilot"]["size"], len(rule["pilot"]["ids"])) == (CONFIG["stats"]["pilot_size"], 50)
     assert git(repo, "rev-parse", "HEAD^") == before and git(repo, "status", "--porcelain") == ""
     assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == ["prereg/HASH", "prereg/manifest.json"]
     assert "not on origin/main" in prereg_published(CONFIG, repo)  # publishing is the author's act
@@ -110,8 +114,40 @@ def test_registering_again_changes_nothing_and_replacing_needs_asking(repo):
     git(repo, "commit", "-q", "-am", "spec v2")
     with pytest.raises(PreregError, match="--replace"):
         register("config.yaml", root=repo)
-    second = register("config.yaml", root=repo, replace=True)
+    second = register("config.yaml", root=repo, replace=True, reason=REASON)
     assert second["hash"] != first["hash"] and (repo / "prereg" / "HASH").read_text().strip() == second["hash"]
+
+
+def test_replacing_a_registration_needs_its_reason_which_becomes_a_line_of_deviations(repo):
+    """T13: `--replace` needs `--reason`; the defect is one dated line of prereg/DEVIATIONS.md, committed
+    with the new manifest and HASH."""
+    deviations = repo / "prereg" / "DEVIATIONS.md"
+    first = register("config.yaml", root=repo)
+    assert not deviations.exists()  # a first registration deviates from nothing
+    (repo / "SPEC.md").write_text("protocol, v2\n")
+    git(repo, "commit", "-q", "-am", "spec v2")
+    head = git(repo, "rev-parse", "HEAD")
+    for no_reason in (None, "", "  \n "):
+        with pytest.raises(PreregError, match="--replace needs --reason"):
+            register("config.yaml", root=repo, replace=True, reason=no_reason)
+    with pytest.raises(PreregError, match="a different pre-registration is in force"):
+        register("config.yaml", root=repo, reason=REASON)  # a reason alone replaces nothing
+    assert git(repo, "rev-parse", "HEAD") == head and not deviations.exists() and git(repo, "status", "--porcelain") == ""
+    second = register("config.yaml", root=repo, replace=True, reason="the SPEC named\n the wrong pilot ")
+    (line,) = deviations.read_text().splitlines()
+    assert re.fullmatch(rf"- \d{{4}}-\d{{2}}-\d{{2}} · {second['hash']} replaces {first['hash']}: the SPEC named the wrong pilot", line)
+    assert git(repo, "status", "--porcelain") == ""  # committed with the registration, in one commit
+    assert sorted(git(repo, "show", "--name-only", "--format=", "HEAD").split()) == [
+        "prereg/DEVIATIONS.md", "prereg/HASH", "prereg/manifest.json"]
+    # registering the same inputs again replaces nothing: no new line, with or without --replace
+    assert register("config.yaml", root=repo, replace=True, reason=REASON)["new"] is False
+    assert deviations.read_text().splitlines() == [line]
+    (repo / "SPEC.md").write_text("protocol, v3\n")
+    git(repo, "commit", "-q", "-am", "spec v3")
+    third = register("config.yaml", root=repo, replace=True, reason=REASON)
+    assert deviations.read_text().splitlines()[0] == line and len(deviations.read_text().splitlines()) == 2
+    assert deviations.read_text().splitlines()[1].endswith(f"· {third['hash']} replaces {second['hash']}: {REASON}")
+    check_registered_analysis_code(repo)  # the file changes nothing the barrier or the registered code reads
 
 
 def test_register_refuses_a_configuration_outside_the_repository_or_without_stats(repo, tmp_path):
@@ -123,6 +159,38 @@ def test_register_refuses_a_configuration_outside_the_repository_or_without_stat
     git(repo, "commit", "-q", "-am", "no stats")
     with pytest.raises(PreregError, match="stats.n_boot"):
         register("config.yaml", root=repo)
+    short = {**CONFIG, "stats": {**CONFIG["stats"], "pilot_mix": {"simple": 15, "moderate": 25, "challenging": 9}}}
+    (repo / "config.yaml").write_text(yaml.safe_dump(short))
+    git(repo, "commit", "-q", "-am", "a mix of 49")
+    with pytest.raises(PreregError, match="stats.pilot_mix does not give stats.pilot_size questions"):
+        register("config.yaml", root=repo)
+    (repo / "config.yaml").write_text(yaml.safe_dump({**CONFIG, "stats": {k: v for k, v in CONFIG["stats"].items()
+                                                                          if k != "pilot_mix"}}))
+    git(repo, "commit", "-q", "-am", "no mix")
+    with pytest.raises(PreregError, match="stats.pilot_mix does not give"):
+        register("config.yaml", root=repo)
+
+
+def test_register_refuses_what_the_report_would_refuse_after_the_test(repo):
+    """The execution the SLO is measured on, and B1's k as the pilot chose it: found wrong by the report,
+    after the test runs, either would need a new registration and every test run would be superseded."""
+    def commit(config, message):
+        (repo / "config.yaml").write_text(yaml.safe_dump(config))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", message)
+    commit({**CONFIG, "cost": {**CONFIG["cost"], "slo_from": None}}, "no SLO execution")
+    with pytest.raises(PreregError, match="no cost.slo_from"):
+        register("config.yaml", root=repo)
+    k = CONFIG["arms"]["B1"]["few_shot"]["k"]
+    choice = repo / "judgments" / "b1k" / ("0" * 64) / "choice.json"
+    choice.parent.mkdir(parents=True)
+    choice.write_text(json.dumps({"judgment": "b1k", "result": {"k": 3 - k}}))
+    commit(CONFIG, "the pilot chose the other k")
+    with pytest.raises(PreregError, match=rf"arms.B1.few_shot.k is {k}, and the stored choice .* is \[{3 - k}\]"):
+        register("config.yaml", root=repo)
+    choice.write_text(json.dumps({"judgment": "b1k", "result": {"k": k}}))
+    commit(CONFIG, "the pilot chose this k")
+    assert register("config.yaml", root=repo)["new"] is True
 
 
 @pytest.mark.parametrize("rel", ANALYSIS + ["bench/report.py", "bench/judge/j9.py"])
@@ -134,7 +202,7 @@ def test_editing_any_analysis_file_changes_the_registration(repo, rel):
     git(repo, "commit", "-q", "-m", f"edit {rel}")
     with pytest.raises(PreregError, match="--replace"):
         register("config.yaml", root=repo)
-    second = register("config.yaml", root=repo, replace=True)
+    second = register("config.yaml", root=repo, replace=True, reason=REASON)
     manifest = json.loads((repo / "prereg" / "manifest.json").read_text())
     assert second["hash"] != first["hash"] and manifest["analysis_code"][rel] == sha256(path)
 
@@ -174,7 +242,8 @@ def test_a_malformed_registration_is_replaced_only_on_request(repo):
         register("config.yaml", root=repo)
     with pytest.raises(PreregError, match="not a JSON object: no analysis code is registered"):
         check_registered_analysis_code(repo)
-    assert register("config.yaml", root=repo, replace=True)["new"]
+    assert register("config.yaml", root=repo, replace=True, reason=REASON)["new"]
+    assert (repo / "prereg" / "DEVIATIONS.md").read_text().endswith(f" replaces a broken registration: {REASON}\n")
 
 
 @pytest.mark.parametrize("damage", [b"0" * 64 + b"\n", b"\xff\xfe\n", None])  # wrong, not UTF-8, missing
@@ -190,7 +259,7 @@ def test_a_registration_whose_hash_is_not_its_manifests_is_repaired_only_on_requ
     git(repo, "commit", "-q", "-m", "a damaged HASH")
     with pytest.raises(PreregError, match="the registration in prereg/ is broken"):
         register("config.yaml", root=repo)
-    repaired = register("config.yaml", root=repo, replace=True)  # a new registration (it records its own commit), intact
+    repaired = register("config.yaml", root=repo, replace=True, reason=REASON)  # a new registration (it records its own commit), intact
     manifest_sha = hashlib.sha256((repo / "prereg" / "manifest.json").read_bytes()).hexdigest()
     assert repaired["new"] and repaired["hash"] == hash_path.read_text().strip() == manifest_sha != registered["hash"]
 
@@ -243,7 +312,7 @@ def test_the_extends_chain_resolves_each_parent_from_its_own_file(repo):
     commit_config(repo, "sub/deeper/mid2.yaml", "extends: ../../local.yaml\n")
     commit_config(repo, "sub/child2.yaml", "extends: deeper/mid2.yaml\n")
     with pytest.raises(PreregError, match="local.yaml is not tracked"):  # checked at every depth
-        register("sub/child2.yaml", root=repo, replace=True)
+        register("sub/child2.yaml", root=repo, replace=True, reason=REASON)
 
 
 def test_register_accepts_a_tracked_extends_chain(repo):
@@ -261,6 +330,8 @@ def published(tmp_path, monkeypatch, tmp_path_factory):
     raw = yaml.safe_load(config_path.read_text())
     raw["data"]["mini_dev"]["sha256"] = sha256(paths.RAW / "mini_dev.json")
     raw["stats"]["pilot_size"] = 1  # the synthetic calibration split has a single id
+    raw["stats"]["pilot_mix"] = {"simple": 1, "moderate": 0, "challenging": 0}
+    raw.setdefault("cost", {})["slo_from"] = "agent-B0-calib"
     config_path.write_text(yaml.safe_dump(raw))
     paths.SPLITS.write_text(json.dumps({"train": ["1", "2"], "calib": ["3"], "test": ["9"], "excluded": []}))
     (root / "SPEC.md").write_text("protocol\n")

@@ -101,9 +101,74 @@ def _agent_engines(node: Any, where: str = "agent") -> List[str]:
     return errors
 
 
-def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
-    """The agent's own settings: retries, concurrency, the B1 few-shot and local embeddings (F1)."""
+# ---------------------------------------------------------------- the API roles' reasoning and provider pin
+
+PROVIDER_KEYS = ("name", "quantization", "checkpoint", "reserve", "routing")
+
+
+def _text_or_null(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and bool(value))
+
+
+def _routing_errors(where: str, routing: Any) -> List[str]:
+    """An aggregator's routing pin: one that could fall back, or drop a parameter, would pin nothing."""
+    def names(value):
+        return isinstance(value, list) and bool(value) and all(isinstance(v, str) and v for v in value)
+    if not isinstance(routing, dict) or set(routing) != {"only", "allow_fallbacks", "require_parameters", "quantizations"}:
+        return [f"{where}.routing must be null or {{only, allow_fallbacks, require_parameters, quantizations}}"]
+    errors = [f"{where}.routing.{key} must be a non-empty list of names" for key in ("only", "quantizations")
+              if not names(routing[key])]
+    if routing["allow_fallbacks"] is not False or routing["require_parameters"] is not True:
+        errors.append(f"{where}.routing must set allow_fallbacks: false and require_parameters: true")
+    return errors
+
+
+def api_role_errors(config: Dict[str, Any]) -> List[str]:
+    """What each API role declares besides its endpoint: its reasoning state (`reasoning.enabled`, asserted by
+    the preflight probe; `reasoning.forced_temperature`, the value C1 records when the provider forces one)
+    and the provider that serves it (`provider`, whose `name` C1 records)."""
     errors = []
+    for role in SINGLE_MODEL_ROLES:
+        spec, where = config["roles"][role], f"roles.{role}"
+        reasoning = spec.get("reasoning")
+        if not isinstance(reasoning, dict) or not isinstance(reasoning.get("enabled"), bool):
+            errors.append(f"{where}.reasoning.enabled must be true or false")
+        else:
+            forced = reasoning.get("forced_temperature")
+            if forced is not None and (isinstance(forced, bool) or not isinstance(forced, (int, float)) or forced < 0):
+                errors.append(f"{where}.reasoning.forced_temperature must be null or a number >= 0")
+        extra_body = (spec.get("params") or {}).get("extra_body")
+        if extra_body is not None and not isinstance(extra_body, dict):
+            errors.append(f"{where}.params.extra_body must be a mapping")
+        provider = spec.get("provider")
+        if not isinstance(provider, dict) or set(provider) != set(PROVIDER_KEYS):
+            errors.append(f"{where}.provider must have exactly {PROVIDER_KEYS} (null until decided)")
+            continue
+        errors += [f"{where}.provider.{key} must be a string or null" for key in ("name", "quantization")
+                   if not _text_or_null(provider[key])]
+        checkpoint = provider["checkpoint"]
+        if checkpoint is not None and not (isinstance(checkpoint, dict) and set(checkpoint) == {"repo", "revision"}
+                                           and isinstance(checkpoint["repo"], str) and checkpoint["repo"]
+                                           and isinstance(checkpoint["revision"], str) and _COMMIT.match(checkpoint["revision"])):
+            errors.append(f"{where}.provider.checkpoint must be null or {{repo, revision: a 40-hex commit}}")
+        reserve = provider["reserve"]
+        if reserve is not None and not (isinstance(reserve, dict) and set(reserve) == {"name", "base_url", "quantization"}
+                                        and all(isinstance(reserve[k], str) and reserve[k] for k in ("name", "base_url"))
+                                        and _text_or_null(reserve["quantization"])):
+            errors.append(f"{where}.provider.reserve must be null or {{name, base_url, quantization}}")
+        if provider["routing"] is not None:
+            errors += _routing_errors(f"{where}.provider", provider["routing"])
+            if isinstance(extra_body, dict) and "provider" in extra_body:  # one place decides the routing
+                errors.append(f"{where}.params.extra_body.provider is set by {where}.provider.routing")
+    return errors
+
+# ---------------------------------------------------------------- end of the API roles' block
+
+
+def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """The agent's own settings: retries, concurrency, the B1 few-shot, local embeddings (F1), and the API
+    roles' reasoning and provider pin."""
+    errors = api_role_errors(config)
 
     def number(value, minimum, integer=False):
         kinds = (int,) if integer else (int, float)
@@ -131,6 +196,48 @@ def agent_settings_errors(config: Dict[str, Any]) -> List[str]:
             errors.append("embeddings.local.model is required with provider local")
         if not isinstance(local.get("revision"), str) or not _COMMIT.match(local["revision"]):
             errors.append("embeddings.local.revision must be a 40-hex commit")
+    return errors
+
+
+def cost_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """What J8 prices the SLM with: the SLO's cap, the container's CPU and memory prices, and the memory
+    it is priced at. A key that is given must be a usable number; J8 refuses to run without one."""
+    def section(*keys: str) -> Dict[str, Any]:
+        node: Any = config
+        for key in keys:
+            node = node.get(key) if isinstance(node, dict) else None
+        return node if isinstance(node, dict) else {}
+    errors = []
+    for where, key, positive in ((("cost",), "p95_slo_cap_ms", True), (("serving",), "memory_gib", True),
+                                 (("modal", "gpu_prices"), "cpu_usd_per_core_s", False),
+                                 (("modal", "gpu_prices"), "memory_usd_per_gib_s", False)):
+        if key not in section(*where):
+            continue
+        value = section(*where)[key]
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not number or value < 0 or (positive and value == 0):
+            errors.append(f"{'.'.join(where)}.{key} must be a number {'> 0' if positive else '>= 0'}")
+    if not isinstance(section("cost").get("slo_from"), (str, type(None))):
+        errors.append("cost.slo_from must be a run id or null")
+    return errors
+
+
+def verdict_settings_errors(config: Dict[str, Any]) -> List[str]:
+    """Front R's keys: what every verdict reads (design §6.3), fixed before the pilot is read."""
+    errors = []
+
+    def number(value, low, high):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high
+    thresholds = config["thresholds"]
+    for key, high in (("delta_pp", 100), ("selection_delta_pp", 100), ("concordance_min", 1),
+                      ("concordance_slack_pp", 100), ("format_tolerance_pp", 100)):
+        if not number(thresholds.get(key), 0, high):
+            errors.append(f"thresholds.{key} must be a number in [0, {high}]")
+    min_calls = (config.get("allocation") or {}).get("min_calls")
+    if not (isinstance(min_calls, int) and not isinstance(min_calls, bool) and min_calls >= 1):
+        errors.append("allocation.min_calls must be an integer >= 1")
+    if not number((config.get("claims") or {}).get("v3_min_ratio"), 1, float("inf")):
+        errors.append("claims.v3_min_ratio must be a number >= 1")
     return errors
 
 
@@ -175,6 +282,26 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
             errors.append(f"data.{name} needs url and sha256")
     if not errors:  # the agent's settings read the keys checked above
         errors += agent_settings_errors(config)
+    errors += verdict_settings_errors(config)
+    return errors + data_training_errors(config) + cost_settings_errors(config)
+
+
+def data_training_errors(config: Dict[str, Any]) -> List[str]:
+    """The stratified pilot (`stats.pilot_mix`) and the cap on the training examples
+    (`curation.max_per_question_call_site`; its seed, `seeds.curation_sample`, is checked with the seeds),
+    each where it is set: a configuration without them is one that neither draws the pilot nor curates.
+    That the mix names the difficulties and sums to `stats.pilot_size` is checked where the pilot is
+    drawn (bench.data.pilot_ids)."""
+    def count(value: Any, minimum: int) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+    errors = []
+    stats, curation = config.get("stats") or {}, config.get("curation") or {}
+    if "pilot_mix" in stats:
+        mix = stats["pilot_mix"]
+        if not (isinstance(mix, dict) and mix and all(count(n, 0) for n in mix.values())):
+            errors.append("stats.pilot_mix must map each difficulty to an integer >= 0")
+    if "max_per_question_call_site" in curation and not count(curation["max_per_question_call_site"], 1):
+        errors.append("curation.max_per_question_call_site must be an integer >= 1")
     return errors
 
 

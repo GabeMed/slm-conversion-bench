@@ -14,7 +14,13 @@ On Modal the run is detached and its result stored on the adapters volume under 
 GPU and the training code with its lock), so re-running the same command collects
 it; changing any of that code in between trains again.
     train/adapters/<cluster>/manifest.json   base and revision, hyper-parameters, dataset sha256, the facts it
-                                             was trained on, where it ran, GPU-seconds and cost
+                                             was trained on, where it ran, GPU-seconds and cost, and the tokens
+                                             it trained per second (what `bench preflight` projects the
+                                             largest dataset's hours from)
+
+The adapters train at the same time: one `bench train --cluster <c> --on modal` process per cluster, each
+its own Modal app run and GPU container. The processes share only `train/adapters/`, where each writes its
+own cluster's directory.
 
 When every cluster of the centroids has an adapter trained on the same `choice` and `centroids`, the set is
 registered as the `adapters` fact (`judgments/S5/<sha256>/adapters.json`).
@@ -191,7 +197,7 @@ def check_rows(tokenizer: Any, rows: List[dict], template_kwargs: dict,
     serving template kwargs, is a prefix of prompt + completion; and the row fits in max_length. Returns
     the token counts and, per row, the completion tokens (what the loss must fall on)."""
     check_template_reads(tokenizer, template_kwargs)
-    longest, completions = 0, []
+    longest, tokens, completions = 0, 0, []
     for i, row in enumerate(rows):
         prompt = _token_ids(tokenizer, row["prompt"], template_kwargs, generation_prompt=True)
         full = _token_ids(tokenizer, row["prompt"] + row["completion"], template_kwargs, generation_prompt=False)
@@ -203,8 +209,10 @@ def check_rows(tokenizer: Any, rows: List[dict], template_kwargs: dict,
         if len(full) == len(prompt):
             raise TrainError(f"row {i + 1}: the completion renders to no tokens")
         longest = max(longest, len(full))
+        tokens += len(full)
         completions.append(full[len(prompt):])
-    return {"longest_row_tokens": longest, "completion_tokens": sum(map(len, completions))}, completions
+    # tokens: what one epoch trains on, every row whole (the prompt is computed too, though the loss is not on it)
+    return {"longest_row_tokens": longest, "tokens": tokens, "completion_tokens": sum(map(len, completions))}, completions
 
 
 def check_loss_tokens(dataset: Any, completions: List[List[int]]) -> None:
@@ -271,6 +279,7 @@ def _train_lora(plan: Dict[str, Any], rows: List[dict], out_dir: Path, device: s
         gradient_checkpointing=sft["gradient_checkpointing"], logging_steps=sft["logging_steps"],
         bf16=bf16, use_cpu=device == "cpu", completion_only_loss=True, packing=False,
         save_strategy="no", report_to=[], disable_tqdm=True,
+        include_num_input_tokens_seen="non_padding",  # counted by the trainer: the throughput below
     )
     peft_config = LoraConfig(r=lora["r"], lora_alpha=lora["alpha"], lora_dropout=lora["dropout"],
                              target_modules=list(lora["target_modules"]), bias="none", task_type="CAUSAL_LM",
@@ -282,8 +291,11 @@ def _train_lora(plan: Dict[str, Any], rows: List[dict], out_dir: Path, device: s
     result = trainer.train()
     train_seconds = time.perf_counter() - started
     trainer.model.save_pretrained(str(out_dir))  # adapter_config.json and adapter_model.safetensors
+    tokens_seen = trainer.state.num_input_tokens_seen
     return {
         "device": device, "dtype": "bfloat16" if bf16 else "float32", "train_seconds": round(train_seconds, 3),
+        # the tokens the trainer ran through the model (every row whole, each epoch) and their rate
+        "tokens_seen": tokens_seen, "tokens_per_second": round(tokens_seen / train_seconds, 3),
         "global_step": result.global_step, "train_loss": result.training_loss,
         "examples_seen": result.global_step * sft["per_device_train_batch_size"] * sft["gradient_accumulation_steps"],
         **token_stats,
@@ -306,7 +318,11 @@ def gpu_cost(config: Dict[str, Any], gpu: Optional[str], seconds: float) -> Dict
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    """Whole or not there: the clusters train at the same time, and one registering the set reads the
+    others' manifests while they are being written."""
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    os.replace(partial, path)
 
 
 def served_name(cluster: str, sha256: str) -> str:

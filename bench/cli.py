@@ -32,6 +32,8 @@ def main(argv=None) -> int:
     group.add_argument("--ids", nargs="+", help="question ids, all inside the split")
     group.add_argument("--limit", type=int, help="the first N questions of the split, by id")
     p.add_argument("--engine", choices=("production_llm", "cheap_alt"), help="B2 only: the engine of the single call")
+    p.add_argument("--workers", type=int, default=1,
+                   help="answer the questions in this many processes: still one run and one manifest (default 1)")
 
     # ---- F1: replay and the call-site registry
     p = sub.add_parser("replay", help="resend the first attempt of every invocation of a B0 run to another engine")
@@ -41,6 +43,7 @@ def main(argv=None) -> int:
     group.add_argument("--engine", help="a fixed engine: production_llm, cheap_alt, slm:<candidate>[+lora:<served name>]")
     group.add_argument("--arm", choices=AGENT_ARMS, help="route each call as this arm does")
     p.add_argument("--call-sites", nargs="+", help="only these call sites")
+    p.add_argument("--ids", nargs="+", help="only these questions of the source run")
 
     p = sub.add_parser("call-sites", help="add the call sites of done train/calib runs to registry/call_sites.json")
     p.add_argument("run_ids", nargs="+")
@@ -53,7 +56,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("prereg", help="write and commit prereg/manifest.json and prereg/HASH (push to publish)")
     p.add_argument("--config", default="config.yaml")
-    p.add_argument("--replace", action="store_true", help="register anew over a different registration")
+    p.add_argument("--replace", action="store_true", help="register anew over a different registration (needs --reason)")
+    p.add_argument("--reason", help="with --replace: the defect that made a new registration necessary; it becomes "
+                                    "a dated line of prereg/DEVIATIONS.md, which the report prints")
 
     # F3 · training, load test and preflight (bench/train.py, bench/loadtest.py, bench/preflight.py)
     p = sub.add_parser("train", help="S5: one LoRA adapter for a cluster; registers the adapters fact once every cluster has one")
@@ -87,10 +92,12 @@ def main(argv=None) -> int:
             preprocess(args.config, args.db)
         elif args.command == "run":
             from bench.agent.runner import run_agent
-            print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine))
+            print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
+                            workers=args.workers))
         elif args.command == "replay":
             from bench.agent.replay import replay
-            print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites))
+            print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,
+                         ids=args.ids))
         elif args.command == "call-sites":
             from bench.agent.registry import update_call_sites
             print(update_call_sites(args.run_ids))
@@ -100,7 +107,7 @@ def main(argv=None) -> int:
         elif args.command == "prereg":
             from pathlib import Path
             from bench.prereg import register
-            registered = register(str(Path(args.config).resolve()), replace=args.replace)
+            registered = register(str(Path(args.config).resolve()), replace=args.replace, reason=args.reason)
             if registered["unset"]:
                 print(f"bench prereg: registered with null values: {', '.join(registered['unset'])}", file=sys.stderr)
             print(f"{registered['hash']} ({'committed' if registered['new'] else 'already registered'} at "
@@ -147,10 +154,7 @@ def _f4(args) -> int:
             print(report.run(args.plan, config))
         elif args.judgment == "j2":
             from bench.judge import j2
-            from bench.judge.base import write_result
-            reads, result = (j2.judge_run(args.run) if args.run else
-                             j2.judge_replay(args.replay, args.replay_eval, args.teacher_eval))
-            print(write_result(j2.JUDGMENT, reads, result))
+            print(j2.run(args.run, args.replay, args.replay_eval, args.teacher_eval))
         elif args.judgment == "j3":
             from bench.judge import j3
             print(j3.run(args.run, args.eval, args.j8, config))
@@ -164,14 +168,24 @@ def _f4(args) -> int:
             from bench.judge import j7
             replays = {engine: next(iter(_pairs([value]).items())) for engine, value in
                        (("cheap_alt", args.cheap_alt), ("slm", args.slm))}
-            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config), sep="\n")
+            print(*j7.run(args.centroids, args.adapters, replays, args.teacher_eval, args.j8, args.j6, config,
+                          teacher_self_replay=args.teacher_self_replay), sep="\n")
+        elif args.judgment == "b1k":
+            from bench.judge import b1k
+            k0, k3 = (next(iter(_pairs([value]).items())) for value in (args.k0, args.k3))
+            print(b1k.run(k0, k3, args.teacher_eval, config))
         elif args.judgment == "j8":
             from bench.judge import j8
-            print(j8.run(args.loadtest, config, args.sweep))
+            print(j8.run(args.loadtest, config, args.sweep, slo_from=args.slo_from))
     except (JudgmentError, FactError, ConfigError, DataError, TestSplitLocked) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
         return 2
     return 0
+
+
+def _verify(args) -> int:
+    from bench import verify
+    return verify.cli(args)
 
 
 def f4_commands(sub) -> None:
@@ -195,6 +209,12 @@ def f4_commands(sub) -> None:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--plan", required=True, help="a YAML plan naming the executions and judgments (bench/report.py)")
     p.set_defaults(f4=_f4)
+
+    p = sub.add_parser("verify", help="recompute every stored judgment the report or an arm's fact reads; "
+                                      "list the ones that do not come out the same, and fail on any")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--plan", required=True, help="the report's plan (bench/report.py)")
+    p.set_defaults(f4=_verify)
 
     judge = sub.add_parser("judge", help="the judgments J2, J3, J5-J8 (pure functions over executions)")
     judgments = judge.add_subparsers(dest="judgment", required=True)
@@ -222,10 +242,18 @@ def f4_commands(sub) -> None:
     p.add_argument("--slm", required=True, metavar="REPLAY=EVAL", help="the calib replay routed as B4")
     p.add_argument("--teacher-eval", required=True)
     p.add_argument("--j8", required=True)
-    p.add_argument("--j6", required=True, help="the J6 result: its chosen candidate's zero-shot replay is the pilot")
+    p.add_argument("--j6", required=True, help="the J6 result that chose the adapters' base")
+    p.add_argument("--teacher-self-replay", required=True, metavar="RUN",
+                   help="the teacher's calib run replayed on production_llm on the pilot questions: A_tt, the agreement bar's cap")
     p = judgments.add_parser("j8", help="load: SLM cost per request at each utilization")
     p.add_argument("--loadtest", action="append", required=True)
     p.add_argument("--sweep", action="append", help="the sweep to use when an engine has several (repeatable)")
+    p.add_argument("--slo-from", required=True, help="the pilot's B0 execution on calib: the SLO is the stricter of "
+                                                     "cost.p95_slo_cap_ms and its p95 latency per call")
+    p = judgments.add_parser("b1k", help="B1's few-shot k, chosen on the pilot: 3 only if it beats 0 on the gold call sites")
+    p.add_argument("--k0", required=True, metavar="REPLAY=EVAL", help="the pilot replay on cheap_alt with k = 0, and its per-call eval")
+    p.add_argument("--k3", required=True, metavar="REPLAY=EVAL", help="the same replay with k = 3, and its per-call eval")
+    p.add_argument("--teacher-eval", required=True, help="the per-call eval of the replays' source")
     for p in judgments.choices.values():
         p.add_argument("--config", default="config.yaml")
     judge.set_defaults(f4=_f4)

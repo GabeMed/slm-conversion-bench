@@ -41,6 +41,34 @@ def test_extends_cycle(tmp_path):
         load_config(tmp_path / "a.yaml")
 
 
+def test_the_shipped_engine_settings_are_the_decided_ones():
+    """The API roles' token budget covers the reasoning and the answer and their timeout a long
+    reasoning (16384 and 900 s); the SLM candidates keep 4096; and 32 calls of one step may be in flight."""
+    config = load_config(BASE)
+    for role in ("production_llm", "cheap_alt"):
+        params = config["roles"][role]["params"]
+        assert (params["max_tokens"], params["timeout_s"]) == (16384, 900)
+        assert config["roles"][role]["reasoning"]["enabled"] is True
+    assert config["roles"]["cheap_alt"]["params"]["reasoning_effort"] == "medium"
+    assert {c["params"]["max_tokens"] for c in config["roles"]["slm_candidates"]} == {4096}
+    assert config["agent"]["max_workers"] == 32
+
+
+ROUTING = {"only": ["a-provider"], "allow_fallbacks": False, "require_parameters": True, "quantizations": ["fp8"]}
+
+
+def test_a_decided_provider_pin_is_valid():
+    """The shape the `null  # before runs` values of `roles.*.provider` and `reasoning` take once decided."""
+    config = copy.deepcopy(load_config(BASE))
+    config["roles"]["production_llm"]["reasoning"].update(forced_temperature=1.0)
+    config["roles"]["production_llm"]["params"].update(extra_body={"thinking": {"type": "enabled"}})
+    config["roles"]["production_llm"]["provider"].update(
+        name="a-provider", quantization="fp8", checkpoint={"repo": "org/model", "revision": "a" * 40},
+        reserve={"name": "another-provider", "base_url": "https://reserve.example/v1", "quantization": None})
+    config["roles"]["cheap_alt"]["provider"].update(name="an-aggregator", routing=ROUTING)
+    assert validate_config(config) == []
+
+
 @pytest.mark.parametrize("mutate", [
     lambda c: c["call_sites"].pop("revise"),
     lambda c: c["call_sites"]["revise"].update(temperature=-1),
@@ -64,6 +92,24 @@ def test_extends_cycle(tmp_path):
     lambda c: c["arms"]["B1"].update(few_shot=3),
     lambda c: c["retries"].update(http_backoff_s=2),
     lambda c: c["roles"]["slm_candidates"][0]["endpoint"].update(headers_env={"Modal-Key": ""}),
+    # the API roles' reasoning state and provider pin
+    lambda c: c["roles"]["production_llm"].pop("reasoning"),
+    lambda c: c["roles"]["cheap_alt"]["reasoning"].update(enabled="medium"),
+    lambda c: c["roles"]["production_llm"]["reasoning"].update(forced_temperature=-1),
+    lambda c: c["roles"]["production_llm"]["reasoning"].update(forced_temperature="1.0"),
+    lambda c: c["roles"]["production_llm"]["params"].update(extra_body="thinking"),
+    lambda c: c["roles"]["cheap_alt"].pop("provider"),
+    lambda c: c["roles"]["cheap_alt"]["provider"].pop("reserve"),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(name=3),
+    lambda c: c["roles"]["production_llm"]["provider"].update(checkpoint={"repo": "org/model", "revision": "main"}),
+    lambda c: c["roles"]["production_llm"]["provider"].update(reserve={"name": "other"}),
+    # a routing pin that can fall back, or lets a provider drop a parameter, pins nothing
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={**ROUTING, "allow_fallbacks": True}),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={**ROUTING, "require_parameters": False}),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={**ROUTING, "only": []}),
+    lambda c: c["roles"]["cheap_alt"]["provider"].update(routing={k: v for k, v in ROUTING.items() if k != "quantizations"}),
+    lambda c: (c["roles"]["cheap_alt"]["provider"].update(routing=ROUTING),  # two places deciding the routing
+               c["roles"]["cheap_alt"]["params"].update(extra_body={"provider": {"only": ["other"]}})),
 ])
 def test_invalid_configs(mutate):
     config = copy.deepcopy(load_config(BASE))
@@ -290,6 +336,11 @@ def test_agreement_follows_the_decision_chess_takes():
     assert agree("filter_column", yes, {"is_column_information_relevant": "yes"})
     assert not agree("filter_column", yes, {"is_column_information_relevant": " yes"})  # CHESS drops " yes"
     assert agree("filter_column", no, {"is_column_information_relevant": "Not relevant"})  # both dropped
+    # a cut-off answer parses without the key, and CHESS drops the column: the same decision as a "no"
+    assert agree("filter_column", no, {"chain_of_thought_reasoning": "the column"})
+    assert not agree("filter_column", yes, {"chain_of_thought_reasoning": "the column"})
+    assert not agree("filter_column", yes, {"is_column_information_relevant": None})
+    assert agree("filter_column", no, ["yes"]) and not agree("filter_column", yes, ["yes"])  # not a mapping: dropped
     assert agree("select_tables", {"table_names": ["frpm", "schools"]}, {"table_names": ["schools", "frpm"]})
     assert not agree("select_tables", {"table_names": ["Schools"]}, {"table_names": ["schools"]})  # raw names
     assert agree("select_columns",
@@ -298,6 +349,22 @@ def test_agreement_follows_the_decision_chess_takes():
     assert not agree("select_columns", {"schools": ["cds"]}, {"schools": ["cds", "County"]})
     assert agree("agent_ss", {"tool": "select_tables"}, {"tool": "select_tables"})
     assert not agree("agent_ss", {"tool": "select_tables"}, {"done": True})
+
+
+def test_an_output_of_another_shape_never_raises():
+    """A parsed output need not have its call site's shape (a cut-off answer still parses). Where CHESS has
+    a reading, that is the decision; an output nothing can be read from agrees with nothing, itself included."""
+    none, some = {"chain_of_thought_reasoning": "cut off"}, {"table_names": ["schools"]}
+    assert agree("select_tables", none, {"table_names": []}) and not agree("select_tables", none, some)  # CHESS: no table
+    for odd in (["schools"], {"table_names": None}, {"table_names": [["schools"]]}, "schools"):
+        assert not agree("select_tables", odd, some) and not agree("select_tables", odd, odd)
+    columns = {"schools": ["cds"]}
+    for odd in (["cds"], {"schools": None}, {"schools": [None]}, {"schools": 3}, "cds"):
+        assert not agree("select_columns", odd, columns) and not agree("select_columns", columns, odd)
+    for odd in ([["a"]], 3):
+        assert not agree("extract_keywords", odd, ["a"])
+    with pytest.raises(ValueError, match="unknown call site"):
+        agree("nowhere", {}, {})
 
 
 def test_unparsed_never_agrees_and_gold_sites_refuse():

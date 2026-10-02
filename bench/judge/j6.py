@@ -21,6 +21,8 @@ from bench.judge import j2
 from bench.judge.base import JudgmentError, write_result
 
 JUDGMENT = "J6"
+# the configuration keys J6 reads, recorded in the result's `reads` (design §6.2)
+CONFIG_KEYS = ("roles.slm_candidates", "selection.footprint_gb", "selection.tie_tolerance", "selection.triage")
 
 
 def scores(per_call_site: Dict[str, Dict[str, Any]]) -> Dict[str, Optional[float]]:
@@ -83,4 +85,4 @@ def run(zeroshots: Dict[str, str], teacher_eval_run_id: str, config: Dict[str, A
     fact = write_fact(JUDGMENT, "choice", {"slm": choice})
     result = {"choice": choice, "choice_fact": {"sha256": fact.parent.name}, **table,
               "per_call_site": candidates, "triage": config["selection"].get("triage") or []}
-    return write_result(JUDGMENT, reads, result), fact
+    return write_result(JUDGMENT, {**reads, "config": list(CONFIG_KEYS)}, result), fact

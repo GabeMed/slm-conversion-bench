@@ -16,16 +16,28 @@ never enters the agent's state (patch 13): CHESS receives each question without 
 A run is `failed` when the harness failed, a question raised, a C1 line is invalid or a database
 changed (it stops at the first question that fails: nothing after it could be `done`);
 `interrupted` when it stopped early for any other reason; `done` otherwise. On the test split, an
-intent is committed before anything runs and the manifest when the run ends (`registry`), and a
-call site outside the one registered on train and calib aborts the run.
+intent is committed and published before anything runs and the manifest is committed when the run
+ends (`registry`), and a call site outside the one registered on train and calib aborts the run.
+
+`--workers N` answers the questions of one run in N processes (CHESS's `DatabaseManager` is a
+singleton per process that switches database, so questions cannot share a process): worker k takes
+every N-th question from the k-th, writes its own C1 file, and the files are merged into the run's
+`calls.jsonl` when all have ended. It is one run, one manifest (`workers`), and the first question
+that fails stops every worker. The number of workers changes no output, so it is not part of the
+configuration's identity. SIGTERM or SIGHUP (a `kill`, a closed terminal) stops such a run as a
+Ctrl-C does, and workers whose parent is gone stop by themselves: no model is called for a run
+nobody will close.
 """
 import json
+import multiprocessing
+import multiprocessing.connection
 import os
+import signal
 import sys
 from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from bench import barrier, data, paths
 from bench.agent import TRACING_OFF, registry
@@ -123,11 +135,32 @@ def _answer(question_id: str, hooks, outcome: Dict[str, Dict], answer: Callable[
     return not (question_id in outcome["failures"] or harness_errors)  # a failed run spends nothing more
 
 
+def _answer_each(hooks, outcome: Dict[str, Dict], stop: Any,
+                 answers: Iterable[Tuple[str, Callable[[], Tuple[Optional[str], Dict]]]]) -> None:
+    """The questions of one process, one after another, until one fails. `stop` is the flag the
+    workers of a run share: a question that fails here sets it, and no question starts once it is
+    set. A question that was running when the flag was set from outside had its model calls refused
+    (`hooks.RunAborted`, which CHESS swallows as a tool error): what it returned is not an answer,
+    and it is left out, so the run cannot end `done` on it."""
+    for question_id, answer in answers:
+        if stop is not None and stop.is_set():
+            break
+        if not _answer(question_id, hooks, outcome, answer):
+            if stop is not None:
+                stop.set()
+            break
+        if stop is not None and stop.is_set():
+            del outcome["predictions"][question_id]
+            outcome["tool_errors"].pop(question_id, None)
+            break
+
+
 def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: Path,
                        dataset: List[Dict[str, Any]], db_root: Path, outcome: Dict[str, Dict],
                        few_shot: Optional[Dict[str, List]] = None,
-                       allowed_call_sites: Optional[List[str]] = None) -> None:
-    """Run the patched CHESS on each question, one after another; C1 goes to run_dir/calls.jsonl.
+                       allowed_call_sites: Optional[List[str]] = None, part: str = "", stop: Any = None) -> None:
+    """Run the patched CHESS on each question, one after another; C1 goes to run_dir/calls<part>.jsonl
+    (`part` is empty for a run in one process, `.w<k>` for worker k).
 
     Internal: the caller has already applied the test barrier to `dataset`. Fills `outcome` as it
     goes (so an interruption keeps what finished): the predictions and, per question, `failures`
@@ -135,22 +168,26 @@ def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: P
     CHESS swallowed; they can be the model's doing, so they are reported without failing the run).
     """
     hooks = _prepare_chess(config, db_root)
-    hooks.start_run(run_id, arm, run_dir / "calls.jsonl", few_shot=few_shot, allowed_call_sites=allowed_call_sites)
+    hooks.start_run(run_id, arm, run_dir / f"calls{part}.jsonl", few_shot=few_shot,
+                    allowed_call_sites=allowed_call_sites, stop=stop)
     try:
         from runner.run_manager import RunManager
         RunManager.RESULT_ROOT_PATH = str(run_dir / "chess")
         tasks = [agent_task(question) for question in dataset]
-        _write_json(run_dir / "questions.json", tasks)
+        questions_path = run_dir / f"questions{part}.json"  # CHESS names its own outputs after it: one per worker
+        _write_json(questions_path, tasks)
         manager = RunManager(Namespace(
-            data_mode="dev", data_path=str(run_dir / "questions.json"), config=chess_team_config(config), num_workers=1,
+            data_mode="dev", data_path=str(questions_path), config=chess_team_config(config), num_workers=1,
             log_level="warning", pick_final_sql=False, run_start_time=run_id))
         manager.initialize_tasks(tasks)
-        for task in manager.tasks:
-            def answer(task=task):
-                state, _, _ = manager.worker(task)
-                return final_sql(state), state.errors
-            if not _answer(str(task.question_id), hooks, outcome, answer):
-                break
+
+        def answers():
+            for task in manager.tasks:
+                def answer(task=task):
+                    state, _, _ = manager.worker(task)
+                    return final_sql(state), state.errors
+                yield str(task.question_id), answer
+        _answer_each(hooks, outcome, stop, answers())
     finally:
         _close(hooks, outcome)
 
@@ -178,33 +215,180 @@ def single_call_prompt(config: Dict[str, Any]):
 
 def _execute_single_call(config: Dict[str, Any], engine: str, run_id: str, run_dir: Path,
                          dataset: List[Dict[str, Any]], db_root: Path, outcome: Dict[str, Dict],
-                         allowed_call_sites: Optional[List[str]] = None) -> None:
+                         allowed_call_sites: Optional[List[str]] = None, part: str = "", stop: Any = None) -> None:
     """B2: text to SQL in one call per question, no agent and no retrieval: the question, its
     evidence and the complete schema of the database (as CHESS writes it), on a fixed engine. A
     call the model fails (after the retries) leaves the question without a prediction, as a
     swallowed tool error leaves it in the agent; it is reported and does not fail the run."""
     hooks = _prepare_chess(config, db_root)
-    hooks.start_run(run_id, None, run_dir / "calls.jsonl", engine=engine, few_shot={},
-                    allowed_call_sites=allowed_call_sites)
+    hooks.start_run(run_id, None, run_dir / f"calls{part}.jsonl", engine=engine, few_shot={},
+                    allowed_call_sites=allowed_call_sites, stop=stop)
     try:
         from runner.database_manager import DatabaseManager
         prompt, parser = single_call_prompt(config)
-        for question in dataset:
-            def answer(question=question):
-                manager = DatabaseManager(db_mode="dev", db_id=question["db_id"])
-                schema = manager.get_database_schema_string(manager.get_db_schema(), {}, {}, include_value_description=True)
-                messages = prompt.invoke({"DATABASE_SCHEMA": schema, "QUESTION": question["question"],
-                                          "HINT": question["evidence"]}).to_messages()
-                try:
-                    return hooks.invoke_tool_call("generate_candidate", SINGLE_CALL_KEY, messages, parser)["SQL"], {}
-                except hooks.HarnessError:
-                    raise
-                except Exception as e:  # the model's failure, already in C1
-                    return None, {"generate_candidate": f"{type(e).__name__}: {e}"}
-            if not _answer(str(question["question_id"]), hooks, outcome, answer):
-                break
+
+        def answers():
+            for question in dataset:
+                def answer(question=question):
+                    manager = DatabaseManager(db_mode="dev", db_id=question["db_id"])
+                    schema = manager.get_database_schema_string(manager.get_db_schema(), {}, {}, include_value_description=True)
+                    messages = prompt.invoke({"DATABASE_SCHEMA": schema, "QUESTION": question["question"],
+                                              "HINT": question["evidence"]}).to_messages()
+                    try:
+                        return hooks.invoke_tool_call("generate_candidate", SINGLE_CALL_KEY, messages, parser)["SQL"], {}
+                    except hooks.HarnessError:
+                        raise
+                    except Exception as e:  # the model's failure, already in C1
+                        return None, {"generate_candidate": f"{type(e).__name__}: {e}"}
+                yield str(question["question_id"]), answer
+        _answer_each(hooks, outcome, stop, answers())
     finally:
         _close(hooks, outcome)
+
+
+# ---------------------------------------------------------------- one run in several processes
+
+OUTCOME_KEYS = ("predictions", "failures", "harness_errors", "tool_errors")
+
+
+def worker_parts(dataset: List[Any], workers: int) -> List[List[Any]]:
+    """The questions of each worker: worker k takes every `workers`-th question from the k-th, so the
+    parts are disjoint, cover the run and depend only on the order of the questions."""
+    return [part for part in (dataset[k::workers] for k in range(workers)) if part]
+
+
+STOPPING_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+def _interrupt(signum: int, frame: Any) -> None:
+    """The first of them decides: one that follows (a logout sends both) is ignored, so that it
+    interrupts neither the wait for the workers and the merge, nor a worker reporting its outcome."""
+    for following in STOPPING_SIGNALS:
+        signal.signal(following, signal.SIG_IGN)
+    raise KeyboardInterrupt(signal.Signals(signum).name)
+
+
+def _interrupted_by_stopping_signals() -> Dict[int, Any]:
+    """Have SIGTERM and SIGHUP interrupt this process as a Ctrl-C does. One it ignores stays ignored,
+    here and in the processes it starts (a run under `nohup` survives its terminal). Returns what
+    handled each before."""
+    return {signum: signal.signal(signum, _interrupt) for signum in STOPPING_SIGNALS
+            if signal.getsignal(signum) != signal.SIG_IGN}
+
+
+class _WorkerStop:
+    """The run's stop flag as one worker reads it: also set once the parent process is gone (killed,
+    or its terminal closed), when nobody is left to stop the worker or to merge what it would spend."""
+
+    def __init__(self, flag: Any) -> None:
+        self.flag, self.parent = flag, multiprocessing.parent_process()
+
+    def is_set(self) -> bool:
+        return self.flag.is_set() or not self.parent.is_alive()
+
+    def set(self) -> None:
+        self.flag.set()
+
+
+def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: Any) -> None:
+    """One worker process: answer its part, then leave what happened in run_dir/outcome.w<k>.json
+    (the parent merges it). What carries error text is redacted, as in the manifest it ends up in
+    (the file outlives a parent that dies before merging); the predictions are written as they are,
+    as a run of one process writes them. Whatever stops it other than a question that failed stops
+    every worker too and is reported in `stopped_by`: a Ctrl-C, and equally a SIGTERM or SIGHUP,
+    which reach the workers too when sent to the run's process group (a closed terminal)."""
+    from bench.provenance import redact
+    outcome: Dict[str, Any] = new_outcome()
+    try:
+        _interrupted_by_stopping_signals()
+        execute(outcome=outcome, part=f".w{k}", stop=_WorkerStop(stop), **kwargs)
+    except BaseException as e:  # a Ctrl-C included: the parent reports it, this process just ends
+        stop.set()
+        outcome["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
+    finally:
+        errors = {key: value for key, value in outcome.items() if key != "predictions"}
+        errors = json.loads(redact(json.dumps(errors, ensure_ascii=False), kwargs["config"]))
+        _write_json(kwargs["run_dir"] / f"outcome.w{k}.json", {**errors, "predictions": outcome["predictions"]})
+
+
+def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: List[List[Dict[str, Any]]],
+                outcome: Dict[str, Dict]) -> None:
+    """Run `execute` on each part of the questions in its own process (spawned: the agent's threads
+    and clients do not survive a fork), wait for all of them, then merge what they left into
+    `outcome` and their C1 files, in worker order, into run_dir/calls.jsonl. A worker that dies
+    (a non-zero exit: it could not set the flag itself) stops the others, and fails the run. A worker
+    that stopped for anything but a failed question raises here once everything is merged, as the
+    same failure raises in a run of one process. SIGTERM and SIGHUP interrupt the wait as a Ctrl-C
+    does (left to their default they would end this process and leave the workers answering). From
+    the first of them to the end of the merge both are ignored: only a Ctrl-C, or SIGKILL, ends a
+    run whose worker never ends."""
+    run_dir = kwargs["run_dir"]
+    context = multiprocessing.get_context("spawn")
+    stop = context.Event()
+    processes = [context.Process(target=_worker, args=(execute, {**kwargs, "dataset": part}, k, stop))
+                 for k, part in enumerate(parts)]
+    started: List[Any] = []
+    handlers: Dict[int, Any] = {}
+    try:
+        try:
+            handlers = _interrupted_by_stopping_signals()
+            for process in processes:
+                process.start()
+                started.append(process)
+            running = list(started)
+            while running:
+                ended = multiprocessing.connection.wait([process.sentinel for process in running])
+                for process in [p for p in running if p.sentinel in ended]:
+                    process.join()
+                    running.remove(process)
+                    if process.exitcode != 0:
+                        stop.set()
+        except BaseException:  # a Ctrl-C reaches every worker as well: wait for what they finished
+            stop.set()
+            for process in started:
+                process.join()
+            raise
+    finally:
+        stopped = _merge_workers(run_dir, processes, outcome)
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+    if stopped:
+        from bench.agent.hooks import HarnessError
+        raise HarnessError("; ".join(stopped))
+
+
+def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict]) -> List[str]:
+    """Merge every worker's outcome and C1 file into the run's. A worker that did not end cleanly (a
+    non-zero exit, or no readable outcome) died: that is the harness's failure, recorded under
+    `harness_errors` (so the run is `failed`). Returns why workers stopped (`stopped_by`), if any did."""
+    stopped, unregistered = [], set()
+    with open(run_dir / "calls.jsonl", "a") as merged:
+        for k, process in enumerate(processes):
+            calls_path, outcome_path = run_dir / f"calls.w{k}.jsonl", run_dir / f"outcome.w{k}.json"
+            if calls_path.exists():
+                text = calls_path.read_text()
+                merged.write(text if not text or text.endswith("\n") else text + "\n")  # a killed worker's cut-off
+                calls_path.unlink()                                 # last line never runs into the next worker's first
+            reported = None
+            if outcome_path.exists():
+                try:
+                    reported = json.loads(outcome_path.read_text())
+                except ValueError:  # cut off mid-write
+                    pass
+                outcome_path.unlink()
+            if process.exitcode != 0 or reported is None:
+                outcome["harness_errors"][f"worker {k}"] = [
+                    f"the worker did not end cleanly (exit code {process.exitcode}"
+                    f"{'' if reported is not None else ', no outcome reported'})"]
+            if reported is None:
+                continue
+            for key in OUTCOME_KEYS:
+                outcome[key].update(reported[key])
+            unregistered.update(reported.get("unregistered_call_sites", []))
+            if reported.get("stopped_by"):
+                stopped.append(f"worker {k} stopped: {reported['stopped_by']}")
+    outcome["unregistered_call_sites"] = sorted(unregistered)
+    return stopped
 
 
 def run_status(selected: List[str], outcome: Dict[str, Dict], c1_errors: int, databases_changed: List[str]) -> str:
@@ -299,7 +483,7 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
              fields: Dict[str, Any], key_envs: List[str]) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
     """Create runs/<run_id>/ with its manifest and configuration snapshot, after every precondition.
     On the test split: the registered call sites are required, every key used is long enough to be
-    redacted, and the intent is committed first.
+    redacted, and the intent is committed and published first (a refusal there leaves no run).
     Returns (run_dir, manifest, the call sites a test run may emit or None)."""
     if split == "test":
         registry.check_keys(key_envs)
@@ -325,10 +509,12 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
 
 
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
-              limit: Optional[int] = None, engine: Optional[str] = None) -> Path:
+              limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1) -> Path:
     config = load_config(config_path)
     from bench.agent import hooks
     hooks.configure(config)
+    if workers < 1:
+        raise data.DataError("--workers must be at least 1")
     if arm == "B2":
         if engine not in SINGLE_CALL_ENGINES:
             raise data.DataError(f"B2 needs --engine, one of {SINGLE_CALL_ENGINES}")
@@ -351,7 +537,8 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     if arm != "B2":
         _check_preprocessed(config, databases)
 
-    fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded}
+    fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded,
+              "workers": workers}
     if arm == "B2":
         fields.update({"mode": "single_call", "engine": engine})
     if arm == "B2":
@@ -364,17 +551,22 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     stopped_by = None
     try:
         dataset = [{**questions[q], "question_id": int(q)} for q in selected]
+        kwargs = {"config": config, "run_id": manifest["run_id"], "run_dir": run_dir,
+                  "db_root": paths.bird_root(config), "allowed_call_sites": allowed}
         if arm == "B2":
-            _execute_single_call(config, engine, manifest["run_id"], run_dir, dataset, paths.bird_root(config),
-                                 outcome, allowed)
+            execute, kwargs = _execute_single_call, {**kwargs, "engine": engine}
         else:
-            _execute_questions(config, arm, manifest["run_id"], run_dir, dataset, paths.bird_root(config), outcome,
-                               few_shot, allowed)
+            execute, kwargs = _execute_questions, {**kwargs, "arm": arm, "few_shot": few_shot}
+        if workers == 1:
+            execute(dataset=dataset, outcome=outcome, **kwargs)
+        else:
+            _in_workers(execute, kwargs, worker_parts(dataset, workers), outcome)
     except BaseException as e:  # recorded in the manifest, then re-raised
         stopped_by = scrub(f"{type(e).__name__}: {e}")
         raise
     finally:
-        _write_json(run_dir / "predictions.json", outcome["predictions"])
+        _write_json(run_dir / "predictions.json", {q: outcome["predictions"][q] for q in selected
+                                                   if q in outcome["predictions"]})  # in the run's order
         finish(manifest, run_dir, config, databases, outcome, stopped_by,
                lambda c1_errors, changed: run_status(selected, outcome, c1_errors, changed),
                {"failures": outcome["failures"], "tool_errors": outcome["tool_errors"]})

@@ -35,7 +35,8 @@ def call(run_id: str, question_id: str, site: str, key: str = "single", *, respo
          parsed: Any = None, parsed_ok: bool = True, attempt: int = 1, retry_of: Optional[str] = None,
          messages: Optional[List[Dict[str, str]]] = None, role: str = "production_llm",
          engine: str = "production_llm", model: str = "teacher-model", cluster: Optional[str] = None,
-         use: Optional[Dict[str, Any]] = None, latency_ms: int = 100) -> Dict[str, Any]:
+         use: Optional[Dict[str, Any]] = None, latency_ms: int = 100,
+         provider: Optional[str] = "provider-x") -> Dict[str, Any]:
     return {
         "run_id": run_id, "call_id": call_id(run_id, question_id, site, key, attempt), "retry_of": retry_of,
         "attempt": attempt, "question_id": question_id, "call_site": site, "invocation_key": key,
@@ -44,6 +45,7 @@ def call(run_id: str, question_id: str, site: str, key: str = "single", *, respo
         "response_text": response, "parsed_output": parsed if parsed_ok else None, "parsed_ok": parsed_ok,
         "usage": use or usage(), "latency_ms": latency_ms, "started_at": "2026-09-30T12:00:00+00:00",
         "temperature": 0.0, "error": None if parsed_ok else "unparsed",
+        "provider": None if role == "slm" else provider,  # the provider the configuration pins for an API role
     }
 
 

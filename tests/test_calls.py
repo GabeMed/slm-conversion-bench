@@ -87,3 +87,27 @@ def test_one_line_per_invocation_and_attempt():
     again = record(call_id=str(uuid.uuid4()))  # same question, call site, key and attempt
     assert "same invocation and attempt" in " ".join(validate_calls([FIXTURES[1], again]))
     assert validate_calls([FIXTURES[1], dict(again, invocation_key="single@2")]) == []
+
+
+def test_the_fields_added_for_cut_off_answers_and_the_provider_are_optional():
+    """Lines written before `finish_reason`, `model_reported`, `provider` and `usage.reasoning` existed
+    (the fixtures) stay valid; a new line carries them, each null when the provider does not report it."""
+    old = record()
+    assert not {"finish_reason", "model_reported", "provider"} & set(old) and "reasoning" not in old["usage"]
+    assert validate_call(old) == []
+    reported = record(finish_reason="length", model_reported="served-model-2026", provider="a-provider",
+                      usage={**old["usage"], "reasoning": 5})
+    assert validate_call(reported) == []
+    unreported = record(finish_reason=None, model_reported=None, provider=None, usage={**old["usage"], "reasoning": None})
+    assert validate_call(unreported) == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"finish_reason": 1},
+    {"model_reported": ["m"]},
+    {"provider": {"name": "p"}},  # the pinned provider's name, not its block
+    {"usage": {"input": 1, "cached_input": None, "output": 1, "reasoning": -1, "source": "api"}},
+    {"usage": {"input": 1, "cached_input": None, "output": 1, "reasoning": "many", "source": "api"}},
+])
+def test_invalid_values_of_the_added_fields(changes):
+    assert validate_call(record(**changes))

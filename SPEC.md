@@ -3,7 +3,7 @@
 **Execução empírica de "Small Language Models are the Future of Agentic AI"**
 (Belcak et al., NVIDIA Research, arXiv 2506.02153, v3 de 22/09/2026)
 
-Versão 2, de 30/09/2026. Substitui a v1, que continua preservada em `SPEC-v1.md`. A seção 11 diz o que mudou e por quê.
+Versão 2.1, de 01/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A seção 11 diz o que mudou e por quê.
 
 ## Como ler este documento
 
@@ -85,6 +85,9 @@ Versão 2, de 30/09/2026. Substitui a v1, que continua preservada em `SPEC-v1.md
 - **Logs e treino:** as 1.034 perguntas do BIRD dev que não estão no Mini-Dev, nos 11 bancos do dev.
   - ~200 delas ficam reservadas para **calibração**: piloto, seleção e limiares.
   - As ~834 restantes geram os logs.
+  - Perguntas, evidências e gold vêm da revisão de 06/11/2025 do BIRD dev, sobre os bancos de 2024. Duas ressalvas, medidas na auditoria de 01/10/2026:
+    - essa revisão **trocou 85 perguntas** em relação à anterior, 21 delas na calibração;
+    - o gold dela **não** é o corrigido por especialistas: nos 254 itens do teste com pergunta e evidência idênticas, discorda do gold do Plat-SQL em **18,9%** (48 de 254; IC 95% de 14,6% a 24,2%). Por isso todo veredito é lido no teste, e a calibração serve só ao piloto, à seleção e aos limiares.
 - **Teste:** o **Arcwise-Plat-SQL**: **498 perguntas** do Mini-Dev do BIRD, usadas **como estão no arquivo** (pergunta, evidência e SQL gold corrigido).
   - Em ~81 perguntas e ~68 evidências, o texto foi reescrito em relação ao Mini-Dev, e o gold corresponde ao texto reescrito. O schema é o original.
   - As ids 119 e 120 (ausentes do Plat-SQL) ficam fora de treino e de teste.
@@ -184,7 +187,8 @@ Versão 2, de 30/09/2026. Substitui a v1, que continua preservada em `SPEC-v1.md
 - **volume por cluster,** reportado contra a **regra de bolso** de 10k–100k (não é um piso). Os clusters de baixo volume ficam abaixo, e isso é dado sobre a regra;
 - **mascaramento de dados sensíveis,** executado, com o nº de detecções reportado;
 - **filtro de sucesso** com um sinal disponível em produção, nunca o gabarito: o SQL executa sem erro, o resultado não é vazio e o formato é válido;
-- **deduplicação** exata e por quase-duplicata.
+- **deduplicação** exata e por quase-duplicata;
+- **volume que cabe no treino:** depois do filtro e da deduplicação, cada par (pergunta, call site) mantém no máximo N invocações. É uma amostra **uniforme** com seed, que preserva a distribuição das decisões do professor. N é fixado na configuração antes do registro, e o preflight confere que o maior adapter treina dentro da janela da noite. A cobertura antes e depois do corte é reportada: linhas por call site e, no filtro de colunas, tabelas e colunas cobertas por banco e a proporção sim/não. Sem esse corte, o filtro de colunas sozinho levaria de 55 a 113 GPU-horas.
 
 **Desvio.** A paráfrase de entidades e números **não é aplicada**. Em text-to-SQL, os valores e nomes fazem parte da resposta correta, e parafraseá-los quebraria a tarefa. Registrado como achado sobre o S2 em tarefas estruturadas.
 
@@ -241,8 +245,8 @@ Versão 2, de 30/09/2026. Substitui a v1, que continua preservada em `SPEC-v1.md
 **Executamos.**
 - **Roteador (nunca cortado):** é **decisão desta POC**, necessária para testar o A6 (sistema heterogêneo). Não é obrigação do texto do S6. A POC usa o roteador mais simples compatível com o paper, uma **política por cluster** (braço B5).
   - A chamada é atribuída ao cluster pela regra do S3 (só o prompt).
-  - **Clusters com gabarito por chamada** (geração e reparo de SQL): o motor mais barato cuja avaliação por call site passa na não-inferioridade na calibração, com margem Δ/2 e n suficiente (6.4).
-  - **Clusters sem gabarito por chamada** (palavras-chave, filtro de colunas, seleção de tabelas e de colunas, escolha de ferramenta): o motor mais barato cuja **concordância com o professor** na calibração atinge o limiar pré-registrado (6.4). É **proxy**, declarado como tal, e não sustenta alegação por cluster.
+  - **Clusters com gabarito por chamada** (geração e reparo de SQL): o motor mais barato cuja avaliação por call site passa na não-inferioridade na calibração, com margem de seleção de 2,5 p.p. e n suficiente (6.4).
+  - **Clusters sem gabarito por chamada** (palavras-chave, filtro de colunas, seleção de tabelas e de colunas, escolha de ferramenta): o motor mais barato cuja **concordância com o professor** na calibração atinge a barra pré-registrada (6.4). A barra nunca passa da concordância do professor consigo mesmo. É **proxy**, declarado como tal: só aloca, não sustenta alegação por cluster.
   - **Cluster sem evidência suficiente fica com o LLM de produção.**
   - Um roteador treinado (o "router model" do paper) é extensão.
 - **Uma volta do laço (a única parte cortável do S6, declarada se cortada):**
@@ -261,16 +265,18 @@ Versão 2, de 30/09/2026. Substitui a v1, que continua preservada em `SPEC-v1.md
 
 Cada linha foi fixada antes de qualquer resultado. "Confirma" e "refuta" usam a margem Δ da seção 6. Resultado sem poder é "inconclusivo", não confirmação.
 
+**Alcance de toda linha: esta carga.** Um agente (CHESS), um domínio (SQL), *code agency*, e os mesmos 11 bancos no treino, na calibração e no teste. O relatório repete essa linha no topo do mapa e escreve "(nesta carga)" em cada afirmação.
+
 | Afirmação (paper) | Comparação | Confirma se | Refuta se | Limite do que se conclui |
 |---|---|---|---|---|
-| **V1 / A1:** SLMs bastam para as chamadas de agentes (p.3–4) | **ponta a ponta** (n = 498): B4 × B0 e B5 × B0, e o contraste B3 × B4; **por call site** (6.2) só nos clusters com gabarito (geração e reparo) | B5 (e/ou B4) não-inferior a B0 ponta a ponta | B4 e B5 abaixo de −Δ ponta a ponta | um agente, um domínio (SQL), *code agency*; nos clusters sem gabarito não há alegação por cluster, só a concordância com o professor como proxy |
+| **V1 / A1:** SLMs bastam para as chamadas de agentes (p.3–4) | **ponta a ponta** (n = 498): **B4 × B0**, e o contraste B3 × B4; **por call site** (6.2) só nos clusters com gabarito (geração e reparo). O B5 × B0 vai para a linha do A6 | B4 não-inferior a B0 ponta a ponta | B4 abaixo de −Δ ponta a ponta | um agente, um domínio (SQL), *code agency*, os mesmos bancos no treino e no teste; nos clusters sem gabarito não há alegação por cluster, só a concordância com o professor como proxy. O V1 se julga no B4 porque a seleção do B5 na calibração tem pouco poder: um B5 que mandasse quase tudo ao LLM passaria sem nenhum SLM |
 | **A4 / A11:** as chamadas são estreitas e as subtarefas simples (p.5, p.7) | fração substituível por **chamada, token e custo** | fração alta também por token e custo | fração alta só por chamada (as baratas) e baixa por custo | idem |
-| **Apêndice B:** o LLM fica com "unstructured error resolution" (p.16) | **avaliação por call site** no cluster de reparo: o EX do SQL reparado pelo SLM × pelo LLM, com o mesmo contexto | o SLM perde no reparo e passa nos clusters de rotina | o SLM empata no reparo (a partição é conservadora) **ou** perde na rotina | um call site de reparo; se as chamadas de reparo não sustentarem Δ_cluster ≤ 5 p.p., "não testável" |
-| **A5:** formato único com SLM treinado é preferível (p.6) | validade de formato por call site: B4 × B0 | B4 ≥ B0 sem truque de decoding | B4 pior | os formatos deste agente |
-| **A6:** sistemas heterogêneos (p.6) | B5 × B4 × B0 × B1 | B5 não-inferior a B0 e mais barato que o melhor sem treino | B5 não vence o melhor braço sem treino | política por cluster desenhada por nós; o paper diz "can be" e admite sistema só de SLMs (Fig. 1) |
+| **Apêndice B:** o LLM fica com "unstructured error resolution" (p.16) | **avaliação por call site** no cluster de reparo: o EX do SQL reparado pelo SLM × pelo LLM, com o mesmo contexto | o SLM perde no reparo | o SLM é não-inferior no reparo (a partição é conservadora) | um call site de reparo, **decidido só pelo reparo**; a rotina aparece como concordância com o professor, proxy sem efeito no veredito (D15); sem poder, "inconclusivo, com o poder" |
+| **A5:** formato único com SLM treinado é preferível (p.6) | validade de formato por call site: B4 × B0 | B4 ≥ B0 − 1 p.p. em todo call site, sem truque de decoding | B4 mais de 1 p.p. abaixo do B0 num call site com chamadas suficientes (`min_calls`) nos dois braços | os formatos deste agente; abaixo de `min_calls`, descritivo |
+| **A6:** sistemas heterogêneos (p.6) | B5 × B4 × B0 × B1 | B5 não-inferior a B0 e mais barato que o melhor sem treino, **na menor utilização** (o pior caso do SLM) | B5 não vence o melhor braço sem treino **nem na maior utilização** | política por cluster desenhada por nós; o paper diz "can be" e admite sistema só de SLMs (Fig. 1). Fora das duas bordas, "depende da utilização", com o ponto de virada. Se o B5 não alocou nada a um SLM, "não testável" |
 | **A7:** os logs do agente viram dados (p.6) | B4 treinado nos logs curados do professor (+ extensão 2) | logs ≈ gabarito | gabarito ≫ logs | professor aberto |
-| **V3 / A2:** SLM de 7B é 10–30× mais barato "in latency, energy consumption, and FLOPs" que LLM de 70–175B (p.4) | custo por consulta correta, B4/B5 × B0 × B1 | ≥3× mais barato que o melhor braço sem treino que passa em V1 | <3× | a medida é custo em dólar por consulta correta, **não** o 10–30× de FLOPs; preço de GPU de mercado |
-| **AV2 / CA3–CA4:** a escala centralizada pode ser mais barata (p.7–8) | o mesmo, contra B1 com cache, a 20/50/100% de utilização e com custo fixo | — | B1 com cache ≤ SLM por consulta correta na utilização realista (vitória da AV2) | idem |
+| **V3 / A2:** SLM de 7B é 10–30× mais barato "in latency, energy consumption, and FLOPs" que LLM de 70–175B (p.4) | razão de custo por consulta correta (melhor braço sem treino que passa em V1 ÷ braço com SLM que passa em V1), com IC de 95% por bootstrap pareado sobre as perguntas | **atinge a barra do paper** se o limite inferior ≥ 3; **mais barato, abaixo da barra** se o limite inferior está entre 1 e 3 | o limite superior ≤ 1 (o SLM não é mais barato) | a medida é custo em dólar por consulta correta, **não** o 10–30× de FLOPs; preço de mercado do container inteiro. Confirmação lida na menor utilização, refutação na maior; entre as duas, "depende da utilização", com o ponto de virada; o resto, "inconclusivo" |
+| **AV2 / CA3–CA4:** a escala centralizada pode ser mais barata (p.7–8) | o mesmo, contra B1 com cache, a 20/50/100% de utilização e com custo fixo | — | B1 com cache ≤ SLM por consulta correta **também na maior utilização** (vitória da AV2) | idem; entre as bordas, "depende da utilização" |
 | **A2 (fine-tuning agility) / A3:** adaptar é rápido e barato (p.5) | tempo e custo por adaptador; o registro de esforço | — | — | medida descritiva |
 | **B2:** benchmarks generalistas guiam mal a seleção (p.8) | **não testável no núcleo**: com 2 candidatos, comparar rankings não é informativo. Na extensão 10, rodada zero-shot ampla (6–8 candidatos) | (extensão 10) os rankings divergem | (extensão 10) os rankings coincidem | só com a extensão 10 |
 | **S3:** o clustering descobre as tarefas (p.9) | ARI clusters × call sites | — | — | em *code agency* tende a ser trivial |
@@ -304,8 +310,13 @@ Tudo aqui é fixado **antes** de qualquer resultado no teste.
   - esta spec;
   - a configuração (modelos por papel, provedores, parâmetros, seeds);
   - as listas de IDs de calibração e de teste;
-  - a regra de cálculo de Δ.
+  - a margem Δ e as regras de veredito (o código de análise que as aplica entra no hash).
+- **Estágio 0, antes do piloto.** A configuração com todas as regras de veredito desta spec é publicada **antes de o piloto ser lido**. Depois do piloto, só entram valores que uma regra já fixada calcula: a barra de concordância, o SLO, o k do B1. O código de análise que aplica as regras está no mesmo commit do Estágio 0 e não muda até o pré-registro; uma mudança nele só vale para um defeito, e entra na tabela de desvios, que o relatório imprime.
+- **Carimbo independente.** A data do git é escolhida por quem commita. Por isso o hash do Estágio 0 e o do pré-registro recebem um carimbo de tempo de terceiros, e o `main` do repositório não aceita force-push.
 - **Registro do teste:** cada configuração é avaliada uma vez, e todas as avaliações feitas são reportadas.
+  - **A intenção é publicada antes da primeira pergunta.** Uma execução no teste que não consegue publicar a sua intenção não começa.
+  - **Só execuções concluídas contam.** Duas execuções concluídas da mesma configuração, sob o mesmo registro, deixam as comparações daquele braço sem veredito. Uma execução que não terminou (queda de rede) é listada e pode ser refeita.
+  - **Registrar de novo** só vale para um defeito documentado. O defeito entra numa tabela de desvios, que o relatório imprime, e as execuções do registro anterior aparecem como substituídas.
 
 ### 6.2 Unidades
 - **Pergunta:** para acurácia (EX) e custo.
@@ -326,18 +337,22 @@ Tudo aqui é fixado **antes** de qualquer resultado no teste.
 - registro de esforço (6.8).
 
 ### 6.4 Estatística
-- **Piloto:** ~50 perguntas da calibração medem d, a discordância pareada entre o SLM e o LLM de produção.
-- **Margem:** Δ = (z₀,₉₅ + z₀,₈₀)·√(d/498).
-  - **Teto: Δ ≤ 5 p.p.**
-  - Se o Δ calculado passar do teto, a não-inferioridade é reportada como **"não testável com n = 498"** (só descritiva).
+- **Margem: Δ = 5 p.p., fixa.** É a perda de EX que esta POC aceita chamar de "sem perder qualidade", decidida antes de qualquer dado. Uma margem não pode depender do que o estudo consegue detectar.
+- **Piloto:** 50 perguntas da calibração, sorteadas com seed **na mistura de dificuldade do teste** (15 simples, 25 moderadas, 10 difíceis). A calibração tem 67% de perguntas simples (134 de 200, pelos rótulos da revisão que os splits usam) e o teste, 30%.
+  - O piloto mede d, a discordância pareada entre o SLM zero-shot e o LLM de produção.
+  - O d serve só para o **poder planejado** a n = 498, reportado antes do teste.
+  - O piloto também dá a projeção de tempo e de gasto (7.1).
 - **Não-inferioridade:** IC unilateral por bootstrap pareado, com a pergunta como unidade.
 - **Alegações conjuntivas** ("substitui em todos os clusters de rotina") exigem que todos os testes passem, sem correção de Holm, e o poder conjunto é reportado.
-- **"Inconclusivo"** conta como não confirmado, e é reportado **com o poder**, para não ser lido como refutação.
-- **Seleção na calibração** (a alocação do B5) usa margem Δ/2, para não escolher motores que estão no limite.
-- **Limiar de concordância** (clusters sem gabarito, no B5): ≥95% de concordância com o professor na calibração. A concordância é definida por call site (lista igual, JSON igual, decisão igual), e o limiar é fixado no pré-registro.
+- **"Inconclusivo"** conta como não confirmado, e é reportado **com o poder**, para não ser lido como refutação. O relatório mostra o IC de cada comparação: o limite inferior é a maior perda que os dados ainda admitem.
+- **Seleção na calibração** (a alocação do B5) usa margem de 2,5 p.p., metade de Δ, para não escolher motores que estão no limite. Um cluster precisa de pelo menos `min_calls` chamadas na calibração para contar como evidência.
+- **Barra de concordância** (clusters sem gabarito, no B5): por call site, **min(95%, A − 2 p.p.)**, onde A é a concordância do professor consigo mesmo.
+  - A é medida reexecutando o professor nas chamadas do piloto. Um modelo via API não repete a própria saída nem com temperatura 0, e uma barra acima de A seria inalcançável para qualquer motor.
+  - A concordância é definida por call site (lista igual, JSON igual, decisão igual). A regra é fixada no pré-registro, e A é reportada por call site e por dificuldade.
+  - A barra mede reprodutibilidade, não acerto: ela só aloca. Se trocar essas chamadas preserva o acerto, isso é julgado ponta a ponta (B5 × B0 no teste).
+- **A seleção do B5 roda numa calibração mais fácil que o teste.** Ela é reportada por dificuldade. Uma seleção errada aparece no teste como o B5 falhando contra o B0: custa uma confirmação do A6, e não produz uma confirmação falsa.
 - **Conclusões por cluster** só existem nos clusters com gabarito (geração e reparo). Nos demais, a alegação é **só ponta a ponta** (B5 × B0 no teste).
-  - Δ_cluster = (z₀,₉₅ + z₀,₈₀)·√(d_c/n_c), com n_c o nº de chamadas do cluster no teste e d_c a discordância medida no piloto.
-  - Com Δ_cluster > 5 p.p., a conclusão daquele cluster é **"não testável"**.
+  - A margem é a mesma, Δ = 5 p.p., e o poder de cada conclusão é reportado.
   - No B5, um cluster sem evidência suficiente na calibração **fica com o LLM de produção**.
   - A unidade de reamostragem continua sendo a pergunta, agrupando as chamadas dela.
 
@@ -350,15 +365,18 @@ Tudo aqui é fixado **antes** de qualquer resultado no teste.
   - As variantes de preço (sem cache, com desconto de lote) são **recalculadas a partir do mesmo `usage`**, sem rodar de novo.
   - Re-tentativas entram.
 - **SLM:**
-  - custo por pergunta = preço/hora da GPU de referência ÷ (perguntas por hora sustentadas dentro do p95 × utilização), a **20, 50 e 100%**;
+  - custo por pergunta = preço/hora **do container inteiro** (GPU, CPU e memória, como o provedor cobra) ÷ (perguntas por hora sustentadas dentro do p95 × utilização), a **20, 50 e 100%**;
+  - **o limite de p95** é o mais estrito entre uma referência externa e o p95 por chamada do LLM de produção medido no piloto. O SLM tem de responder pelo menos tão rápido quanto a API que substitui. O valor é lido antes de qualquer teste de carga;
+  - **a utilização que decide:** uma confirmação só vale se valer a 20% (o pior caso do SLM), e uma refutação só vale se valer a 100% (o melhor caso). Entre as duas, o veredito é "depende da utilização", com o ponto de virada;
+  - a razão de custo por consulta correta leva um IC de 95% por bootstrap pareado sobre as perguntas (seção 5, linha V3);
   - o throughput é medido por um **teste de carga que reproduz as chamadas reais do agente**, numa GPU alugada com cobrança por segundo e com cache de prefixo ligado;
   - o custo fixo (horas de engenharia e re-treinos) entra no payback em três volumes de referência.
 - **Opcional:** uma medição no dispositivo de consumo do autor (WD1), reportada à parte.
 - **Extensão:** a estimativa do custo em LLMs fechados, repreçando as contagens de token, rotulada como estimativa e sem alegação de qualidade.
 
-### 6.7 Latência justa
-- O mesmo perfil de carga para todos os braços.
-- Braços intercalados no tempo.
+### 6.7 Latência (descritiva)
+- p50 e p95 por braço, como medidos. Nenhum veredito depende deles.
+- Os braços via API e os servidos em GPU própria não rodam sob o mesmo perfil de carga, e isso é dito no relatório.
 
 ### 6.8 Registro de esforço, por passo
 - horas humanas;
@@ -383,7 +401,10 @@ Cada uma com a ação de corte correspondente:
 | O conjunto de call sites observado nos logs de treino e nas rodadas de calibração está registrado (id gravado em cada chamada) | corrigir o harness antes de seguir |
 | Os IDs do Mini-Dev casam com o dev, e o gabarito corrigido está acessível | corrigir o mapeamento; sem gabarito, não há teste |
 | A licença e os termos do professor e do provedor permitem treinar com as saídas | trocar pela reserva operacional |
-| O gasto do piloto, projetado para o núcleo, cabe no teto da configuração | cortar extensões e reduzir o piloto antes de tocar o núcleo |
+| Cada motor responde a uma chamada real com os parâmetros configurados, em toda temperatura dos call sites: HTTP 200, texto, `usage`, parada normal (não por limite de tokens) e o raciocínio no estado configurado | corrigir a configuração; nenhum gasto do experimento antes disso |
+| Um smoke de 2 perguntas por braço confere `usage`, tokens em cache, motivo de parada e formato | corrigir a configuração |
+| O provedor, a quantização e o checkpoint de cada modelo via API estão fixados e registrados | fixar antes de qualquer execução |
+| O gasto e o tempo do piloto, projetados para o núcleo (segundos por pergunta, taxa de cache, custo), cabem no teto e nos 2 dias | cortar extensões e reduzir o piloto antes de tocar o núcleo; depois, os cortes de 7.3 |
 | O throughput e o tempo de treino medidos confirmam o cronograma | aplicar os cortes de 7.3 |
 
 **Checagem durante o teste (não é pré-condição).** Nas rodadas de teste do Dia 2, uma asserção automática compara o id de cada chamada com o conjunto registrado. Se aparecer um call site fora do conjunto, a configuração é interrompida, sinalizada, e o caso vai ao relatório.
@@ -395,16 +416,20 @@ Cada uma com a ação de corte correspondente:
 | K1 | Logs do professor nas perguntas de treino, em todos os call sites | ≥90% das perguntas com trajetória completa; volume por call site registrado |
 | K2 | B0, B1, B2 e B3 no teste | as 498 perguntas avaliadas; custo e p95 medidos |
 | K3 | S2 → S3 → S4 → S5: os adaptadores treinados | treino converge; formato válido ≥95% na calibração |
-| K4 | B4 e B5 no teste, com o roteador do S6 (depois da volta de re-treino, ou sem ela se cortada, declarado), e a avaliação por call site | as 498 perguntas; custo por consulta correta; n e Δ_cluster por cluster |
+| K4 | B4 e B5 no teste, com o roteador do S6 (depois da volta de re-treino, ou sem ela se cortada, declarado), e a avaliação por call site | as 498 perguntas; custo por consulta correta; n e poder por cluster |
 | K5 | O relatório (seção 8), incluindo os negativos, o poder e o registro do teste | todos os itens da seção 8 |
 
 ### 7.3 Cronograma e cortes
 
 | | Manhã | Tarde / noite |
 |---|---|---|
-| **Dia 1** | Pré-condições (7.1), piloto e cálculo de Δ | K1 (logs), S2 e S3; disparar os treinos do S5 para rodar à noite |
-| **Dia 2** | S6 (uma volta) e K2 e K4 no teste | custo, estatística, relatório |
+| **Dia 1** | Estágio 0 (6.1), pré-condições (7.1), piloto (com a escolha do S4, que o B3 do piloto usa), projeção de tempo e gasto | K1 (logs), a escolha do k do B1, S2 e S3; disparar os treinos do S5 para rodar à noite |
+| **Dia 2** | S6 (uma volta), o pré-registro, e K2 e K4 no teste | custo, estatística, relatório |
 
+- **O pré-registro vem depois do S6 e antes de qualquer pergunta do teste.**
+  - Ele registra a configuração final, e ela nomeia o que os braços usam: a escolha do S4, os centróides, os adaptadores e a alocação. Tudo isso só existe depois do treino.
+  - Os exemplos do B1 saem dos logs de treino, então a escolha do seu k (6.4) também vem depois do K1.
+  - As regras de veredito estão publicadas e carimbadas desde o Estágio 0. Entre o Estágio 0 e o pré-registro só mudam esses fatos e os valores que uma regra já fixada calcula, e a diferença entre os dois commits é pública.
 - **Se o tempo ou o orçamento apertarem,** cortam-se as extensões na ordem inversa da lista, e depois a volta de re-treino do S6 (declarada; o K4 roda sem ela).
 - **Nunca se cortam:**
   - K2 (a comparação com o caminho sem treino);
@@ -487,7 +512,7 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 |---|---|
 | D1 | Workload: o agente CHESS nas perguntas do BIRD. Logs no dev fora do Mini-Dev; teste no Arcwise-Plat-SQL (498, usado como está no arquivo) |
 | D2 | Um workload e um benchmark; sem suíte multi-tarefa |
-| D3 | Protocolo fixado antes, **com** margem de não-inferioridade pré-registrada (regra da 6.4). Curvas e fronteiras continuam sendo reportadas |
+| D3 | Protocolo fixado antes, **com** margem de não-inferioridade pré-registrada (6.4 e D16). Curvas e fronteiras continuam sendo reportadas |
 | D4 | Papéis abstratos, com a escolha concreta na configuração |
 | D5 | O raciocínio interno do professor fica fora dos logs |
 | D6 | LLM de produção = professor, open-weight com licença e termos de acesso que permitem treinar com as saídas |
@@ -499,7 +524,16 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D12 | S4: triagem de mesa documentada pelos 4 critérios do paper, partindo da lista dele (sem preferência por ela); 2 candidatos no zero-shot; 1 (ou 2) no fine-tuning; desempate pré-registrado |
 | D13 | O CHESS é corrigido para que a geração e o reparo usem o schema selecionado (issue #34 do CHESS), declarado no relatório (autor, 30/09/2026) |
 | D14 | O teste é o Arcwise-Plat-SQL com 498 perguntas, usado como está no arquivo; as ids 119 e 120 ficam fora de treino e de teste; não comparável com o EX publicado no Mini-Dev (autor, 30/09/2026) |
-| D15 | Nos clusters sem gabarito por chamada, o B5 escolhe pela concordância com o professor (≥95% na calibração), declarada como proxy; as alegações nesses clusters são só ponta a ponta (autor, 30/09/2026) |
+| D15 | Nos clusters sem gabarito por chamada, o B5 escolhe pela concordância com o professor (a barra da D17), declarada como proxy; as alegações nesses clusters são só ponta a ponta (autor, 30/09/2026) |
+| D16 | Margem de não-inferioridade fixa, Δ = 5 p.p. (2,5 p.p. na seleção); o piloto só dá o poder planejado (autor, 01/10/2026) |
+| D17 | A barra de concordância é min(95%, concordância do professor consigo mesmo − 2 p.p.), por call site; o Apêndice B se decide só pelo reparo (autor, 01/10/2026) |
+| D18 | O V1 se julga no B4; o B5 pertence ao A6 (autor, 01/10/2026) |
+| D19 | Custo: razão com IC, três leituras (atinge 3×, mais barato abaixo de 3×, não é mais barato), confirmação a 20% de utilização e refutação a 100%, preço do container inteiro, e o limite de p95 pela regra da 6.6 (autor, 01/10/2026) |
+| D20 | Cada LLM via API roda como o fornecedor o entrega, com o raciocínio explícito na configuração; provedor, quantização e checkpoint fixados; uma resposta cortada por limite de tokens é registrada como tal (autor, 01/10/2026) |
+| D21 | Volume de treino limitado por (pergunta, call site), por amostra uniforme com seed, com a cobertura reportada (autor, 01/10/2026) |
+| D22 | Registro do teste: só execuções concluídas contam; registrar de novo exige defeito documentado; Estágio 0 e carimbo de tempo independente (autor, 01/10/2026) |
+| D23 | O few-shot adicional do B1 (k ∈ {0, 3}) é escolhido no piloto por uma regra fixada antes: k = 3 só se melhorar o EX por chamada com IC acima de zero (autor, 01/10/2026) |
+| D24 | Objetivo e restrição: o objetivo é validar a tese do paper; a restrição é o orçamento. Toda correção é a menor que fecha o achado (autor, 01/10/2026) |
 
 ### Decisões em configuração, fechadas antes da leitura zero-shot do piloto
 - modelos por papel e a reserva operacional;
@@ -535,6 +569,27 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 - a regra de dados foi reescrita sem a contradição com o uso de benchmark público;
 - as decisões de configuração fecham antes da leitura zero-shot.
 
+### 11.1 O que mudou na v2.1 (01/10/2026)
+
+Antes de qualquer execução paga, o desenho passou por uma auditoria de validade: cada passo contra os modos de falha publicados e o padrão-ouro de cada um. As correções abaixo são as que evitam um veredito errado ou vazio. O resto virou linha de limitação no relatório.
+
+| Problema da v2 | Onde está a correção na v2.1 |
+|---|---|
+| A margem Δ saía da discordância do piloto: media o que o estudo detecta, não a perda aceitável, e passava do teto com d > 0,20 | 6.4 e D16 |
+| A barra de 95% de concordância podia ficar acima da concordância do professor consigo mesmo | 6.4, S6 e D17 |
+| O V1 confirmava com "B4 ou B5", e o B5 pode ser quase todo LLM | seção 5 e D18 |
+| O V3 refutava com o SLM 2× mais barato; nenhuma utilização decidia; o preço contava só a GPU; o limite de p95 estava em aberto | seção 5, 6.6 e D19 |
+| O A5 refutava com qualquer diferença de formato | seção 5 |
+| O raciocínio dos LLMs não era configurado, e uma resposta cortada contava como erro do modelo; provedor não fixado | 7.1 e D20 |
+| O treino sobre todas as chamadas do filtro de colunas não cabia em 2 dias | S2 e D21 |
+| Uma execução interrompida já contava como segunda execução; a data do registro dependia só do git | 6.1 e D22 |
+| O few-shot do B1 seria fixado sem dado | D23 |
+| O pré-registro estava na manhã do Dia 1, antes de existir o que a configuração final nomeia (os adaptadores, a alocação, o k do B1) | 7.3 |
+| O piloto era mais fácil que o teste | 6.4 |
+| Faltava dizer que a revisão de 2025 do BIRD dev trocou 85 perguntas e que o gold dela discorda do corrigido em 18,9% | seção 2 |
+| O mapa não dizia o alcance | seção 5 |
+| "Latência justa" prometia um perfil de carga igual, que API e GPU própria não têm | 6.7 |
+
 ---
 
 ## Glossário dos rótulos do paper
@@ -547,4 +602,4 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 - **A8–A13** — réplicas do paper às visões alternativas (seção 4, p.7–8)
 - **B1–B3** — barreiras à adoção (seção 5, p.8)
 - **S1–S6** — passos do algoritmo de conversão (seção 6, p.9)
-- **D1–D15** — decisões deste projeto (seção 10)
+- **D1–D24** — decisões deste projeto (seção 10)
