@@ -163,9 +163,10 @@ bench judge j3 --run <B0 calib> --eval <its eval>
    the teacher's provider, the number of training questions) changes the registered design, and is
    decided before any more is spent.
 
-A call can hold a worker for up to 90 minutes in the worst case (6 attempts of 900 s). If a run
-stalls, Ctrl-C: no further model call is made, what was answered is merged, and the run ends
-`interrupted`. On train and calib the questions left can be run as another run (`--ids`).
+A call can hold a worker for up to about 105 minutes in the worst case: 7 attempts of up to 900 s
+(transport and parse retries share one attempt counter, each with its own budget), plus the
+backoff. If a run stalls, Ctrl-C: no further model call is made, what was answered is merged, and
+the run ends `interrupted`. On train and calib the questions left can be run as another run (`--ids`).
 
 ### 6. K1: the teacher's logs on train
 
