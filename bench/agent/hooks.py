@@ -358,6 +358,8 @@ def classify(exception: BaseException) -> str:
     unrecognised)."""
     import httpx
     import openai
+    if getattr(exception, "classified_as", None) in ("transport", "model", "harness"):
+        return exception.classified_as  # a batched request's failure (anthropic_engine.BatchCallError)
     connection, status = (openai.APIConnectionError,), (openai.APIStatusError,)
     try:  # the Anthropic SDK's own (endpoint.protocol: anthropic); 529 "overloaded" is a transport failure
         import anthropic

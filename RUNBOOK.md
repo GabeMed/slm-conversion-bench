@@ -179,6 +179,14 @@ git commit -m "The call sites observed on train and calib"
 
 Accept K1 with at least 90% of the questions answered end to end (`predictions.json`).
 
+**With a Claude teacher (`configs/teacher-claude.yaml`), K1 may run at half price** through Anthropic's
+Message Batches API: add `--batch` to the `bench run` above. Only K1 may: its answers become training data
+and no judgment reads its latency, which under `--batch` is how long a batch took. The manifest records
+`batch: true`. Each CHESS step becomes one batch per worker, and a batch can take up to 24 hours, so
+K1 may no longer end on Day 1: use many `--workers`, and run it on a small `--ids` set first to see how
+long a batch takes. Cache reads inside a batch are best-effort: compare the run's `cached_input` with a
+streamed run's before trusting the saving.
+
 ### 7. B1's few-shot k
 
 Set `arms.B1.few_shot.source_run` to `<B0 train>`. Then, on the pilot questions:

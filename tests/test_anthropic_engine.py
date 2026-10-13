@@ -151,7 +151,7 @@ def test_the_long_prompt_is_split_after_the_last_marker_and_the_prefix_is_cached
     (message,) = sent[0]["messages"]
     first, second = message["content"]
     assert first == {"type": "text", "text": FILTER[:FILTER.rfind("Column information:\n") + 20],
-                     "cache_control": {"type": "ephemeral"}}
+                     "cache_control": {"type": "ephemeral", "ttl": "1h"}}
     assert second == {"type": "text", "text": "Original column name: `c`\n\nQuestion:\nhow many?"}
     assert first["text"] + second["text"] == FILTER  # the same bytes, in two blocks
 
