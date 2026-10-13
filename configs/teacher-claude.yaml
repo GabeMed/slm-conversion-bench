@@ -1,0 +1,43 @@
+# The production LLM (the teacher) as Claude Opus 5.5 on Anthropic's API, through its own Messages API
+# (`endpoint.protocol: anthropic`, bench/agent/anthropic_engine.py). Run any step with `--config configs/teacher-claude.yaml`.
+#
+# Before using it, read "Using a closed model as the teacher" in README.md: this file does not satisfy
+# SPEC D6 (an open-weight teacher whose licence and terms allow training on its outputs) or D10 (no closed
+# LLM in the core). Making it the registered configuration means amending both before Stage 0, and the
+# terms below stay null until whoever runs it records what allows them to train on Claude's outputs.
+extends: ../config.yaml
+
+roles:
+  production_llm:
+    model: claude-opus-5-5
+    # an API key (ANTHROPIC_API_KEY), billed per token: a subscription is not an API credential, and
+    # a per-token price is what J3 needs for the cost per correct answer
+    endpoint: {kind: api, protocol: anthropic, base_url: "https://api.anthropic.com", api_key_env: ANTHROPIC_API_KEY}
+    # thinking is always on for this model and is not configured; effort is its depth (default medium).
+    # cache_breaks: where CHESS's fixed instructions and examples end in each long prompt (filter_column;
+    # generate_candidate and revise; extract_keywords); the prefix before it is cached (anthropic_engine)
+    params:
+      max_tokens: 32000
+      timeout_s: 900
+      output_config: {effort: medium}
+      cache_breaks: ["Column information:\n", "【Table creation statements】\n", "Question: "]
+    reasoning:
+      enabled: true
+      forced_temperature: 1.0  # the model rejects temperature; it samples at its default, which C1 records
+    provider:
+      name: anthropic
+      quantization: null       # not disclosed for a closed model
+      checkpoint: null         # no public weights; C1 records the model the API reports serving
+      reserve: null
+      routing: null
+    terms:                     # what allows training on the outputs: whoever runs this records it (README)
+      weights_license: null
+      provider_terms: null
+      checked_on: null
+
+prices:
+  as_of: "2026-10-06"          # Anthropic's list price; confirm on its pricing page before runs
+  table:
+    claude-opus-5-5: {provider: anthropic, input_per_mtok: 4.0, cached_input_per_mtok: 0.20,
+                      cache_write_per_mtok: 5.0,  # a 5-minute cache write: 1.25 x input
+                      output_per_mtok: 20.0, batch_discount: 0.5}

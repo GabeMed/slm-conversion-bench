@@ -15,6 +15,7 @@ import yaml
 from bench.contracts.calls import CALL_SITES
 
 ENDPOINT_KINDS = ("api", "vllm", "llamacpp", "fake")
+ENDPOINT_PROTOCOLS = ("openai", "anthropic")
 EMBEDDING_PROVIDERS = ("openai", "local", "fake")
 SINGLE_MODEL_ROLES = ("production_llm", "cheap_alt")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -65,6 +66,9 @@ def _check_endpoint(where: str, endpoint: Any) -> List[str]:
     errors = []
     if endpoint.get("kind") not in ENDPOINT_KINDS:
         errors.append(f"{where}.endpoint.kind must be one of {ENDPOINT_KINDS}")
+    protocol = endpoint.get("protocol")  # what an `api` endpoint speaks; absent is OpenAI-compatible
+    if protocol is not None and (endpoint.get("kind") != "api" or protocol not in ENDPOINT_PROTOCOLS):
+        errors.append(f"{where}.endpoint.protocol is set only on an api endpoint, to one of {ENDPOINT_PROTOCOLS}")
     for key in ("base_url", "api_key_env"):
         if endpoint.get(key) is not None and not isinstance(endpoint.get(key), str):
             errors.append(f"{where}.endpoint.{key} must be a string or null")

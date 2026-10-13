@@ -243,6 +243,13 @@ def chat_model(engine: str, temperature: float):
             routing = (spec.get("provider") or {}).get("routing")
             if routing is not None:
                 extra_body["provider"] = routing
+            if endpoint.get("protocol") == "anthropic":  # Anthropic's Messages API: no temperature is sent
+                from bench.agent.anthropic_engine import AnthropicChat
+                _models[key] = AnthropicChat(
+                    model=spec["model"], base_url=endpoint["base_url"], api_key=api_key,
+                    max_tokens=params.pop("max_tokens"), timeout=params.pop("timeout_s"),
+                    default_headers=headers or None, extra_body=extra_body or None, model_kwargs=params)
+                return _models[key]
             _models[key] = ChatOpenAI(
                 model=spec["model"],
                 openai_api_base=endpoint["base_url"],
@@ -277,7 +284,7 @@ def _usage(output: Any) -> Dict[str, Any]:
     if token_usage.get("prompt_tokens") is None or token_usage.get("completion_tokens") is None:
         return dict(NO_USAGE)
     details = token_usage.get("prompt_tokens_details") or {}
-    return {
+    usage = {
         "input": token_usage["prompt_tokens"],
         "cached_input": details.get("cached_tokens"),
         "output": token_usage["completion_tokens"],
@@ -285,6 +292,9 @@ def _usage(output: Any) -> Dict[str, Any]:
         "reasoning": (token_usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
         "source": "api",
     }
+    if "cache_write_tokens" in details:  # a provider that bills writing the cache apart (anthropic_engine)
+        usage["cache_write"] = details["cache_write_tokens"]
+    return usage
 
 
 def recorded_temperature(spec: Dict[str, Any], temperature: float) -> float:
@@ -348,10 +358,18 @@ def classify(exception: BaseException) -> str:
     unrecognised)."""
     import httpx
     import openai
-    if isinstance(exception, (openai.APIConnectionError, httpx.TransportError, TimeoutError, ConnectionError)):
+    connection, status = (openai.APIConnectionError,), (openai.APIStatusError,)
+    try:  # the Anthropic SDK's own (endpoint.protocol: anthropic); 529 "overloaded" is a transport failure
+        import anthropic
+        connection, status = connection + (anthropic.APIConnectionError,), status + (anthropic.APIStatusError,)
+    except ImportError:
+        pass
+    if isinstance(exception, connection + (httpx.TransportError, TimeoutError, ConnectionError)):
         return "transport"  # APIConnectionError includes APITimeoutError
-    if isinstance(exception, openai.APIStatusError):
+    if isinstance(exception, status):
         code = exception.status_code
+        if code == 400 and "credit balance" in str(exception).lower():
+            return "harness"  # Anthropic's empty balance is a 400: the account's state, never the model's failure
         if code in (408, 429) or code >= 500:
             return "transport"
         if code in MODEL_REJECTIONS:
