@@ -51,6 +51,7 @@
         "cached_input": {"type": ["integer", "null"], "minimum": 0},
         "output": {"type": ["integer", "null"], "minimum": 0},
         "reasoning": {"type": ["integer", "null"], "minimum": 0, "description": "reasoning tokens, a part of `output`"},
+        "cache_write": {"type": ["integer", "null"], "minimum": 0, "description": "input tokens written to the cache, a part of `input`, where the provider bills the write apart (Anthropic); absent where it does not"},
         "source": {"enum": ["api", "estimated", "missing"]}
       }
     },

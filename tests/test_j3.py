@@ -24,6 +24,24 @@ def test_prices_one_call_by_hand():
     assert cost["batch"] == pytest.approx(2.2 * 0.5)
 
 
+def test_a_cache_write_is_priced_at_its_own_price():
+    """Of 1M input tokens, 0.4M read from the cache and 0.2M written to it: the write at the entry's
+    `cache_write_per_mtok`, the rest of the input as uncached; without the cache, all at the input price."""
+    use = {**usage(1_000_000, 400_000, 100_000), "cache_write": 200_000}
+    entry = {**PRICES["table"]["teacher-model"], "cache_write_per_mtok": 2.5}
+    cost = j3.api_cost(teacher_call("1", use=use), entry)
+    assert cost["standard"] == pytest.approx(0.4 * 2.0 + 0.4 * 0.5 + 0.2 * 2.5 + 0.1 * 8.0)  # 2.3
+    assert cost["no_cache"] == pytest.approx(1.0 * 2.0 + 0.1 * 8.0)
+    priced = j3.price_calls([teacher_call("1", use=use)], {**PRICES, "table": {"teacher-model": entry}})
+    assert priced["tokens"] == {"input": 1_000_000, "cached_input": 400_000, "cache_write": 200_000, "output": 100_000}
+
+
+def test_a_cache_write_without_its_price_is_refused():
+    use = {**usage(1_000_000, 400_000, 100_000), "cache_write": 200_000}
+    with pytest.raises(JudgmentError, match="cache_write_per_mtok"):
+        j3.api_cost(teacher_call("1", use=use), PRICES["table"]["teacher-model"])
+
+
 def test_totals_per_question_and_per_correct():
     calls = [teacher_call("1"), teacher_call("1", 1), teacher_call("2")]
     result = j3.judge(calls, ["1", "2"], {"1": True, "2": False}, PRICES, "teacher-model")

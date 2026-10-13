@@ -48,21 +48,25 @@ def utilization_label(u: float) -> str:
     return f"{round(u * 100)}%"
 
 
-def tokens(call: dict) -> Tuple[int, int, int]:
-    """(uncached input, cached input, output)."""
+def tokens(call: dict) -> Tuple[int, int, int, int]:
+    """(uncached input, cached input, input written to the cache, output). `cache_write` is reported by a
+    provider that bills writing the cache apart (Anthropic); absent, there is none."""
     use = call["usage"]
-    cached = use["cached_input"] or 0
-    return use["input"] - cached, cached, use["output"]
+    cached, written = use["cached_input"] or 0, use.get("cache_write") or 0
+    return use["input"] - cached - written, cached, written, use["output"]
 
 
 def api_cost(call: dict, entry: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    uncached, cached, output = tokens(call)
+    uncached, cached, written, output = tokens(call)
+    if written and entry.get("cache_write_per_mtok") is None:
+        raise JudgmentError(f"call {call['call_id']} wrote {written} tokens to the cache and the price entry of "
+                            f"{call['model']!r} has no cache_write_per_mtok: a cache write is billed at its own price")
     per = 1_000_000
     standard = (uncached * entry["input_per_mtok"] + cached * entry["cached_input_per_mtok"]
-                + output * entry["output_per_mtok"]) / per
+                + written * (entry.get("cache_write_per_mtok") or 0) + output * entry["output_per_mtok"]) / per
     discount = entry.get("batch_discount")
     return {"standard": standard,
-            "no_cache": ((uncached + cached) * entry["input_per_mtok"] + output * entry["output_per_mtok"]) / per,
+            "no_cache": ((uncached + cached + written) * entry["input_per_mtok"] + output * entry["output_per_mtok"]) / per,
             "batch": standard * (1 - discount) if discount is not None else None}
 
 
@@ -72,7 +76,7 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
     table, api = prices.get("table") or {}, {v: 0.0 for v in API_VARIANTS}
     slm: Dict[str, float] = {u: 0.0 for u in (slm_per_request or {})}
     counts = {"calls": 0, "slm_calls": 0, "failed_unbilled": 0, "estimated": 0, "cache_not_reported": 0}
-    token_totals = {"input": 0, "cached_input": 0, "output": 0}
+    token_totals = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
     batch_known = True
     for call in calls:
         counts["calls"] += 1
@@ -83,9 +87,10 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
             counts["failed_unbilled"] += 1
             continue
         counts["estimated"] += use["source"] == "estimated"
-        uncached, cached, output = tokens(call)
-        token_totals["input"] += uncached + cached
+        uncached, cached, written, output = tokens(call)
+        token_totals["input"] += uncached + cached + written
         token_totals["cached_input"] += cached
+        token_totals["cache_write"] += written
         token_totals["output"] += output
         if call["model_role"] == "slm":
             if slm_per_request is None:
