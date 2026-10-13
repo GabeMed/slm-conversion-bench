@@ -49,6 +49,25 @@ Every execution writes `runs/<run_id>/` with a `manifest.json` (commit, configur
 hashes), `calls.jsonl` and `predictions.json`. The test split is refused until the
 pre-registration hash (`prereg/HASH`) is committed and pushed.
 
+## Using a closed model as the teacher
+
+The harness can call any engine with an OpenAI-compatible API and, through `endpoint.protocol:
+anthropic`, Anthropic's Messages API. [`configs/teacher-claude.yaml`](configs/teacher-claude.yaml) makes
+Claude Opus 5.5 the production LLM, the teacher whose answers the small models are trained on.
+
+**Whoever runs it is responsible for having the right to do so.** The pipeline does not only score the
+teacher: steps S2–S5 fine-tune small models on its outputs. Most providers of closed models restrict, in
+their terms, using outputs to train other models, and a subscription to a chat product is usually not
+licensed for automated use as an API backend. Before training on any provider's outputs, read that
+provider's current terms and obtain written permission where they require it. Record it in
+`roles.production_llm.terms`: until it is filled, `bench preflight` fails and `bench curate` and
+`bench train` refuse to turn the teacher's outputs into training data. The authors of this repository grant no such right and take no responsibility for how it is
+used with any provider.
+
+This configuration also departs from the registered design: SPEC D6 asks for an open-weight teacher whose
+licence allows training on its outputs, and D10 keeps closed LLMs out of the core. Using it as the
+registered configuration means amending both before Stage 0.
+
 ## Licenses
 
 Code: Apache-2.0 ([`LICENSE`](LICENSE), [`NOTICE`](NOTICE)). CHESS is Apache-2.0. BIRD and
