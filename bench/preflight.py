@@ -313,7 +313,8 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     The answer must be complete (`finish_reason` is `stop`: on a prompt this short, anything else is a token
     budget the reasoning used up, which an execution would score as the model's failure) and its reasoning
     must be in the state the role declares (`reasoning.enabled`: reasoning tokens reported when true, none
-    when false; a role that declares nothing is not asserted). Needs the agent environment (LangChain),
+    when false; with `reasoning.adaptive` the model decides per call, and may not reason on a prompt this
+    short, so only the count being reported is asserted; a role that declares nothing is not asserted). Needs the agent environment (LangChain),
     like an execution."""
     from bench.contracts.config import engine_spec
     from bench.provenance import redact
@@ -321,6 +322,7 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     spec = engine_spec(config, engine)
     found = {"engine": engine, "model": spec["model"], "temperature": temperature}
     reasoning = (spec.get("reasoning") or {}).get("enabled")
+    adaptive = (spec.get("reasoning") or {}).get("adaptive")
     if not spec["endpoint"].get("base_url"):
         return {**found, "status": PENDING, "why": "no endpoint.base_url yet"}
     try:
@@ -359,7 +361,10 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
     if finish_reason != "stop":
         problems.append(f"finish_reason is {finish_reason!r}, not 'stop' (a cut-off answer: an execution would "
                         f"score it as the model's failure)")
-    if reasoning is True and not usage["reasoning"]:
+    if reasoning is True and adaptive and usage["reasoning"] is None:
+        problems.append("no reasoning count although the role declares reasoning.enabled: true (adaptive: the "
+                        "provider must report it, 0 included, so that every call's reasoning is measured)")
+    if reasoning is True and not adaptive and not usage["reasoning"]:
         problems.append("no reasoning tokens although the role declares reasoning.enabled: true (the setting is "
                         "not honoured, or the provider does not report them)")
     if reasoning is False and usage["reasoning"]:

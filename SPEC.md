@@ -3,7 +3,7 @@
 **Execução empírica de "Small Language Models are the Future of Agentic AI"**
 (Belcak et al., NVIDIA Research, arXiv 2506.02153, v3 de 22/09/2026)
 
-Versão 2.1, de 01/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A seção 11 diz o que mudou e por quê.
+Versão 2.2, de 14/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A v2.2 troca o professor open-weight por um LLM fechado de nível de produção, por custo, antes do Estágio 0 (seção 11.2). A seção 11 diz o que mudou e por quê.
 
 ## Como ler este documento
 
@@ -122,8 +122,10 @@ Versão 2.1, de 01/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 
 **Papéis:**
 - **LLM de produção = professor.** O LLM generalista que o agente usa.
-  - É um open-weight cuja **licença de pesos permite usar as saídas para treinar outros modelos**, acessado por um provedor cujos termos também o permitem. As duas coisas são conferidas na configuração, com link e data.
-  - Critério de escolha: o open-weight mais alto num índice agregado independente, com uma reserva operacional só para falha do provedor. A configuração registra qual foi.
+  - É um **LLM fechado de nível de produção**, acessado pela API paga do próprio fornecedor: o modelo intermediário da linha, que equipes costumam pôr em produção pelo custo, não o topo de fronteira.
+  - Os termos do provedor e a permissão com que o autor treina com as saídas ficam registrados na configuração, com link e data. A responsabilidade por eles é de quem roda o experimento.
+  - Critério de escolha: o custo do núcleo inteiro cabe no orçamento com o modelo intermediário e não com o topo da linha, medido em sondagens pagas antes do Estágio 0 (seção 11.2). A configuração registra qual foi.
+  - **O que isso muda na leitura.** A pergunta passa a ser se um SLM substitui o modelo que uma equipe de fato põe em produção. Um professor mais fraco baixa o teto do que o SLM aprende e torna a comparação de qualidade mais fácil; um LLM mais barato torna a de custo mais difícil. O relatório diz as duas coisas.
 - **Alternativa barata sem treino.** Um generalista open-weight mais barato que o LLM de produção, com o **mesmo orçamento de otimização**: prompt com exemplos (few-shot) e cache.
 - **Versão de chamada única.** Text-to-SQL numa chamada só, sem o agente, com o LLM de produção e com a alternativa barata. É "o que se faria sem agente".
 - **SLMs candidatos.** Dois modelos saídos da triagem de mesa do S4, dentro de ~10B (WD1), com licença que permite uso comercial e fine-tuning (seção 4).
@@ -148,7 +150,7 @@ Versão 2.1, de 01/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 6. uma sonda multi-turn, só de inferência, num benchmark conversacional;
 7. um SLM já pronto para text-to-SQL como referência sem treino;
 8. um segundo professor open-weight;
-9. um braço com LLM fechado de fronteira, aberto a contribuidores (seção 8);
+9. um braço com o LLM fechado de fronteira (o topo da linha do professor ou de outro fornecedor), aberto a contribuidores (seção 8);
 10. rodada zero-shot ampla na calibração (6–8 candidatos da triagem do S4), para testar a B2.
 
 **Regra de conformidade.** Saídas de qualquer modelo cujos termos proíbam treinar com elas ficam numa área separada **não-treinar**, e o pipeline de treino recusa essa área.
@@ -400,11 +402,11 @@ Cada uma com a ação de corte correspondente:
 | O agente roda uma pergunta ponta a ponta em ≤3 h | usar um controller equivalente: os mesmos call sites, com os mesmos prompts, a mesma ordem e o mesmo fluxo de dados, e o loop de reparo. O relatório declara qual foi usado. Se nem isso rodar até o fim da manhã, vai para o **fallback** (7.4). |
 | O conjunto de call sites observado nos logs de treino e nas rodadas de calibração está registrado (id gravado em cada chamada) | corrigir o harness antes de seguir |
 | Os IDs do Mini-Dev casam com o dev, e o gabarito corrigido está acessível | corrigir o mapeamento; sem gabarito, não há teste |
-| A licença e os termos do professor e do provedor permitem treinar com as saídas | trocar pela reserva operacional |
+| Os termos do provedor do professor e a permissão do autor para treinar com as saídas estão registrados, com link e data (D6) | não começar o K1: sem esse registro, nenhuma saída do professor vira dado de treino |
 | Cada motor responde a uma chamada real com os parâmetros configurados, em toda temperatura dos call sites: HTTP 200, texto, `usage`, parada normal (não por limite de tokens) e o raciocínio no estado configurado | corrigir a configuração; nenhum gasto do experimento antes disso |
 | Um smoke de 2 perguntas por braço confere `usage`, tokens em cache, motivo de parada e formato | corrigir a configuração |
 | O provedor, a quantização e o checkpoint de cada modelo via API estão fixados e registrados | fixar antes de qualquer execução |
-| O gasto e o tempo do piloto, projetados para o núcleo (segundos por pergunta, taxa de cache, custo), cabem no teto e nos 2 dias | cortar extensões e reduzir o piloto antes de tocar o núcleo; depois, os cortes de 7.3 |
+| O gasto e o tempo do piloto, projetados para o núcleo (segundos por pergunta, taxa de cache, custo), cabem no teto e nas fases de 7.3 | cortar extensões e reduzir o piloto antes de tocar o núcleo; depois, os cortes de 7.3 |
 | O throughput e o tempo de treino medidos confirmam o cronograma | aplicar os cortes de 7.3 |
 
 **Checagem durante o teste (não é pré-condição).** Nas rodadas de teste do Dia 2, uma asserção automática compara o id de cada chamada com o conjunto registrado. Se aparecer um call site fora do conjunto, a configuração é interrompida, sinalizada, e o caso vai ao relatório.
@@ -430,6 +432,8 @@ Cada uma com a ação de corte correspondente:
   - Ele registra a configuração final, e ela nomeia o que os braços usam: a escolha do S4, os centróides, os adaptadores e a alocação. Tudo isso só existe depois do treino.
   - Os exemplos do B1 saem dos logs de treino, então a escolha do seu k (6.4) também vem depois do K1.
   - As regras de veredito estão publicadas e carimbadas desde o Estágio 0. Entre o Estágio 0 e o pré-registro só mudam esses fatos e os valores que uma regra já fixada calcula, e a diferença entre os dois commits é pública.
+- **Os dias não precisam ser consecutivos** (D26). O projeto pode pausar entre fases enquanto o orçamento da fase seguinte não está garantido: depois do piloto e da projeção, antes do K1, e antes do teste. A ordem desta tabela e o pré-registro antes da primeira pergunta do teste não mudam.
+- **O K1 pode rodar em lote** (D25): pela API de lotes do fornecedor, pela metade do preço. Só o K1, porque nenhum veredito lê a latência dele; a calibração e o teste rodam como um agente real. Cada passo do agente espera o lote voltar, então o K1 em lote dura mais que uma tarde e roda com muitas perguntas em paralelo.
 - **Se o tempo ou o orçamento apertarem,** cortam-se as extensões na ordem inversa da lista, e depois a volta de re-treino do S6 (declarada; o K4 roda sem ela).
 - **Nunca se cortam:**
   - K2 (a comparação com o caminho sem treino);
@@ -515,11 +519,11 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D3 | Protocolo fixado antes, **com** margem de não-inferioridade pré-registrada (6.4 e D16). Curvas e fronteiras continuam sendo reportadas |
 | D4 | Papéis abstratos, com a escolha concreta na configuração |
 | D5 | O raciocínio interno do professor fica fora dos logs |
-| D6 | LLM de produção = professor, open-weight com licença e termos de acesso que permitem treinar com as saídas |
+| D6 | LLM de produção = professor: um LLM fechado de nível de produção, pela API paga do fornecedor; os termos do provedor e a permissão do autor para treinar com as saídas ficam registrados na configuração, com link e data (autor, 14/10/2026; até a v2.1, um open-weight) |
 | D7 | Esquema de log neutro entre provedores, com modelo e versão em cada registro |
 | D8 | A contribuição de cada passo é medida contra alternativas nomeadas (seção 5 e extensões), nunca "tirando o passo" |
 | D9 | Resultados estratificados por dificuldade, com todas as categorias reportadas |
-| D10 | Sem LLM fechado no núcleo; o braço fechado é extensão aberta a contribuidores |
+| D10 | No núcleo, o único LLM fechado é o professor (D6); a alternativa barata e os SLMs são open-weight. O braço com o fechado de fronteira é extensão aberta a contribuidores (autor, 14/10/2026; até a v2.1, nenhum fechado no núcleo) |
 | D11 | O fallback de chamada única é declarado como teste mais estreito (7.4) |
 | D12 | S4: triagem de mesa documentada pelos 4 critérios do paper, partindo da lista dele (sem preferência por ela); 2 candidatos no zero-shot; 1 (ou 2) no fine-tuning; desempate pré-registrado |
 | D13 | O CHESS é corrigido para que a geração e o reparo usem o schema selecionado (issue #34 do CHESS), declarado no relatório (autor, 30/09/2026) |
@@ -534,6 +538,8 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D22 | Registro do teste: só execuções concluídas contam; registrar de novo exige defeito documentado; Estágio 0 e carimbo de tempo independente (autor, 01/10/2026) |
 | D23 | O few-shot adicional do B1 (k ∈ {0, 3}) é escolhido no piloto por uma regra fixada antes: k = 3 só se melhorar o EX por chamada com IC acima de zero (autor, 01/10/2026) |
 | D24 | Objetivo e restrição: o objetivo é validar a tese do paper; a restrição é o orçamento. Toda correção é a menor que fecha o achado (autor, 01/10/2026) |
+| D25 | Só o K1 pode rodar pela API de lotes do fornecedor, pela metade do preço; a latência dele não é medida e o manifesto registra o lote. A calibração, que dá o SLO, e o teste rodam como um agente real (autor, 14/10/2026) |
+| D26 | O núcleo roda nas fases de 7.3, na ordem dela, em dias não necessariamente consecutivos: o projeto pausa entre fases enquanto o orçamento da seguinte não está garantido (autor, 14/10/2026) |
 
 ### Decisões em configuração, fechadas antes da leitura zero-shot do piloto
 - modelos por papel e a reserva operacional;
@@ -590,6 +596,17 @@ Antes de qualquer execução paga, o desenho passou por uma auditoria de validad
 | O mapa não dizia o alcance | seção 5 |
 | "Latência justa" prometia um perfil de carga igual, que API e GPU própria não têm | 6.7 |
 
+### 11.2 O que mudou na v2.2 (14/10/2026)
+
+Antes do Estágio 0, sondagens pagas mediram o custo do professor no agente. Foram 5 perguntas do treino, nenhuma da calibração nem do teste. Essas execuções não são reaproveitadas: o K1 responde as mesmas perguntas de novo, como responde as outras. O professor open-weight da v2.1 tinha dado lugar a um fechado de fronteira, e esse não cabia no orçamento. O intermediário da mesma linha acertou as mesmas 5 perguntas por cerca de 60% do custo, e o K1 em lote custa cerca de metade disso.
+
+| Problema da v2.1 | Onde está a correção na v2.2 |
+|---|---|
+| O professor fechado escolhido não cabia no orçamento; o open-weight tinha sido descartado pelo autor | seção 3 e D6: o fechado de nível de produção |
+| A D10 proibia LLM fechado no núcleo | D10: só o professor |
+| O K1 sozinho era o maior gasto do núcleo | 7.3 e D25: o K1 em lote, pela metade do preço |
+| O orçamento do núcleo não está todo garantido antes do primeiro gasto | 7.3 e D26: fases com pausa entre elas, na mesma ordem |
+
 ---
 
 ## Glossário dos rótulos do paper
@@ -602,4 +619,4 @@ Antes de qualquer execução paga, o desenho passou por uma auditoria de validad
 - **A8–A13** — réplicas do paper às visões alternativas (seção 4, p.7–8)
 - **B1–B3** — barreiras à adoção (seção 5, p.8)
 - **S1–S6** — passos do algoritmo de conversão (seção 6, p.9)
-- **D1–D24** — decisões deste projeto (seção 10)
+- **D1–D26** — decisões deste projeto (seção 10)

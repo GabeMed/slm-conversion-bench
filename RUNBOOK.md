@@ -3,6 +3,10 @@
 The order below is the one SPEC.md §7 fixes. Every step names the command, what it must show, and
 what to do when it does not. Nothing here is paid until step 2.
 
+**The days need not be consecutive (SPEC D26).** The project may pause between phases while the next
+phase's budget is not in hand: after step 5 (before K1) and after step 12 (before the test). The order
+does not change, and nothing on the test split runs before step 12.
+
 - `<...>` is a value a previous step printed (a run id, a result path).
 - **Run the blocks in `bash`**, from the repository root, in the agent environment unless a step
   says otherwise. They use bash arrays; zsh splits words differently.
@@ -17,9 +21,10 @@ what to do when it does not. Nothing here is paid until step 2.
    - In Modal: a token, and the two secrets `modal.secrets` names. `slm-bench-vllm-api-key` holds
      `VLLM_API_KEY`; `slm-bench-proxy-auth` holds the proxy-auth variables of `headers_env`.
 2. **A spending limit on each provider account:** a prepaid balance, or the provider's own limit
-   where it has one. Together they sum to the API budget (US$ 150). The harness has no spend cap of
-   its own; step 5 projects the spend by hand, and this limit is what stops a projection that was
-   wrong.
+   where it has one. The API budget is **US$ 500 for the teacher** (the pre-Stage-0 probes project
+   US$ 325–465 with K1 batched, SPEC §11.2) plus the cheap alternative's. The harness has no spend cap
+   of its own; step 5 projects the spend by hand, and this limit is what stops a projection that was
+   wrong. A balance below a phase's projection pauses the project before that phase (D26).
 3. **Fill every `before runs` value of `config.yaml`:**
    - each API role's `endpoint.base_url`, `provider` (name, quantization, checkpoint) and, for the
      teacher, `terms` (licence, provider terms, date);
@@ -146,10 +151,10 @@ bench judge j3 --run <B0 calib> --eval <its eval>
 | B1 on test, the calib replay, the two B1 pilot replays | 498, 200, 50 + 50 | cheap alternative |
 | B2-cheap on test | 498, one call each | cheap alternative |
 
-- **Cost:** USD per question × questions, per engine. For B2 use its smoke run's cost per
-  question. The total API spend must stay under **US$ 150**.
+- **Cost:** USD per question × questions, per engine; K1 batched at half (D25). For B2 use its smoke
+  run's cost per question. The total API spend must stay under the budget (Before Day 1, item 2).
 - **Time:** the pilot run's wall time per question (`finished_at` − `started_at`, ÷ 200) × the
-  questions left, at the same `--workers`. K1 must end on the afternoon of Day 1.
+  questions left, at the same `--workers`. Batched, K1 runs at its own pace (step 6), not the pilot's.
 - **Cache:** the share of `usage.cached_input` in the input tokens. If it is zero, the provider is
   not caching: fix that before K1, since it changes every cost of the report.
 
@@ -179,13 +184,17 @@ git commit -m "The call sites observed on train and calib"
 
 Accept K1 with at least 90% of the questions answered end to end (`predictions.json`).
 
-**With a Claude teacher (`configs/teacher-claude.yaml`), K1 may run at half price** through Anthropic's
-Message Batches API: add `--batch` to the `bench run` above. Only K1 may: its answers become training data
-and no judgment reads its latency, which under `--batch` is how long a batch took. The manifest records
-`batch: true`. Each CHESS step becomes one batch per worker, and a batch can take up to 24 hours, so
-K1 may no longer end on Day 1: use many `--workers`, and run it on a small `--ids` set first to see how
-long a batch takes. Cache reads inside a batch are best-effort: compare the run's `cached_input` with a
-streamed run's before trusting the saving.
+**K1 runs at half price (SPEC D25)** through Anthropic's Message Batches API: add `--batch` to the
+`bench run` above. Only K1 may: its answers become training data and no judgment reads its latency,
+which under `--batch` is how long a batch took. The manifest records `batch: true`.
+
+- **It is slow per question.** Each CHESS step waits for its batch: the pre-Stage-0 probe measured 2–8
+  minutes a step, about 50 minutes a question at one worker. 834 questions need many `--workers`
+  (about 64 for half a day); the questions answered at once share their batches.
+- **First, a small `--ids` set at the chosen `--workers`:** its memory and its time per question decide
+  the full run's `--workers`.
+- **Cache reads inside a batch are best-effort.** The probe saw them hit; compare the run's
+  `cached_input` with a streamed run's before trusting the saving.
 
 ### 7. B1's few-shot k
 
@@ -359,6 +368,8 @@ bench report --plan plan.yaml
 - The report reads the registry as `origin/main` holds it, hence the push before it.
 
 ## What this runbook does not decide
+
+- **How many `--workers` K1 can run on one machine** under `--batch`: step 6's small run measures it.
 
 - **Parallel training on Modal was never exercised** (nothing paid ran): step 9's loop is the first
   time several training containers write to one volume. If a run fails registering the adapters,

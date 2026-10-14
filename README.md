@@ -52,8 +52,9 @@ pre-registration hash (`prereg/HASH`) is committed and pushed.
 ## Using a closed model as the teacher
 
 The harness can call any engine with an OpenAI-compatible API and, through `endpoint.protocol:
-anthropic`, Anthropic's Messages API. [`configs/teacher-claude.yaml`](configs/teacher-claude.yaml) makes
-Claude Opus 5.5 the production LLM, the teacher whose answers the small models are trained on.
+anthropic`, Anthropic's Messages API. The registered configuration ([`config.yaml`](config.yaml)) makes
+Claude Sonnet 5.5 the production LLM, the teacher whose answers the small models are trained on;
+[`configs/teacher-claude.yaml`](configs/teacher-claude.yaml) swaps in Claude Opus 5.5.
 
 **Whoever runs it is responsible for having the right to do so.** The pipeline does not only score the
 teacher: steps S2–S5 fine-tune small models on its outputs. Most providers of closed models restrict, in
@@ -64,9 +65,8 @@ provider's current terms and obtain written permission where they require it. Re
 `bench train` refuse to turn the teacher's outputs into training data. The authors of this repository grant no such right and take no responsibility for how it is
 used with any provider.
 
-This configuration also departs from the registered design: SPEC D6 asks for an open-weight teacher whose
-licence allows training on its outputs, and D10 keeps closed LLMs out of the core. Using it as the
-registered configuration means amending both before Stage 0.
+SPEC v2.2 (D6, D10) amended the design for this before Stage 0: up to v2.1 the teacher was an open-weight
+model whose licence allows training on its outputs, and no closed LLM was in the core.
 
 ## Licenses
 

@@ -3,11 +3,12 @@
 extends: ../config.yaml
 
 roles:
-  production_llm:
+  production_llm:              # every value config.yaml sets for its API teacher is unset here (null)
     model: qwen3-4b-q4_k_m
-    endpoint: {kind: llamacpp, base_url: "http://127.0.0.1:8080/v1", api_key_env: null}
-    params: {max_tokens: 1024, timeout_s: 600}
-    reasoning: {enabled: false}   # serve-local.sh serves it with --reasoning off
+    endpoint: {kind: llamacpp, protocol: null, base_url: "http://127.0.0.1:8080/v1", api_key_env: null}
+    params: {max_tokens: 1024, timeout_s: 600, output_config: null, cache_breaks: null, cache_ttl: null}
+    reasoning: {enabled: false, adaptive: null, forced_temperature: null}  # serve-local.sh: --reasoning off
+    provider: {name: null}
     terms: null
   cheap_alt:
     model: qwen3-4b-q4_k_m

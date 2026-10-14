@@ -221,7 +221,8 @@ def chat_model(engine: str, temperature: float):
             from langchain_openai import ChatOpenAI
 
             spec = engine_spec(_config, engine)
-            params = dict(spec.get("params") or {})
+            # a null parameter is not sent: a configuration that extends another unsets one this way
+            params = {name: value for name, value in (spec.get("params") or {}).items() if value is not None}
             endpoint = spec["endpoint"]
             if not endpoint.get("base_url"):
                 raise HarnessError(f"engine {engine} has no endpoint.base_url in the configuration")

@@ -627,7 +627,12 @@ def engines_config(base_url, monkeypatch, slm_base_url="same", **production_para
         monkeypatch.setenv(name, f"{name.lower()}-0001")
     for role in ("production_llm", "cheap_alt"):
         config["roles"][role]["endpoint"].update(base_url=base_url, api_key_env="PROBE_KEY")
-    config["roles"]["production_llm"]["params"].update(production_params)
+    # the fake engine speaks the OpenAI protocol: the teacher's Anthropic API and its own parameters are
+    # tested in test_anthropic_engine; here the teacher is an OpenAI-compatible engine with reasoning on
+    production = config["roles"]["production_llm"]
+    production["endpoint"].pop("protocol", None)
+    production["params"] = {"max_tokens": 16384, "timeout_s": 900, **production_params}
+    production["reasoning"] = {"enabled": True, "forced_temperature": None}
     for candidate in config["roles"]["slm_candidates"]:
         candidate["endpoint"]["base_url"] = base_url if slm_base_url == "same" else slm_base_url
     return config
@@ -714,6 +719,30 @@ def test_reasoning_declared_on_and_not_seen_fails_the_probe(monkeypatch, reporte
             assert probe["status"] == FAIL and "no reasoning tokens although the role declares" in probe["why"]
         else:
             assert probe["status"] == PASS
+
+
+def test_adaptive_reasoning_needs_only_the_count_reported(monkeypatch):
+    """A model that decides per call whether to think may not think on "Reply OK": 0 reported passes, a
+    count not reported at all fails (its calls' reasoning could not be measured)."""
+    pytest.importorskip("langchain_openai")
+    from bench.preflight import check_engines
+    for reported, status in ((0, PASS), (None, FAIL)):
+        with FakeEngine(reasoning=reported) as server:
+            config = engines_config(server.base_url, monkeypatch)
+            config["roles"]["production_llm"]["reasoning"]["adaptive"] = True
+            config["roles"]["cheap_alt"]["reasoning"]["enabled"] = False
+            probes = [p for p in check_engines(config)["evidence"] if p["engine"] == "production_llm"]
+        assert probes and all(p["status"] == status for p in probes)
+        if status == FAIL:
+            assert all("no reasoning count although" in p["why"] for p in probes)
+
+
+def test_adaptive_reasoning_is_declared_only_with_reasoning_on():
+    from bench.contracts.config import validate_config, load_config
+    config = json.loads(json.dumps(load_config(paths.ROOT / "config.yaml")))
+    assert config["roles"]["production_llm"]["reasoning"]["adaptive"] is True and validate_config(config) == []
+    config["roles"]["production_llm"]["reasoning"]["enabled"] = False
+    assert any("reasoning.adaptive" in e for e in validate_config(config))
 
 
 def test_reasoning_declared_off_and_seen_fails_the_probe(monkeypatch):

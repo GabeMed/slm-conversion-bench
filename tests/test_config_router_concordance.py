@@ -43,12 +43,17 @@ def test_extends_cycle(tmp_path):
 
 def test_the_shipped_engine_settings_are_the_decided_ones():
     """The API roles' token budget covers the reasoning and the answer and their timeout a long
-    reasoning (16384 and 900 s); the SLM candidates keep 4096; and 32 calls of one step may be in flight."""
+    reasoning (32000 for the teacher, 16384 for the cheap alternative; 900 s); the teacher thinks
+    adaptively at effort high (SPEC v2.2); the SLM candidates keep 4096; and 32 calls of one step may be
+    in flight."""
     config = load_config(BASE)
-    for role in ("production_llm", "cheap_alt"):
+    budgets = {"production_llm": 32000, "cheap_alt": 16384}
+    for role, max_tokens in budgets.items():
         params = config["roles"][role]["params"]
-        assert (params["max_tokens"], params["timeout_s"]) == (16384, 900)
+        assert (params["max_tokens"], params["timeout_s"]) == (max_tokens, 900)
         assert config["roles"][role]["reasoning"]["enabled"] is True
+    teacher = config["roles"]["production_llm"]
+    assert teacher["params"]["output_config"] == {"effort": "high"} and teacher["reasoning"]["adaptive"] is True
     assert config["roles"]["cheap_alt"]["params"]["reasoning_effort"] == "medium"
     assert {c["params"]["max_tokens"] for c in config["roles"]["slm_candidates"]} == {4096}
     assert config["agent"]["max_workers"] == 32

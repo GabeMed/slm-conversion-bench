@@ -129,7 +129,8 @@ def _routing_errors(where: str, routing: Any) -> List[str]:
 
 def api_role_errors(config: Dict[str, Any]) -> List[str]:
     """What each API role declares besides its endpoint: its reasoning state (`reasoning.enabled`, asserted by
-    the preflight probe; `reasoning.forced_temperature`, the value C1 records when the provider forces one)
+    the preflight probe; `reasoning.adaptive`, the model deciding per call whether to reason;
+    `reasoning.forced_temperature`, the value C1 records when the provider forces one)
     and the provider that serves it (`provider`, whose `name` C1 records)."""
     errors = []
     for role in SINGLE_MODEL_ROLES:
@@ -137,6 +138,8 @@ def api_role_errors(config: Dict[str, Any]) -> List[str]:
         reasoning = spec.get("reasoning")
         if not isinstance(reasoning, dict) or not isinstance(reasoning.get("enabled"), bool):
             errors.append(f"{where}.reasoning.enabled must be true or false")
+        elif reasoning.get("adaptive") not in (None, False, True) or (reasoning.get("adaptive") and not reasoning["enabled"]):
+            errors.append(f"{where}.reasoning.adaptive is true or false, and true only with enabled: true")
         else:
             forced = reasoning.get("forced_temperature")
             if forced is not None and (isinstance(forced, bool) or not isinstance(forced, (int, float)) or forced < 0):

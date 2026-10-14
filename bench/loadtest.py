@@ -79,7 +79,7 @@ def build_payloads(calls: List[Dict[str, Any]], model: str, params: Dict[str, An
     """One request body per C1 line, as the agent's client sends it, addressed to `model`. The
     temperature is the call site's (`call_sites`, the configuration's), as the client sends: what C1
     records is the effective one, which a provider that forces its own may have changed."""
-    extra = {k: v for k, v in params.items() if k not in CLIENT_ONLY_PARAMS}
+    extra = {k: v for k, v in params.items() if k not in CLIENT_ONLY_PARAMS and v is not None}  # null: unset
     payloads = []
     for call in calls:
         body = {"model": model, "messages": call["prompt_messages"],

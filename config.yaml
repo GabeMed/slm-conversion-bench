@@ -12,26 +12,38 @@ roles:
   #   `forced_temperature` is the temperature the provider runs whatever is sent (C1 then records it,
   #   not the call site's);
   # - `provider` pins who serves the model (its URL is `endpoint.base_url`); C1 records `provider.name`.
-  production_llm:              # the LLM the agent uses = the teacher (SPEC §3, D6)
-    model: MiMo-V2.6-Pro
-    endpoint: {kind: api, base_url: null, api_key_env: PRODUCTION_LLM_API_KEY}  # provider: before runs
-    # thinking on, the model's default. Before runs: the pinned provider's own switch for it goes in
-    # `params.extra_body` (sent as the request's extra body), so the setting is explicit on the wire too
-    params: {max_tokens: 16384, timeout_s: 900}
+  production_llm:              # the LLM the agent uses = the teacher (SPEC §3, D6): a closed model, by API
+    model: claude-sonnet-5-5
+    # Anthropic's own Messages API (`endpoint.protocol: anthropic`, bench/agent/anthropic_engine.py), with an
+    # API key billed per token: a subscription is not an API credential, and J3 needs a per-token price.
+    # Read "Using a closed model as the teacher" in README.md before running it.
+    endpoint: {kind: api, protocol: anthropic, base_url: "https://api.anthropic.com", api_key_env: ANTHROPIC_API_KEY}
+    # thinking is adaptive and always available on this model: `effort` is its depth (high, the model's
+    # default, as a team running it in production would run it).
+    # cache_breaks: where CHESS's fixed instructions and examples end in each long prompt (filter_column;
+    # generate_candidate and revise; extract_keywords); the prefix before it is cached (anthropic_engine).
+    # cache_ttl: an hour, not the default 5 minutes: K1's batches (--batch) take minutes each, and the
+    # cached prefix must outlive the wait between them. Each read renews it.
+    params:
+      max_tokens: 32000
+      timeout_s: 900
+      output_config: {effort: high}
+      cache_breaks: ["Column information:\n", "【Table creation statements】\n", "Question: "]
+      cache_ttl: 1h
     reasoning:
       enabled: true
-      forced_temperature: null # before runs: 1.0 where the provider forces it while thinking
+      adaptive: true           # the model decides per call whether to think: a trivial prompt may get none
+      forced_temperature: 1.0  # the model rejects temperature; it samples at its default, which C1 records
     provider:
-      name: null               # before runs
-      quantization: null       # before runs: as the provider states it (fp8, bf16, ...)
-      checkpoint: null         # before runs: {repo, revision} of the weights served (the RL or the MOPD checkpoint)
-      reserve: null            # before runs: {name, base_url, quantization}, used only if the provider fails
-      routing: null            # through OpenRouter only: {only: [<provider>], allow_fallbacks: false,
-                               # require_parameters: true, quantizations: [<q>]}, sent as extra_body.provider
-    terms:                     # both must allow training on outputs (D6); link and date
-      weights_license: null    # before runs
-      provider_terms: null     # before runs
-      checked_on: null         # before runs
+      name: anthropic
+      quantization: null       # not disclosed for a closed model
+      checkpoint: null         # no public weights; C1 records the model the API reports serving
+      reserve: null
+      routing: null
+    terms:                     # what allows training on the outputs, as the runner records it (README, D6)
+      weights_license: "none: closed model, weights not public"
+      provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, permission from Anthropic held by the author"
+      checked_on: "2026-10-14"
   cheap_alt:                   # cheaper open-weight generalist, no training (B1)
     model: gpt-oss-120b
     endpoint: {kind: api, base_url: null, api_key_env: CHEAP_ALT_API_KEY}  # provider: before runs
@@ -156,8 +168,11 @@ thresholds:                    # R · every verdict rule (design §6.3), fixed b
   format_tolerance_pp: 1       # T11: A5 refutes only when B4 is more than this below B0 on a call site
 
 prices:
-  as_of: null                  # dated price table: before runs
-  table: {}
+  as_of: "2026-10-14"          # Anthropic's list price; confirm on its pricing page before runs
+  table:
+    claude-sonnet-5-5: {provider: anthropic, input_per_mtok: 2.0, cached_input_per_mtok: 0.20,
+                        cache_write_per_mtok: 4.0,  # a 1-hour cache write: 2 x input
+                        output_per_mtok: 10.0, batch_discount: 0.5}
 
 embeddings:                    # retrieval inside CHESS (not an LLM call)
   provider: openai             # decided by the author (2026-09-30)
