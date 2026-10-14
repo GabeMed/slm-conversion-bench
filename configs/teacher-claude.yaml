@@ -33,10 +33,10 @@ roles:
       checkpoint: null         # no public weights; C1 records the model the API reports serving
       reserve: null
       routing: null
-    terms:                     # what allows training on the outputs: whoever runs this records it (README)
-      weights_license: null
-      provider_terms: null
-      checked_on: null
+    terms:                     # what allows training on the outputs, as the runner records it (README)
+      weights_license: "none: closed model, weights not public"
+      provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, permission from Anthropic held by the author"
+      checked_on: "2026-10-14"
 
 prices:
   as_of: "2026-10-06"          # Anthropic's list price; confirm on its pricing page before runs
