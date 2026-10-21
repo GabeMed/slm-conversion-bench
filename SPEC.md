@@ -3,7 +3,7 @@
 **Execução empírica de "Small Language Models are the Future of Agentic AI"**
 (Belcak et al., NVIDIA Research, arXiv 2506.02153, v3 de 22/09/2026)
 
-Versão 2.2, de 14/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A v2.2 troca o professor open-weight por um LLM fechado de nível de produção, por custo, antes do Estágio 0 (seção 11.2). A seção 11 diz o que mudou e por quê.
+Versão 2.3, de 21/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A v2.2 troca o professor open-weight por um LLM fechado de nível de produção, por custo, antes do Estágio 0 (seção 11.2). A v2.3 manda as chamadas do K1 pela assinatura do autor, com autorização do fornecedor só para este projeto, também antes do Estágio 0 (seção 11.3). A seção 11 diz o que mudou e por quê.
 
 ## Como ler este documento
 
@@ -124,6 +124,7 @@ Versão 2.2, de 14/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 - **LLM de produção = professor.** O LLM generalista que o agente usa.
   - É um **LLM fechado de nível de produção**, acessado pela API paga do próprio fornecedor: o modelo intermediário da linha, que equipes costumam pôr em produção pelo custo, não o topo de fronteira.
   - Os termos do provedor e a permissão com que o autor treina com as saídas ficam registrados na configuração, com link e data. A responsabilidade por eles é de quem roda o experimento.
+  - No K1, as mesmas chamadas vão pelo Claude Code, na assinatura do autor, com autorização do fornecedor só para este projeto (D25). A calibração e o teste usam a API paga.
   - Critério de escolha: o custo do núcleo inteiro cabe no orçamento com o modelo intermediário e não com o topo da linha, medido em sondagens pagas antes do Estágio 0 (seção 11.2). A configuração registra qual foi.
   - **O que isso muda na leitura.** A pergunta passa a ser se um SLM substitui o modelo que uma equipe de fato põe em produção. Um professor mais fraco baixa o teto do que o SLM aprende e torna a comparação de qualidade mais fácil; um LLM mais barato torna a de custo mais difícil. O relatório diz as duas coisas.
 - **Alternativa barata sem treino.** Um generalista open-weight mais barato que o LLM de produção, com o **mesmo orçamento de otimização**: prompt com exemplos (few-shot) e cache.
@@ -433,7 +434,10 @@ Cada uma com a ação de corte correspondente:
   - Os exemplos do B1 saem dos logs de treino, então a escolha do seu k (6.4) também vem depois do K1.
   - As regras de veredito estão publicadas e carimbadas desde o Estágio 0. Entre o Estágio 0 e o pré-registro só mudam esses fatos e os valores que uma regra já fixada calcula, e a diferença entre os dois commits é pública.
 - **Os dias não precisam ser consecutivos** (D26). O projeto pode pausar entre fases enquanto o orçamento da fase seguinte não está garantido: depois do piloto e da projeção, antes do K1, e antes do teste. A ordem desta tabela e o pré-registro antes da primeira pergunta do teste não mudam.
-- **O K1 pode rodar em lote** (D25): pela API de lotes do fornecedor, pela metade do preço. Só o K1, porque nenhum veredito lê a latência dele; a calibração e o teste rodam como um agente real. Cada passo do agente espera o lote voltar, então o K1 em lote dura mais que uma tarde e roda com muitas perguntas em paralelo.
+- **O K1 roda pela assinatura do autor** (D25): as mesmas chamadas do professor, enviadas pelo Claude Code em modo headless, com autorização da Anthropic só para este projeto. Só o K1, porque nenhum veredito lê o custo nem a latência dele; a calibração e o teste rodam pela API paga, como um agente real.
+  - O Claude Code acrescenta a cada chamada um contexto fixo que não se desliga: cerca de 530 tokens, com uma linha de identidade, o ambiente, a data e o e-mail da conta. O log guarda só o prompt do CHESS, que é o que os SLMs aprendem. A seção 11.3 mede o efeito.
+  - O limite de uso da assinatura pausa o K1, que continua sozinho quando a janela reabre. O K1 pode levar dias; é uma execução só.
+  - A API de lotes, pela metade do preço, fica como alternativa se a autorização acabar.
 - **Se o tempo ou o orçamento apertarem,** cortam-se as extensões na ordem inversa da lista, e depois a volta de re-treino do S6 (declarada; o K4 roda sem ela).
 - **Nunca se cortam:**
   - K2 (a comparação com o caminho sem treino);
@@ -519,7 +523,7 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D3 | Protocolo fixado antes, **com** margem de não-inferioridade pré-registrada (6.4 e D16). Curvas e fronteiras continuam sendo reportadas |
 | D4 | Papéis abstratos, com a escolha concreta na configuração |
 | D5 | O raciocínio interno do professor fica fora dos logs |
-| D6 | LLM de produção = professor: um LLM fechado de nível de produção, pela API paga do fornecedor; os termos do provedor e a permissão do autor para treinar com as saídas ficam registrados na configuração, com link e data (autor, 14/10/2026; até a v2.1, um open-weight) |
+| D6 | LLM de produção = professor: um LLM fechado de nível de produção, pela API paga do fornecedor (o K1, pela assinatura do autor: D25); os termos do provedor e a permissão do autor para treinar com as saídas ficam registrados na configuração, com link e data (autor, 14/10/2026; até a v2.1, um open-weight) |
 | D7 | Esquema de log neutro entre provedores, com modelo e versão em cada registro |
 | D8 | A contribuição de cada passo é medida contra alternativas nomeadas (seção 5 e extensões), nunca "tirando o passo" |
 | D9 | Resultados estratificados por dificuldade, com todas as categorias reportadas |
@@ -538,7 +542,7 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D22 | Registro do teste: só execuções concluídas contam; registrar de novo exige defeito documentado; Estágio 0 e carimbo de tempo independente (autor, 01/10/2026) |
 | D23 | O few-shot adicional do B1 (k ∈ {0, 3}) é escolhido no piloto por uma regra fixada antes: k = 3 só se melhorar o EX por chamada com IC acima de zero (autor, 01/10/2026) |
 | D24 | Objetivo e restrição: o objetivo é validar a tese do paper; a restrição é o orçamento. Toda correção é a menor que fecha o achado (autor, 01/10/2026) |
-| D25 | Só o K1 pode rodar pela API de lotes do fornecedor, pela metade do preço; a latência dele não é medida e o manifesto registra o lote. A calibração, que dá o SLO, e o teste rodam como um agente real (autor, 14/10/2026) |
+| D25 | Só o K1 roda fora da API paga: pelo Claude Code, na assinatura do autor, com autorização do fornecedor só para este projeto; o custo e a latência dele não são medidos e o manifesto registra a versão do CLI. A calibração, que dá o SLO, e o teste rodam pela API paga, como um agente real. A API de lotes fica como alternativa (autor, 14/10/2026; a assinatura, 21/10/2026) |
 | D26 | O núcleo roda nas fases de 7.3, na ordem dela, em dias não necessariamente consecutivos: o projeto pausa entre fases enquanto o orçamento da seguinte não está garantido (autor, 14/10/2026) |
 
 ### Decisões em configuração, fechadas antes da leitura zero-shot do piloto
@@ -606,6 +610,21 @@ Antes do Estágio 0, sondagens pagas mediram o custo do professor no agente. For
 | A D10 proibia LLM fechado no núcleo | D10: só o professor |
 | O K1 sozinho era o maior gasto do núcleo | 7.3 e D25: o K1 em lote, pela metade do preço |
 | O orçamento do núcleo não está todo garantido antes do primeiro gasto | 7.3 e D26: fases com pausa entre elas, na mesma ordem |
+
+### 11.3 O que mudou na v2.3 (21/10/2026)
+
+O fornecedor negou créditos de API e autorizou, só para este projeto, que o K1 rode pela assinatura do autor. Antes do Estágio 0, o autor mediu o que isso muda, de novo só em perguntas do treino. Essas execuções também não são reaproveitadas: o K1 responde as mesmas perguntas de novo.
+
+- **O que chega ao modelo.** Um proxy local gravou a requisição do Claude Code. O prompt do CHESS chega idêntico, byte a byte. Com tudo o que se desliga desligado, sobram a linha "You are a Claude agent, built on Anthropic's Claude Agent SDK." como system prompt, um bloco de ambiente com a data e um lembrete com o e-mail da conta: 518 a 541 tokens de entrada a mais por chamada. `max_tokens`, o esforço e o raciocínio adaptativo são os da configuração.
+- **O efeito nas respostas.** Nas 5 perguntas das sondagens da v2.2, o Claude Code acertou as 5, como as duas execuções pela API. Nas chamadas com o mesmo prompt, a decisão de cada uma concorda com a API tanto quanto a API concorda consigo mesma: 97,6% a 98,8% no `filter_column`, contra 98,7% entre as duas execuções pela API, e 100% no `agent_ir` e no `agent_cg`.
+- **Uma diferença.** Em 94 chamadas do `agent_ss`, uma respondeu fora do formato do CHESS, com uma chamada de ferramenta em JSON; a pergunta seguiu sem a seleção de esquema e acertou mesmo assim. Pela API foram 0 em 40 chamadas do `agent_ss` e em 1.050 no total. O relatório conta essas falhas no K1.
+- **Sem cache.** O Claude Code põe o ponto de cache no fim da mensagem, e cada prompt do CHESS é único: cada chamada gravava o prompt inteiro no cache e quase nunca o lia. Sem cache, o K1 gasta cerca de metade do limite de uso por chamada.
+
+| Problema da v2.2 | Onde está a correção na v2.3 |
+|---|---|
+| O orçamento não cobria o K1 nem pela metade do preço | 7.3 e D25: o K1 pela assinatura do autor |
+| O Claude Code acrescenta contexto a cada chamada | 7.3 e esta seção: medido, e o log guarda só o prompt do CHESS |
+| O limite de uso da assinatura interrompe execuções longas | 7.3: o K1 pausa e continua sozinho |
 
 ---
 

@@ -22,7 +22,7 @@ does not change, and nothing on the test split runs before step 12.
      `VLLM_API_KEY`; `slm-bench-proxy-auth` holds the proxy-auth variables of `headers_env`.
 2. **A spending limit on each provider account:** a prepaid balance, or the provider's own limit
    where it has one. The API budget is **US$ 500 for the teacher** (the pre-Stage-0 probes project
-   US$ 325–465 with K1 batched, SPEC §11.2) plus the cheap alternative's. The harness has no spend cap
+   about US$ 210–350 with K1 on the author's subscription, SPEC §11.3) plus the cheap alternative's. The harness has no spend cap
    of its own; step 5 projects the spend by hand, and this limit is what stops a projection that was
    wrong. A balance below a phase's projection pauses the project before that phase (D26).
 3. **Fill every `before runs` value of `config.yaml`:**
@@ -151,10 +151,10 @@ bench judge j3 --run <B0 calib> --eval <its eval>
 | B1 on test, the calib replay, the two B1 pilot replays | 498, 200, 50 + 50 | cheap alternative |
 | B2-cheap on test | 498, one call each | cheap alternative |
 
-- **Cost:** USD per question × questions, per engine; K1 batched at half (D25). For B2 use its smoke
+- **Cost:** USD per question × questions, per engine; K1 on the subscription costs no API (D25). For B2 use its smoke
   run's cost per question. The total API spend must stay under the budget (Before Day 1, item 2).
 - **Time:** the pilot run's wall time per question (`finished_at` − `started_at`, ÷ 200) × the
-  questions left, at the same `--workers`. Batched, K1 runs at its own pace (step 6), not the pilot's.
+  questions left, at the same `--workers`. On the subscription, K1 runs at its own pace (step 6), not the pilot's.
 - **Cache:** the share of `usage.cached_input` in the input tokens. If it is zero, the provider is
   not caching: fix that before K1, since it changes every cost of the report.
 
@@ -184,17 +184,24 @@ git commit -m "The call sites observed on train and calib"
 
 Accept K1 with at least 90% of the questions answered end to end (`predictions.json`).
 
-**K1 runs at half price (SPEC D25)** through Anthropic's Message Batches API: add `--batch` to the
-`bench run` above. Only K1 may: its answers become training data and no judgment reads its latency,
-which under `--batch` is how long a batch took. The manifest records `batch: true`.
+**K1 runs on the author's Claude subscription (SPEC D25)**, through Claude Code, which Anthropic
+authorized for this project only: add `--via-claude-code` to the `bench run` above. Only K1 may: its
+answers become training data and no judgment reads its cost or latency. The manifest records the
+CLI's version in `via_claude_code`.
 
-- **It is slow per question.** Each CHESS step waits for its batch: the pre-Stage-0 probe measured 2–8
-  minutes a step, about 50 minutes a question at one worker. 834 questions need many `--workers`
-  (about 64 for half a day); the questions answered at once share their batches.
-- **First, a small `--ids` set at the chosen `--workers`:** its memory and its time per question decide
-  the full run's `--workers`.
-- **Cache reads inside a batch are best-effort.** The probe saw them hit; compare the run's
-  `cached_input` with a streamed run's before trusting the saving.
+- **In `bash`, with the API key loaded** (`source ~/.config/slm-bench/env`): the harness checks it is
+  set, and the wrapper drops it from every `claude` process, so no call goes to the paid API.
+- **`--workers 4`.** Speed is not the limit: 4 workers spent a whole usage window in about 25 minutes.
+- **The subscription's usage limit pauses the run**, which tries again every 10 minutes and goes on when
+  the window reopens (stderr prints each pause). About 5,300 calls fit in a window, so K1 (about 88,000
+  calls) takes about 17 windows: several days. It is one run; Ctrl-C stops it as any run.
+- **The same limit is the author's Claude Code.** Run K1 when you do not need it.
+- **Check after the first window:** every `calls.jsonl` line `finish_reason: stop`, and the share of
+  `parsed_ok: false` on `agent_ss` near the probes' (1 in 94, SPEC §11.3).
+
+**The fallback is the Message Batches API at half price** (`--batch` instead): about US$125 for K1. Each
+CHESS step waits for its batch, 2–8 minutes a step, so it needs many `--workers`; run a small `--ids` set
+first. Cache reads inside a batch are best-effort.
 
 ### 7. B1's few-shot k
 

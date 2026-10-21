@@ -42,8 +42,8 @@ roles:
       routing: null
     terms:                     # what allows training on the outputs, as the runner records it (README, D6)
       weights_license: "none: closed model, weights not public"
-      provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, permission from Anthropic held by the author"
-      checked_on: "2026-10-14"
+      provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, permission from Anthropic held by the author; K1 through Claude Code on the author's Claude subscription, authorized by Anthropic for this project only (SPEC D25)"
+      checked_on: "2026-10-21"
   cheap_alt:                   # cheaper open-weight generalist, no training (B1)
     model: gpt-oss-120b
     endpoint: {kind: api, base_url: null, api_key_env: CHEAP_ALT_API_KEY}  # provider: before runs
