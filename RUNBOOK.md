@@ -185,7 +185,7 @@ git commit -m "The call sites observed on train and calib"
 Accept K1 with at least 90% of the questions answered end to end (`predictions.json`).
 
 **K1 runs on the author's Claude subscription (SPEC D25)**, through Claude Code, which Anthropic
-authorized for this project only: add `--via-claude-code` to the `bench run` above. Only K1 may: its
+authorized verbally for this project only: add `--via-claude-code` to the `bench run` above. Only K1 may: its
 answers become training data and no judgment reads its cost or latency. The manifest records the
 CLI's version in `via_claude_code`.
 

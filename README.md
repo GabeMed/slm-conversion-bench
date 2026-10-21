@@ -69,7 +69,7 @@ SPEC v2.2 (D6, D10) amended the design for this before Stage 0: up to v2.1 the t
 model whose licence allows training on its outputs, and no closed LLM was in the core.
 
 SPEC v2.3 (D25) runs K1, the teacher's logs on train, through Claude Code on the author's own Claude
-subscription (`bench run --via-claude-code`), which Anthropic authorized for this project only.
+subscription (`bench run --via-claude-code`), which Anthropic authorized verbally for this project only.
 Calibration and test go through the paid API. Do not run `--via-claude-code` on your own subscription
 without the provider's permission for that use.
 
