@@ -328,8 +328,32 @@ clustering:                    # S3 (J5) and the `embed` execution
   seed: 20260930
 selection:                     # S4 (J6): higher per-call-site score on calib; tie -> smaller footprint
   tie_tolerance: 0.0           # scores closer than this are a tie
-  footprint_gb: {qwen3-8b: null, granite-4.2-8b: null}  # before runs
-  triage: []                   # before runs: the desk triage (SPEC §4 S4a), one mapping per candidate
+  # the pinned weights' size on the Hugging Face Hub (bf16 safetensors, GB = 1e9 bytes), fetched 2026-10-21
+  footprint_gb: {qwen3-8b: 16.38, granite-4.2-8b: 17.58}
+  triage:                      # the desk triage (SPEC §4 S4a): the four criteria from the model cards at the
+                               # pinned revisions, fetched 2026-10-21; the reference GPU is serving.gpu (L40S, 48 GB);
+                               # the largest teacher prompt in the pre-Stage-0 probes was 15,457 tokens
+    - candidate: qwen3-8b
+      capabilities: "instruction following and tool calling claimed by the card; thinking switchable (off here); context 32,768 native (131,072 with YaRN) >= serving.max_model_len 32,768"
+      benchmarks: "the card publishes no SQL or tool-calling score at this revision; independent evidence is J6's zero-shot on calib"
+      license: "Apache-2.0: commercial use and fine-tuning allowed"
+      footprint: "16.38 GB of bf16 weights, 8.19B parameters: fits one L40S with room for the KV cache"
+      serving: "vLLM supported (the card names vllm >= 0.8.5)"
+      result: candidate
+    - candidate: granite-4.2-8b
+      capabilities: "reasoning, tool calling and agentic workflows claimed by the card; context 131,072 native >= serving.max_model_len 32,768"
+      benchmarks: "the card publishes no SQL or tool-calling score at this revision; independent evidence is J6's zero-shot on calib"
+      license: "Apache-2.0: commercial use and fine-tuning allowed"
+      footprint: "17.58 GB of bf16 weights, 8.79B parameters: fits one L40S with room for the KV cache"
+      serving: "vLLM supported (GraniteForCausalLM)"
+      result: candidate
+    - candidate: Nemotron-3-Nano-4B
+      capabilities: "hybrid Mamba-Transformer; context 262,144 >= serving.max_model_len 32,768"
+      benchmarks: "not screened further: the reserve, promoted only if a candidate fails P-4"
+      license: "NVIDIA Nemotron Open Model License: not Apache; its terms for commercial use and fine-tuning are checked before promoting it"
+      footprint: "7.95 GB of bf16 weights: fits one L40S"
+      serving: "vLLM supported (NemotronHForCausalLM); no gate_proj, so LoRA needs its own target_modules"
+      result: reserve
 allocation:                    # S6 (J7)
   min_calls: 100               # fewest calls to count as evidence: of a cluster part on calib (J7), of a call
                                # site in both arms (A5)
