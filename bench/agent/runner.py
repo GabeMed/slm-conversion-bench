@@ -508,27 +508,48 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
     return run_dir, manifest, None if test is None else test["call_sites"]
 
 
-def check_batch(config: Dict[str, Any], arm: str, split: str) -> None:
-    """`--batch` (Anthropic's Message Batches API, half price) is for K1 only: B0 on train, whose answers
-    become training data and whose latency no judgment reads. On calib the pilot's latency is the SLO
-    (`cost.slo_from`), and on test the arms are measured as an agent runs them."""
+def check_batch(config: Dict[str, Any], arm: str, split: str, flag: str = "--batch") -> None:
+    """`--batch` (Anthropic's Message Batches API, half price) and `--via-claude-code` (the author's Claude
+    subscription, SPEC D25) are for K1 only: B0 on train, whose answers become training data and whose cost
+    and latency no judgment reads. On calib the pilot's latency is the SLO (`cost.slo_from`), and on test
+    the arms are measured as an agent runs them."""
     if (arm, split) != ("B0", "train"):
-        raise data.DataError(f"--batch is for K1 only (B0 on train), not {arm} on {split}: a batched call's "
-                             f"latency is how long its batch took")
+        raise data.DataError(f"{flag} is for K1 only (B0 on train), not {arm} on {split}: its calls' cost and "
+                             f"latency are not measurements")
     if config["roles"]["production_llm"]["endpoint"].get("protocol") != "anthropic":
-        raise data.DataError("--batch needs a production LLM on Anthropic's API (endpoint.protocol: anthropic)")
+        raise data.DataError(f"{flag} needs a production LLM on Anthropic's API (endpoint.protocol: anthropic)")
+
+
+def claude_code_version() -> str:
+    """The `claude` CLI that answers K1 under `--via-claude-code`, for the manifest."""
+    import subprocess
+    from bench.agent.claude_code_engine import CLAUDE_BIN_ENV
+    try:
+        done = subprocess.run([os.environ.get(CLAUDE_BIN_ENV) or "claude", "--version"], capture_output=True,
+                              text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise data.DataError(f"--via-claude-code needs the claude CLI: {e}") from e
+    if done.returncode != 0:
+        raise data.DataError(f"--via-claude-code needs the claude CLI: `claude --version` exited {done.returncode}")
+    return done.stdout.strip()
 
 
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
-              batch: bool = False) -> Path:
+              batch: bool = False, via_claude_code: bool = False) -> Path:
     config = load_config(config_path)
     from bench.agent import hooks
     hooks.configure(config)
     if workers < 1:
         raise data.DataError("--workers must be at least 1")
+    if batch and via_claude_code:
+        raise data.DataError("--batch and --via-claude-code are two ways of sending K1: choose one")
     if batch:
         check_batch(config, arm, split)
+    claude_code = None
+    if via_claude_code:
+        check_batch(config, arm, split, "--via-claude-code")
+        claude_code = claude_code_version()
     if arm == "B2":
         if engine not in SINGLE_CALL_ENGINES:
             raise data.DataError(f"B2 needs --engine, one of {SINGLE_CALL_ENGINES}")
@@ -552,7 +573,8 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         _check_preprocessed(config, databases)
 
     fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded,
-              "workers": workers, "batch": batch}  # like workers, not the configuration's identity
+              "workers": workers, "batch": batch,  # like workers, not the configuration's identity
+              "via_claude_code": claude_code}  # the CLI's version, or null: the Messages API
     if arm == "B2":
         fields.update({"mode": "single_call", "engine": engine})
     if arm == "B2":
@@ -564,8 +586,11 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     outcome = new_outcome()
     stopped_by = None
     from bench.agent.anthropic_engine import BATCH_ENV
+    from bench.agent.claude_code_engine import VIA_ENV
     if batch:
         os.environ[BATCH_ENV] = "1"  # read by the engine in this process and in every worker it starts
+    if via_claude_code:
+        os.environ[VIA_ENV] = "1"
     try:
         dataset = [{**questions[q], "question_id": int(q)} for q in selected]
         kwargs = {"config": config, "run_id": manifest["run_id"], "run_dir": run_dir,
@@ -583,6 +608,7 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         raise
     finally:
         os.environ.pop(BATCH_ENV, None)
+        os.environ.pop(VIA_ENV, None)
         _write_json(run_dir / "predictions.json", {q: outcome["predictions"][q] for q in selected
                                                    if q in outcome["predictions"]})  # in the run's order
         finish(manifest, run_dir, config, databases, outcome, stopped_by,

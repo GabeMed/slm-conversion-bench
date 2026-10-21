@@ -32,6 +32,9 @@ What differs from an OpenAI-compatible engine, and how it is mapped:
   batched call's latency is how long the batch took, not a measurement. A request the batch could not
   answer raises an error classified as the API's own status would be (`classified_as`); stopping the
   run, or losing the parent process, cancels the batches still open.
+- **Through Claude Code** (`bench run --via-claude-code`, K1 only; the environment variable
+  `BENCH_VIA_CLAUDE_CODE`): the same request sent by the `claude` CLI on the author's subscription
+  (`claude_code_engine`).
 """
 import hashlib
 import multiprocessing
@@ -41,6 +44,8 @@ import time
 import uuid
 from concurrent.futures import Future, wait
 from typing import Any, Dict, List, Optional
+
+from bench.agent.claude_code_engine import VIA_ENV, call as claude_code_call
 
 FINISH_REASONS = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length"}
 
@@ -155,6 +160,9 @@ class AnthropicChat:
         from langchain_core.messages import AIMessage
 
         kwargs, prefix = self.request(messages)
+        if os.environ.get(VIA_ENV):  # K1 on the subscription (claude_code_engine): Claude Code places its own cache
+            text, metadata = claude_code_call(kwargs, self.timeout)
+            return AIMessage(content=text, response_metadata=metadata)
         batched = bool(os.environ.get(BATCH_ENV))
         # the others wait for the first call of a prefix as long as it can take: a batch, up to a day
         leader = prefix is not None and _WARMUP.enter(prefix, BATCH_DEADLINE_S if batched else self.timeout)
