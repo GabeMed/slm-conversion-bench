@@ -15,6 +15,7 @@ roles:
     endpoint: {kind: llamacpp, base_url: "http://127.0.0.1:8080/v1", api_key_env: null}
     params: {max_tokens: 1024, timeout_s: 600}
     reasoning: {enabled: false}
+    provider: {name: null, quantization: null, checkpoint: null, reserve: null, routing: null}  # OpenRouter's, unset
 
 embeddings:
   provider: fake
