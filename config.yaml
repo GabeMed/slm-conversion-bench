@@ -45,18 +45,18 @@ roles:
       provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, verbal permission from Anthropic held by the author; K1 through Claude Code on the author's Claude subscription, verbally authorized by Anthropic for this project only (SPEC D25)"
       checked_on: "2026-10-21"
   cheap_alt:                   # cheaper open-weight generalist, no training (B1)
-    model: gpt-oss-120b
-    endpoint: {kind: api, base_url: null, api_key_env: CHEAP_ALT_API_KEY}  # provider: before runs
+    model: openai/gpt-oss-120b   # OpenRouter's name for it
+    endpoint: {kind: api, base_url: "https://openrouter.ai/api/v1", api_key_env: OPEN_ROUTER_API_KEY}
     params: {max_tokens: 16384, timeout_s: 900, reasoning_effort: medium}  # medium: the model's documented default
     reasoning:
       enabled: true            # gpt-oss always reasons
       forced_temperature: null
     provider:
-      name: null               # before runs
-      quantization: null       # before runs
-      checkpoint: null         # before runs: {repo, revision} of the weights served
-      reserve: null            # before runs
-      routing: null            # through OpenRouter only (as above)
+      name: CoreWeave          # through OpenRouter (2026-10-22): the cheapest provider serving the weights' native fp4
+      quantization: fp4        # MXFP4, as OpenAI published the weights
+      checkpoint: {repo: openai/gpt-oss-120b, revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a}
+      reserve: {name: Novita, base_url: "https://openrouter.ai/api/v1", quantization: fp4}  # also native fp4
+      routing: {only: [coreweave], allow_fallbacks: false, require_parameters: true, quantizations: [fp4]}
   slm_candidates:              # S4 desk triage; the reserve replaces a candidate that fails P-4
     # served under `name` (--served-model-name); adapters under their own served names
     # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
@@ -168,11 +168,13 @@ thresholds:                    # R · every verdict rule (design §6.3), fixed b
   format_tolerance_pp: 1       # T11: A5 refutes only when B4 is more than this below B0 on a call site
 
 prices:
-  as_of: "2026-10-14"          # Anthropic's list price; confirm on its pricing page before runs
+  as_of: "2026-10-22"          # Anthropic's list price (2026-10-14); OpenRouter's endpoint price for CoreWeave (2026-10-22)
   table:
     claude-sonnet-5-5: {provider: anthropic, input_per_mtok: 2.0, cached_input_per_mtok: 0.20,
                         cache_write_per_mtok: 4.0,  # a 1-hour cache write: 2 x input
                         output_per_mtok: 10.0, batch_discount: 0.5}
+    openai/gpt-oss-120b: {provider: openrouter, input_per_mtok: 0.03, cached_input_per_mtok: 0.03,
+                          output_per_mtok: 0.17, batch_discount: null}  # CoreWeave, fp4; no batch through OpenRouter
 
 embeddings:                    # retrieval inside CHESS (not an LLM call)
   provider: openai             # decided by the author (2026-09-30)
