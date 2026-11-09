@@ -677,8 +677,8 @@ def test_an_engine_that_refuses_its_configured_parameters_fails_and_its_echoed_k
         check = check_engines(engines_config(server.base_url, monkeypatch, top_p=0.9))
     assert check["status"] == FAIL and "production_llm" in check["action"] and "cheap_alt" not in check["action"]
     refused = [p for p in check["evidence"] if p["status"] == FAIL]
-    assert refused and all(p["engine"] == "production_llm" and p["kind"] == "model" for p in refused)
-    assert all("refused the configured parameters" in p["why"] and "<redacted>" in p["why"]
+    assert refused and all(p["engine"] == "production_llm" and p["kind"] == "harness" for p in refused)
+    assert all("refused the request (the configured parameters" in p["why"] and "<redacted>" in p["why"]
                and "probe-key-0001" not in p["why"] for p in refused)
 
 

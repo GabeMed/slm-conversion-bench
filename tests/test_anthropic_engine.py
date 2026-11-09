@@ -130,13 +130,73 @@ def test_the_sdks_failures_are_classified_as_every_engines():
         return anthropic.APIStatusError("x", response=httpx.Response(code, request=request), body=None)
     assert hooks.classify(status(529)) == "transport"  # overloaded
     assert hooks.classify(status(429)) == "transport"
-    assert hooks.classify(status(400)) == "model"
+    assert hooks.classify(status(400)) == "harness"  # a 400 not about the prompt's length
     assert hooks.classify(status(401)) == "harness"
     assert hooks.classify(anthropic.APIConnectionError(request=request)) == "transport"
     broke = anthropic.BadRequestError(
         "Error code: 400 - Your credit balance is too low to access the Anthropic API.",
         response=httpx.Response(400, request=request), body=None)
     assert hooks.classify(broke) == "harness"  # an empty balance stops the run, never scores the model
+
+
+def _rejected(message, code=400):
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.APIStatusError(message, response=httpx.Response(code, request=request), body=None)
+
+
+@pytest.mark.parametrize("message, code, classified", [
+    ("Error code: 400 - This API key is not scoped to a workspace, so this request must include the "
+     "anthropic-workspace-id header", 400, "harness"),
+    ("Error code: 400 - Your credit balance is too low to access the Anthropic API.", 400, "harness"),
+    ("Error code: 400 - prompt is too long: 250000 tokens > 200000 maximum", 400, "model"),
+    ("Error code: 400 - {'error': {'message': \"This model's maximum context length is 8192 tokens\", "
+     "'code': 'context_length_exceeded'}}", 400, "model"),
+    ("Error code: 400 - {'error': {'code': 'context_length_exceeded'}}", 400, "model"),
+    ("Error code: 400 - the request exceeds the available context size", 400, "model"),
+    ("Error code: 400 - invalid_request_error: temperature: unexpected", 400, "harness"),
+    ("Error code: 400 - model: claude-nope is not supported", 400, "harness"),
+    ("Error code: 413 - request too large", 413, "model"),
+])
+def test_only_a_400_about_the_prompts_length_is_the_models_failure(message, code, classified):
+    """A 400 about the account, the key, a parameter or the model name stops the run: nothing is scored."""
+    assert hooks.classify(_rejected(message, code)) == classified
+
+
+def test_an_openai_400_with_code_context_length_exceeded_is_the_models_failure():
+    import openai
+    request = httpx.Request("POST", "http://x/v1/chat/completions")
+    e = openai.BadRequestError("Error code: 400", response=httpx.Response(400, request=request),
+                               body={"code": "context_length_exceeded", "message": "too many"})
+    assert hooks.classify(e) == "model"
+
+
+def test_the_workspace_header_comes_from_the_environment(monkeypatch):
+    """A user key (sk-ant-usr-...) must name its workspace; unset, the client is built as before."""
+    def built(**over):
+        return AnthropicChat(model="m", base_url="https://api.anthropic.com", api_key="k", max_tokens=1,
+                             timeout=1.0, **over).client.default_headers
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    assert "anthropic-workspace-id" not in built()
+    assert "anthropic-workspace-id" not in built(default_headers={"x-a": "1"})
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "")
+    assert "anthropic-workspace-id" not in built()
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_01abc")
+    assert built()["anthropic-workspace-id"] == "wrkspc_01abc"
+    headers = built(default_headers={"x-a": "1"})
+    assert headers["anthropic-workspace-id"] == "wrkspc_01abc" and headers["x-a"] == "1"
+
+
+def test_the_harness_built_client_sends_the_workspace_header(claude, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_01abc")
+    hooks.configure(claude[0])  # a fresh client cache
+    client = hooks.chat_model("production_llm", 0.0).client
+    assert client.default_headers["anthropic-workspace-id"] == "wrkspc_01abc"
+
+
+def test_the_workspace_id_is_redacted_from_records(monkeypatch):
+    from bench.provenance import redact
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_01abcdefgh")
+    assert "wrkspc_01abcdefgh" not in redact("workspace wrkspc_01abcdefgh is archived", load_config(CLAUDE))
 
 
 # ---------------------------------------------------------------- prompt caching

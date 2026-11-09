@@ -46,6 +46,7 @@ from concurrent.futures import Future, wait
 from typing import Any, Dict, List, Optional
 
 from bench.agent.claude_code_engine import VIA_ENV, call as claude_code_call
+from bench.agent.rejections import is_model_rejection
 
 FINISH_REASONS = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length"}
 
@@ -129,6 +130,9 @@ def _response_metadata(message: Any) -> Dict[str, Any]:
     }
 
 
+WORKSPACE_ENV = "ANTHROPIC_WORKSPACE_ID"  # a user key (sk-ant-usr-...) must name its workspace
+
+
 class AnthropicChat:
     """The client for one Anthropic engine: `.invoke(langchain messages)` returns an `AIMessage`."""
 
@@ -142,6 +146,9 @@ class AnthropicChat:
         self.cache_breaks = list(self.model_kwargs.pop("cache_breaks", None) or [])
         self.cache_ttl = self.model_kwargs.pop("cache_ttl", None)
         self.max_retries = 0
+        workspace = os.environ.get(WORKSPACE_ENV)
+        if workspace:  # an environment credential, like the key: never in the configuration or a record
+            default_headers = {**(default_headers or {}), "anthropic-workspace-id": workspace}
         self.client = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=timeout,
                                           max_retries=0, default_headers=default_headers)
 
@@ -210,8 +217,8 @@ def _batch_error(result: Any) -> BatchCallError:
     if result.type == "errored":
         error = result.error.error
         kind = BATCH_ERROR_KINDS.get(error.type, "harness")  # billing, authentication, ...: the account's
-        if kind == "model" and "credit balance" in (error.message or "").lower():
-            kind = "harness"
+        if kind == "model" and not is_model_rejection(400, error.message or ""):
+            kind = "harness"  # a credit balance, a workspace, a parameter: only a too-long prompt is the model's
         return BatchCallError(f"batched request {error.type}: {error.message}", kind)
     return BatchCallError(f"batched request {result.type}", "transport")  # expired or canceled: send again
 

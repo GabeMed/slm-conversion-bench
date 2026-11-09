@@ -106,7 +106,9 @@ def test_a_system_prompt_is_refused(claude):
 @pytest.mark.parametrize("over, classified", [
     ({"is_error": True, "subtype": "error", "api_error_status": 429}, "transport"),
     ({"is_error": True, "subtype": "error", "api_error_status": 529}, "transport"),
-    ({"is_error": True, "subtype": "error", "api_error_status": 400}, "model"),
+    ({"is_error": True, "subtype": "error", "api_error_status": 400, "result": "prompt is too long"}, "model"),
+    ({"is_error": True, "subtype": "error", "api_error_status": 400, "result": "temperature: unexpected"}, "harness"),
+    ({"is_error": True, "subtype": "error", "api_error_status": 413}, "model"),
     ({"is_error": True, "subtype": "error", "api_error_status": 401}, "harness"),
     ({"is_error": True, "subtype": "error", "api_error_status": None}, "transport"),  # the usage limit
 ])

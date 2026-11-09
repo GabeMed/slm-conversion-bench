@@ -93,7 +93,7 @@ def test_c1_records_how_the_answer_ended_its_reasoning_the_model_that_served_it_
     cut = AIMessage(content="", response_metadata={
         "token_usage": {"prompt_tokens": 12, "completion_tokens": 4096, "completion_tokens_details": {"reasoning_tokens": 4096}},
         "finish_reason": "length", "model_name": "served-model-2026-09"})
-    rejected = openai.BadRequestError("rejected", body=None,
+    rejected = openai.BadRequestError("prompt is too long", body=None,
                                       response=httpx.Response(400, request=httpx.Request("POST", "http://x")))
     model.script = [cut, '{"table_names": ["t"]}', rejected]
     hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
@@ -431,7 +431,7 @@ def test_a_providers_error_that_echoes_a_key_is_recorded_without_it(run, monkeyp
                                      response=httpx.Response(400, request=httpx.Request("POST", "http://x")))
     model.script = []
     model.invoke = refuse
-    with pytest.raises(openai.BadRequestError):
+    with pytest.raises(hooks.HarnessError):  # a 400 not about the prompt's length: the harness's failure
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     (line,) = read_calls(calls_path)
     assert "embeddings-key-0001" not in line["error"] and "<redacted>" in line["error"]

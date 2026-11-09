@@ -40,6 +40,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bench.agent.rejections import is_model_rejection
+
 VIA_ENV = "BENCH_VIA_CLAUDE_CODE"
 CLAUDE_CODE_PARALLEL_ENV = "BENCH_CLAUDE_CODE_PARALLEL"
 CLAUDE_BIN_ENV = "BENCH_CLAUDE_BIN"  # the `claude` executable (tests point it at a fake)
@@ -104,7 +106,7 @@ def _classify_failure(answer: Dict[str, Any]) -> str:
     if isinstance(status, int):
         if status in (408, 429) or status >= 500:
             return "transport"
-        if status in (400, 413):
+        if is_model_rejection(status, str(answer.get("result") or "")):
             return "model"
         return "harness"
     return "transport"  # no status: the subscription's usage limit, or the CLI's own failure; retried
