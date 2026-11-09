@@ -7,7 +7,7 @@
 <br>
 
 <p align="center">
-  <a href="https://github.com/GabeMed/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/GabeMed/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
+  <a href="https://github.com/nest-ai-org/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/nest-ai-org/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
   <a href="https://arxiv.org/abs/2506.02153"><img alt="arXiv 2506.02153" src="https://img.shields.io/badge/arXiv-2506.02153-506959?style=flat-square&labelColor=262323"></a>
   <a href="prereg/STAGE0"><img alt="pre-registered: Stage 0" src="https://img.shields.io/badge/pre--registered-Stage%200-506959?style=flat-square&labelColor=262323"></a>
   <a href="#results"><img alt="results: pending" src="https://img.shields.io/badge/results-pending-8f8d86?style=flat-square&labelColor=262323"></a>
@@ -138,10 +138,9 @@ right and take no responsibility for how it is used with any provider.
 SPEC v2.2 (D6, D10) amended the design for this before Stage 0: up to v2.1 the teacher was an open-weight
 model whose licence allows training on its outputs, and no closed LLM was in the core.
 
-SPEC v2.3 (D25) runs K1, the teacher's logs on train, through Claude Code on the author's own Claude
-subscription (`bench run --via-claude-code`), which Anthropic authorized verbally for this project only.
-Calibration and test go through the paid API. Do not run `--via-claude-code` on your own subscription
-without the provider's permission for that use.
+`bench run --via-claude-code` sends K1, the teacher's logs on train, through Claude Code instead of the
+paid API; calibration and test always go through the API. Whoever runs it needs the provider's permission
+for that use. The details of the registered run are in SPEC.md (D25).
 
 ## Cite
 

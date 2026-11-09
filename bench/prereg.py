@@ -4,7 +4,7 @@ of the non-inferiority tests: the fixed margin Δ, and what the pilot is for.
 
 It writes the two files the test barrier reads (`bench/barrier.py` documents the format):
 `prereg/manifest.json`, and `prereg/HASH`, one line with the sha256 of the manifest's bytes; and it
-commits them on a clean tree. It never pushes: publishing is the author's act, and the barrier
+commits them on a clean tree. It never pushes: publishing is left to a person, and the barrier
 opens only once `origin/main` has the registration. `commit` is informational (design §5): each
 test execution records its own.
 

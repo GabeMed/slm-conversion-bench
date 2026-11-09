@@ -509,8 +509,8 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
 
 
 def check_batch(config: Dict[str, Any], arm: str, split: str, flag: str = "--batch") -> None:
-    """`--batch` (Anthropic's Message Batches API, half price) and `--via-claude-code` (the author's Claude
-    subscription, SPEC D25) are for K1 only: B0 on train, whose answers become training data and whose cost
+    """`--batch` (Anthropic's Message Batches API, half price) and `--via-claude-code` (a Claude subscription
+    through Claude Code, SPEC D25) are for K1 only: B0 on train, whose answers become training data and whose cost
     and latency no judgment reads. On calib the pilot's latency is the SLO (`cost.slo_from`), and on test
     the arms are measured as an agent runs them."""
     if (arm, split) != ("B0", "train"):

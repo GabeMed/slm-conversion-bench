@@ -9,7 +9,7 @@ Why patch at all: the benchmark measures which LLM calls of a real agent a small
 over. Anything in the agent that hides calls, changes models behind the harness's back, or makes a
 run irreproducible would bias that measurement. Each patch below removes one such mechanism and
 nothing else. The agent's prompts, tools, order of steps and final-SQL rule are unchanged, except
-for patch 1, a correctness fix decided by the author.
+for patch 1, a correctness fix (decision D13).
 
 ## Applied
 

@@ -1,5 +1,5 @@
 """`bench prereg` (SPEC 6.1): what it writes and commits opens the test barrier for the registered
-configuration and no other, once the author pushes it; and `bench eval` scores a test run only if
+configuration and no other, once someone pushes it; and `bench eval` scores a test run only if
 the run was made under the registration in force."""
 import hashlib
 import json
@@ -87,7 +87,7 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
     assert manifest["analysis_code"] == {rel: sha256(repo / rel) for rel in ANALYSIS}
     assert git(repo, "rev-parse", "HEAD^") == before and git(repo, "status", "--porcelain") == ""
     assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == ["prereg/HASH", "prereg/manifest.json"]
-    assert "not on origin/main" in prereg_published(CONFIG, repo)  # publishing is the author's act
+    assert "not on origin/main" in prereg_published(CONFIG, repo)  # publishing is left to a person
     git(repo, "push", "-q", "origin", "main")
     assert prereg_published(CONFIG, repo) == ""
     other = {**CONFIG, "eval": {**CONFIG["eval"], "fixed_date": "2026-10-01"}}

@@ -40,7 +40,7 @@ def main(argv=None) -> int:
                               "API, at half price; latencies are then not measurements")
     teacher.add_argument("--via-claude-code", action="store_true",
                          help="K1 only (B0 on train, Anthropic teacher): send the calls through `claude -p` on the "
-                              "author's Claude subscription (SPEC D25); costs and latencies are then not measurements")
+                              "logged-in Claude subscription (SPEC D25); costs and latencies are then not measurements")
 
     # ---- F1: replay and the call-site registry
     p = sub.add_parser("replay", help="resend the first attempt of every invocation of a B0 run to another engine")
