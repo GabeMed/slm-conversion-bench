@@ -146,7 +146,7 @@ def draw(bars: List[Dict[str, Any]], theme: str, title: str = TITLE, metric: str
          source: str = SOURCE, foot: str = FOOT, url: str = URL, pending: Optional[str] = None,
          lowest_use: str = "20%") -> str:
     P = nest.PAL[theme]
-    body = [f'<rect width="{W}" height="{H}" fill="{P["bg"]}"/>']
+    body = []  # no background: the card stands on the page it is shown on
     gid = f"g-{theme}"
     body.append(f'<defs><linearGradient id="{gid}-s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["g"][0]}"/>'
                 f'<stop offset="1" stop-color="{P["g"][1]}"/></linearGradient>'

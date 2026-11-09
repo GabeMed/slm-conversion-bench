@@ -300,7 +300,7 @@ def draw(theme: str) -> str:
         x = PAD + (i % 2) * (CW + GAP)
         y = PAD + head + (i // 2) * (CH + GAP)
         defs.append(f'<clipPath id="card-{theme}-{i}">{nest.rrect(x, y, CW, CH, 22, "")}</clipPath>')
-    d.add("<defs>" + "".join(defs) + "</defs>", nest.rrect(0, 0, W, h, 22, f'fill="{P["bg"]}"'))
+    d.add("<defs>" + "".join(defs) + "</defs>")  # no panel: the cards stand on the README's background
     # the section's head, as the site's: the pill, the title in two tones, one line under it
     pw = nest.width("How it works", 13, 400, tracking=0.26) + 30
     d.add(nest.rrect(PAD, PAD, pw, 34, 17, f'fill="{P["tile"]}" stroke="{P["line"]}" stroke-width="1"'))

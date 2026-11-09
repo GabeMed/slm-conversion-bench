@@ -1,11 +1,12 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/hero-dark.svg">
-  <img src=".github/assets/hero-light.svg" width="100%" alt="Nest. Which LLM calls of a real agent can a fine-tuned SLM take over? NVIDIA's LLM-to-SLM conversion, run end to end on a real agent: CHESS answering BIRD text-to-SQL, with the protocol fixed before any result. Stage 0 registered, results pending. The picture: the archive room of a lab in the Nest city, where a small white robot pulls an index card from a wall of card catalogs while a large machine sleeps behind it.">
+  <img src=".github/assets/hero-light.svg" width="100%" alt="Nest. Which LLM calls of a real agent can a fine-tuned SLM take over? NVIDIA's LLM-to-SLM conversion, run end to end on a real agent: CHESS answering BIRD text-to-SQL, with the protocol fixed before any result. The picture: the archive room of a lab in the Nest city, where a small white robot pulls an index card from a wall of card catalogs while a large machine sleeps behind it.">
 </picture>
 
 <p align="center">
   <a href="https://github.com/GabeMed/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/GabeMed/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
   <a href="https://arxiv.org/abs/2506.02153"><img alt="arXiv 2506.02153" src="https://img.shields.io/badge/arXiv-2506.02153-506959?style=flat-square&labelColor=262323"></a>
+  <a href="prereg/STAGE0"><img alt="pre-registered: Stage 0" src="https://img.shields.io/badge/pre--registered-Stage%200-506959?style=flat-square&labelColor=262323"></a>
   <a href="#results"><img alt="results: pending" src="https://img.shields.io/badge/results-pending-8f8d86?style=flat-square&labelColor=262323"></a>
   <a href="LICENSE"><img alt="license: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-506959?style=flat-square&labelColor=262323"></a>
 </p>
@@ -162,11 +163,9 @@ their publishers. Geist and Geist Mono, embedded in the README's images, are OFL
 ([`scripts/brand/fonts/OFL.txt`](scripts/brand/fonts/OFL.txt)); the model makers' logos in the results card are their
 owners' trademarks, used only to name the models.
 
-<br>
+<p align="center"><sub>A <a href="https://nest.technology">Nest</a> research project · <a href="https://nest.technology/benchmarks">nest.technology/benchmarks</a></sub></p>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-night.png">
   <img src=".github/assets/footer-day.png" width="100%" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
 </picture>
-
-<p align="center"><sub>A <a href="https://nest.technology">Nest</a> research project · <a href="https://nest.technology/benchmarks">nest.technology/benchmarks</a></sub></p>

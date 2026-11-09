@@ -23,11 +23,11 @@ W, H = 2048, 864
 X = 112
 WALL = 940  # the dark wall ends about here (2× art px): the words stay on it
 
-EYEBROW = "arXiv 2506.02153 · pre-registered"
+EYEBROW = "arXiv 2506.02153"
 TITLE = "Which LLM calls of a real agent can a fine-tuned SLM take over?"
 SUB = ("NVIDIA's LLM-to-SLM conversion, run end to end on a real agent: CHESS answering BIRD text-to-SQL, "
        "with the protocol fixed before any result.")
-STATUS = "Stage 0 registered · results pending"
+STATUS = ""  # none until there is a finding
 BUTTON = "nest.technology/benchmarks"
 WHITE = "#ffffff"
 
@@ -70,14 +70,15 @@ def draw(theme: str, status: str = STATUS, title: str = TITLE, sub: str = SUB, u
     sy = ty + (len(lines) - 1) * lh + 62
     for i, line in enumerate(nest.wrap(sub, WALL - X - 60, 30, 3, tracking=-0.4)):
         out.append(nest.text(X, sy + i * 42, line, 30, "rgba(255,255,255,.86)", 400, tracking=-0.4))
-    n_sub = len(nest.wrap(sub, WALL - X - 60, 30, 3, tracking=-0.4))
-    by = sy + (n_sub - 1) * 42 + 44
-    sw = nest.width(status, 28, 450, tracking=-0.3) + 48 + 30
-    out.append(nest.rrect(X, by, sw, 70, 14, 'fill="#fbfbf8"'))
-    out.append(f'<circle cx="{X + 32:.1f}" cy="{by + 35:.1f}" r="12" fill="rgba(80,105,89,.18)"/>'
-               f'<circle cx="{X + 32:.1f}" cy="{by + 35:.1f}" r="6.5" fill="#5d9f6c"/>')
-    out.append(nest.text(X + 54, by + 35 + 28 * 0.36, status, 28, "#262323", 450, tracking=-0.3))
-    label = f"Nest. {title} {sub} {status}."
+    if status:
+        n_sub = len(nest.wrap(sub, WALL - X - 60, 30, 3, tracking=-0.4))
+        by = sy + (n_sub - 1) * 42 + 44
+        sw = nest.width(status, 28, 450, tracking=-0.3) + 48 + 30
+        out.append(nest.rrect(X, by, sw, 70, 14, 'fill="#fbfbf8"'))
+        out.append(f'<circle cx="{X + 32:.1f}" cy="{by + 35:.1f}" r="12" fill="rgba(80,105,89,.18)"/>'
+                   f'<circle cx="{X + 32:.1f}" cy="{by + 35:.1f}" r="6.5" fill="#5d9f6c"/>')
+        out.append(nest.text(X + 54, by + 35 + 28 * 0.36, status, 28, "#262323", 450, tracking=-0.3))
+    label = f"Nest. {title} {sub}" + (f" {status}." if status else "")
     return nest.svg(W, H, out, label)
 
 
