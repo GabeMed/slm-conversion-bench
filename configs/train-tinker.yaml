@@ -1,0 +1,36 @@
+# `bench train --on tinker` only (bench/train_tinker.py): Thinking Machines' Tinker as an optional backend for S5.
+# NOT a `--config`: it extends nothing and is read by the Tinker path alone, so config.yaml (registered) is unchanged.
+# Not the registered protocol either: the registered run trains on Modal (RUNBOOK step 9), and using an adapter
+# trained here in it is a deviation to record in prereg/DEVIATIONS.md (SPEC §6).
+# The hyper-parameters are config.yaml's train.seed, train.lora and train.sft; this file holds only what Tinker
+# needs besides them. No prices: Tinker bills per token, and the manifest records the tokens trained.
+
+sdk_version: "0.39.0"          # = env/tinker/requirements.in; bench train refuses another installed version
+
+# Tinker's training lineup (tinker-docs.thinkingmachines.ai/tinker/models/models_and_pricing, read 2026-11-09),
+# only the bases this repository can choose: HF repo -> Tinker's id and context. Granite-4.2-8B and
+# Nemotron-3-Nano-4B are not offered, so `bench train` refuses them. The service's own list is checked again
+# when a run starts. max_context: the page says "32K", read here as 32768 (unverified; the service's
+# max_context_length, when it reports one, decides)
+models:
+  Qwen/Qwen3-8B: {tinker_id: Qwen/Qwen3-8B, max_context: 32768}
+
+# The modules create_lora_training_client's switches put LoRA on, by name (Qwen3 dense; read from tinker-cookbook
+# 0.6.1's PEFT converter, not from the service). train.lora.target_modules must be a union of these groups;
+# train_unembed (lm_head) is always off, as in the TRL path. The exported adapter's target_modules are checked.
+lora_groups:
+  train_attn: [q_proj, k_proj, v_proj, o_proj]
+  train_mlp: [gate_proj, up_proj, down_proj]
+
+# AdamW as the TRL path trains: transformers 5.18 TrainingArguments' defaults (adam_beta1, adam_beta2,
+# adam_epsilon, weight_decay, max_grad_norm), which TRL 1.14.1's SFTConfig does not change. Tinker's own
+# defaults differ (beta2 0.95, eps 1e-12, no clipping): every value is sent with each step.
+optimizer: {beta1: 0.9, beta2: 0.999, eps: 1.0e-8, weight_decay: 0.0, grad_clip_norm: 1.0}
+
+# What Tinker cannot do as the TRL run does (bench/train_tinker.py DIFFERENCES): bench train refuses until each
+# one this plan has is listed here, and records them in the manifest. Remove a name to be stopped by it.
+accept_differences: [base.revision, lora.alpha, lora.dropout, lora.init, precision, sample_order]
+
+# How long Tinker keeps the exported weights (seconds; null: never expires). Within it, re-running the same
+# command downloads them again instead of training twice.
+export_ttl_s: 604800
