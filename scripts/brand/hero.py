@@ -74,6 +74,14 @@ def motion(phase: str) -> (List[str], str):
     for x, y, c in a["flicker"]:
         out.append(f'<rect class="fl" x="{x * k:g}" y="{y * k:g}" width="{k:g}" height="{k:g}" fill="{c}" '
                    f'style="animation-duration:{rng.uniform(5, 11):.2f}s;animation-delay:-{rng.uniform(0, 11):.2f}s"/>')
+    # the robot pushes the drawer in and pulls it out again: HALF and CLOSED drawn over the open one, in steps
+    box = (898, 214, 101, 102)  # art px, the same for every state (Nest's pixel pipeline, drawer.json)
+    for state in ("half", "closed"):
+        f = ASSETS / f"hero-drawer-{phase}-{state}.png"
+        if f.exists():
+            uri = "data:image/png;base64," + base64.b64encode(f.read_bytes()).decode("ascii")
+            out.append(f'<image class="dr-{state}" x="{box[0] * k:g}" y="{box[1] * k:g}" width="{box[2] * k:g}" '
+                       f'height="{box[3] * k:g}" href="{uri}" image-rendering="optimizeSpeed" style="image-rendering:pixelated"/>')
     mote = "rgba(255,246,214,.8)" if phase == "day" else "rgba(196,218,255,.55)"
     for i, (x, y) in enumerate(a["motes"]):
         out.append(f'<rect class="m{i % 3}" x="{x * k:g}" y="{y * k:g}" width="{2 * k:g}" height="{2 * k:g}" fill="{mote}" '
@@ -87,7 +95,11 @@ def motion(phase: str) -> (List[str], str):
                      f"100%{{transform:translate({dx * u:g}px,{dy * u:g}px);opacity:0}}}}"
                      f".m{j}{{opacity:0;animation:m{j} 12s steps({steps}) infinite}}"
                      for j, (dx, dy, steps) in enumerate(((10, -26, 26), (-8, -20, 20), (14, -14, 14))))
-           + "@media (prefers-reduced-motion:reduce){.blink,.tw,.fl,.m0,.m1,.m2{animation:none;opacity:0}}")
+           + "@keyframes drh{0%,38%{opacity:0}38.01%,44%{opacity:1}44.01%,72%{opacity:0}72.01%,78%{opacity:1}78.01%,100%{opacity:0}}"
+           ".dr-half{opacity:0;animation:drh 9s infinite}"
+           "@keyframes drc{0%,44%{opacity:0}44.01%,72%{opacity:1}72.01%,100%{opacity:0}}"
+           ".dr-closed{opacity:0;animation:drc 9s infinite}"
+           + "@media (prefers-reduced-motion:reduce){.blink,.tw,.fl,.m0,.m1,.m2,.dr-half,.dr-closed{animation:none;opacity:0}}")
     return out, css
 
 
