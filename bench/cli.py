@@ -72,8 +72,8 @@ def main(argv=None) -> int:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--cluster", required=True)
     p.add_argument("--on", required=True, choices=("local", "modal", "tinker"),
-                   help="local: this machine; modal: a Modal GPU (the registered backend); tinker: Thinking "
-                        "Machines' Tinker, optional and not registered (bench/train_tinker.py)")
+                   help="local: this machine; modal: a Modal GPU (the registered configuration's); tinker: "
+                        "Thinking Machines' Tinker, Qwen3-8B only (bench/train_tinker.py)")
     p.add_argument("--tinker-config", default="configs/train-tinker.yaml",
                    help="--on tinker only: what Tinker needs besides config.yaml's train section")
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")

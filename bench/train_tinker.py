@@ -1,6 +1,9 @@
-"""`bench train --cluster <c> --on tinker`: S5 on Thinking Machines' Tinker, an optional backend, NOT the registered
-one. The registered protocol trains on Modal (`bench train --on modal`, bench/train.py); an adapter trained here
-and used in the registered run is a deviation to record in prereg/DEVIATIONS.md (SPEC §6).
+"""`bench train --cluster <c> --on tinker`: S5 on Thinking Machines' Tinker, an alternative backend to Modal (faster
+to a first adapter; Qwen3-8B only). The registered configuration trains on Modal (`--on modal`, bench/train.py), so
+an adapter trained here and used in the registered run is recorded in prereg/DEVIATIONS.md (SPEC §6).
+
+A Tinker run and a Modal run of the same plan pair by `plan_sha256` (the plan alone, whatever the backend: the
+manifest of either gives it) and differ in `where`, so their adapters can be compared.
 
 The same plan as bench/train.py (`training_plan`: the chosen base at its pinned revision, the dataset, the
 `choice` and `centroids` facts, train.seed/lora/sft from config.yaml), trained through Tinker's SDK with the
@@ -328,6 +331,15 @@ def check_adapter(out: Path, plan: Dict[str, Any], external_weights: str) -> Dic
 
 # ---------------------------------------------------------------- bench train --on tinker
 
+PLAN_KEYS = ("cluster", "slm", "base", "chat_template_kwargs", "facts", "dataset", "hyperparameters")
+
+
+def plan_sha256(manifest: Dict[str, Any]) -> str:
+    """The plan's identity from any adapter manifest (Modal, local or Tinker: write_manifest copies the whole
+    plan into each), so the runs of one plan on different backends pair."""
+    return plan_id({k: manifest[k] for k in PLAN_KEYS})
+
+
 def _pending(key: str) -> Path:
     return adapters_dir() / ".tinker" / f"{key}.json"
 
@@ -385,7 +397,7 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
              "versions": {"tinker": sdk.__version__, "tinker_cookbook": _cookbook_version()}}
     # Tinker bills tokens, not GPU-seconds: no GPU, no cost here (the tokens are in stats; no price in the repo)
     billing = {"gpu": None, "gpu_seconds": None, "cost_usd": None, "price_usd_per_s": None, "price_as_of": None}
-    code = {"commit": record["commit"], "dirty": record["dirty"], "tinker_key": key}
+    code = {"commit": record["commit"], "dirty": record["dirty"], "tinker_key": key, "plan_sha256": plan_id(plan)}
     path = write_manifest(config, plan, stats, adapter, "tinker", billing, code,
                           {"started_at": record["started_at"], "finished_at": record["finished_at"]})
     pending.unlink()
@@ -413,8 +425,9 @@ def cli(args) -> int:
     print(result["manifest"].relative_to(paths.ROOT))
     if result["collected"]:
         print("already trained on Tinker from this plan: nothing was trained")
-    print(f"trained on Tinker (not the registered backend: record it in prereg/DEVIATIONS.md if the registered run "
-          f"uses it). The server loads it from the adapters volume: modal volume put {result['volume']} "
+    print(f"plan {manifest['plan_sha256']} (a Modal run of the same plan has the same; the registered configuration "
+          f"trains on Modal: using this adapter in the registered run goes in prereg/DEVIATIONS.md). The server "
+          f"loads it from the adapters volume: modal volume put {result['volume']} "
           f"train/adapters/{args.cluster}/adapter /{manifest['adapter_sha256']}")
     if result["fact"]:
         print(f"adapters fact: {result['fact'].relative_to(paths.ROOT)} (point arms.B4.adapters and arms.B5.adapters at it)")

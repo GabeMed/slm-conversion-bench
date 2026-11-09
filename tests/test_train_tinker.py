@@ -13,7 +13,7 @@ import yaml
 
 from bench import cli, paths
 from bench.contracts import facts
-from bench.train import TrainError
+from bench.train import TrainError, plan_id, training_plan
 from bench import train_tinker as tt
 from test_train_fixtures import TINY, make_s5_repo, rows
 
@@ -283,6 +283,9 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
     assert manifest["base"] == TINY and manifest["hyperparameters"]["lora"]["dropout"] == 0.05
     assert manifest["gpu"] is None and manifest["cost_usd"] is None and manifest["gpu_seconds"] is None  # billed per token
     assert len(manifest["tinker_key"]) == 64 and "commit" in manifest
+    plan = training_plan(config, "c0")[0]
+    assert set(plan) == set(tt.PLAN_KEYS)  # the whole plan is in every manifest, whatever the backend
+    assert manifest["plan_sha256"] == tt.plan_sha256(manifest) == plan_id(plan)
     stats = manifest["stats"]
     assert stats["backend"] == "tinker" and stats["run"]["base_model"] == "tiny/Tinker-Qwen3"
     assert stats["external_weights"].startswith("tinker://run-1/external_weights/") and stats["training_run"] == "run-1"
@@ -303,6 +306,20 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
     assert len(tinker["ServiceClient"]) == 1 and "nothing was trained" in capsys.readouterr().out
     assert train(config_path, settings(tmp_path), "c1") == 0
     assert "adapters fact:" in capsys.readouterr().out
+
+
+def test_a_tinker_run_and_a_modal_run_of_the_same_plan_pair(tmp_path, monkeypatch, tinker):
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    assert train(config_path, settings(tmp_path)) == 0
+    adapters = paths.ROOT / "train" / "adapters"
+    tinker_manifest = json.loads((adapters / "c0" / "manifest.json").read_text())
+    (adapters / "c0").rename(tmp_path / "tinker-c0")  # set aside: the Modal run replaces train/adapters/c0
+    from test_train_fixtures import fake_adapter
+
+    fake_adapter("c0", config)  # as `--on modal` leaves it: the plan's keys, copied by write_manifest
+    modal_manifest = json.loads((adapters / "c0" / "manifest.json").read_text())
+    assert tt.plan_sha256(modal_manifest) == tinker_manifest["plan_sha256"]
+    assert modal_manifest["adapter_sha256"] != tinker_manifest["adapter_sha256"]
 
 
 def test_an_adapter_from_another_plan_or_backend_is_never_replaced(tmp_path, monkeypatch, tinker, capsys):

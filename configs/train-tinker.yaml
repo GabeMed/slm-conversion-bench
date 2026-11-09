@@ -1,7 +1,7 @@
-# `bench train --on tinker` only (bench/train_tinker.py): Thinking Machines' Tinker as an optional backend for S5.
-# NOT a `--config`: it extends nothing and is read by the Tinker path alone, so config.yaml (registered) is unchanged.
-# Not the registered protocol either: the registered run trains on Modal (RUNBOOK step 9), and using an adapter
-# trained here in it is a deviation to record in prereg/DEVIATIONS.md (SPEC §6).
+# `bench train --on tinker` only (bench/train_tinker.py): Thinking Machines' Tinker as an alternative backend for S5.
+# Not a `--config`: it extends nothing and is read by the Tinker path alone, so config.yaml (registered) is unchanged.
+# The registered configuration trains on Modal (RUNBOOK step 9), so an adapter trained here and used in the
+# registered run is recorded in prereg/DEVIATIONS.md (SPEC §6).
 # The hyper-parameters are config.yaml's train.seed, train.lora and train.sft; this file holds only what Tinker
 # needs besides them. No prices: Tinker bills per token, and the manifest records the tokens trained.
 

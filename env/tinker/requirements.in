@@ -1,4 +1,4 @@
-# `bench train --on tinker` (bench/train_tinker.py), optional and not the registered backend: Thinking Machines'
+# `bench train --on tinker` (bench/train_tinker.py), the alternative training backend: Thinking Machines'
 # Tinker SDK, and tinker-cookbook for its PEFT export (weights.download, weights.build_lora_adapter). The packages
 # env/train also has (torch, transformers, huggingface-hub, ...) are held to env/train's pins, so the tokenizer
 # that builds the Tinker datums is the one the TRL path tokenizes with. Kept apart from env/train: its lock is part
