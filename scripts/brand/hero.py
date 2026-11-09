@@ -10,6 +10,8 @@ else. Only the words are written here.
 """
 import argparse
 import base64
+import json
+import random
 import sys
 from pathlib import Path
 from typing import List
@@ -36,6 +38,59 @@ def art_uri(phase: str) -> str:
     return "data:image/png;base64," + base64.b64encode((ASSETS / f"hero-art-{phase}.png").read_bytes()).decode("ascii")
 
 
+def runs(cells):
+    """Pixels as rectangles: the runs of each row."""
+    rows = {}
+    for x, y in sorted(cells, key=lambda c: (c[1], c[0])):
+        rows.setdefault(y, []).append(x)
+    out = []
+    for y, xs in rows.items():
+        start = prev = xs[0]
+        for x in xs[1:] + [None]:
+            if x is not None and x == prev + 1:
+                prev = x
+                continue
+            out.append((start, y, prev - start + 1))
+            if x is not None:
+                start = prev = x
+    return out
+
+
+def motion(phase: str) -> (List[str], str):
+    """What moves (hero-anim.json, found in the art): the robot blinks; stars and the river's highlights go out and
+    back; at night lit windows dim now and then; dust drifts in the light. Art px are 2 units here."""
+    path = ASSETS / "hero-anim.json"
+    if not path.exists():
+        return [], ""
+    a = json.loads(path.read_text())[phase]
+    k = W / json.loads(path.read_text())["w"]
+    rng = random.Random(9)
+    out = [f'<g class="blink" fill="{a["lid"]}">']
+    out += [f'<rect x="{x * k:g}" y="{y * k:g}" width="{n * k:g}" height="{k:g}"/>' for x, y, n in runs(a["eyes"])]
+    out.append("</g>")
+    for x, y, c in a["twinkle"]:
+        out.append(f'<rect class="tw" x="{x * k:g}" y="{y * k:g}" width="{k:g}" height="{k:g}" fill="{c}" '
+                   f'style="animation-duration:{rng.uniform(2.2, 4.8):.2f}s;animation-delay:-{rng.uniform(0, 5):.2f}s"/>')
+    for x, y, c in a["flicker"]:
+        out.append(f'<rect class="fl" x="{x * k:g}" y="{y * k:g}" width="{k:g}" height="{k:g}" fill="{c}" '
+                   f'style="animation-duration:{rng.uniform(5, 11):.2f}s;animation-delay:-{rng.uniform(0, 11):.2f}s"/>')
+    mote = "rgba(255,246,214,.8)" if phase == "day" else "rgba(196,218,255,.55)"
+    for i, (x, y) in enumerate(a["motes"]):
+        out.append(f'<rect class="m{i % 3}" x="{x * k:g}" y="{y * k:g}" width="{2 * k:g}" height="{2 * k:g}" fill="{mote}" '
+                   f'style="animation-duration:{rng.uniform(9, 15):.2f}s;animation-delay:-{rng.uniform(0, 15):.2f}s"/>')
+    u = k  # one art px
+    css = ("@keyframes blink{0%,93%,100%{opacity:0}94%,96.5%{opacity:1}}"
+           ".blink{opacity:0;animation:blink 5.4s infinite}"
+           "@keyframes tw{0%,62%,100%{opacity:0}74%,86%{opacity:1}}.tw{opacity:0;animation:tw 3s infinite}"
+           "@keyframes fl{0%,80%,100%{opacity:0}84%,92%{opacity:.85}}.fl{opacity:0;animation:fl 7s infinite}"
+           + "".join(f"@keyframes m{j}{{0%{{transform:translate(0,0);opacity:0}}15%,80%{{opacity:1}}"
+                     f"100%{{transform:translate({dx * u:g}px,{dy * u:g}px);opacity:0}}}}"
+                     f".m{j}{{opacity:0;animation:m{j} 12s steps({steps}) infinite}}"
+                     for j, (dx, dy, steps) in enumerate(((10, -26, 26), (-8, -20, 20), (14, -14, 14))))
+           + "@media (prefers-reduced-motion:reduce){.blink,.tw,.fl,.m0,.m1,.m2{animation:none;opacity:0}}")
+    return out, css
+
+
 def glass(x: float, y: float, w: float, h: float, r: float) -> str:
     """The site's .glass-pill: a light veil, an inner edge."""
     return (nest.rrect(x, y, w, h, r, 'fill="rgba(255,255,255,.12)"') +
@@ -46,6 +101,8 @@ def draw(theme: str, status: str = STATUS, title: str = TITLE, sub: str = SUB, u
     uri = uri or art_uri("night" if theme == "dark" else "day")
     out: List[str] = [f'<image x="0" y="0" width="{W}" height="{H}" preserveAspectRatio="none" href="{uri}" '
                       f'image-rendering="optimizeSpeed" style="image-rendering:pixelated"/>']
+    moving, css = motion("night" if theme == "dark" else "day")
+    out += moving
     # the top, as the site's header: the brand at the left, the button at the right
     out.append(nest.lockup(X, 112, 50, WHITE))
     bs = 28
@@ -79,7 +136,7 @@ def draw(theme: str, status: str = STATUS, title: str = TITLE, sub: str = SUB, u
                    f'<circle cx="{X + 32:.1f}" cy="{by + 35:.1f}" r="6.5" fill="#5d9f6c"/>')
         out.append(nest.text(X + 54, by + 35 + 28 * 0.36, status, 28, "#262323", 450, tracking=-0.3))
     label = f"Nest. {title} {sub}" + (f" {status}." if status else "")
-    return nest.svg(W, H, out, label)
+    return nest.svg(W, H, out, label, css=css)
 
 
 def main(argv=None) -> int:

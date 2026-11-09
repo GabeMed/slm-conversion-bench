@@ -1,7 +1,10 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/hero-dark.svg">
-  <img src=".github/assets/hero-light.svg" width="100%" alt="Nest. Which LLM calls of a real agent can a fine-tuned SLM take over? NVIDIA's LLM-to-SLM conversion, run end to end on a real agent: CHESS answering BIRD text-to-SQL, with the protocol fixed before any result. The picture: the archive room of a lab in the Nest city, where a small white robot pulls an index card from a wall of card catalogs while a large machine sleeps behind it.">
+  <img src=".github/assets/hero-light.svg" width="100%" align="top" alt="Nest. Which LLM calls of a real agent can a fine-tuned SLM take over? NVIDIA's LLM-to-SLM conversion, run end to end on a real agent: CHESS answering BIRD text-to-SQL, with the protocol fixed before any result. The picture: the archive room of a lab in the Nest city, where a small white robot pulls an index card from a wall of card catalogs while a large machine sleeps behind it.">
 </picture>
+
+<br>
+<br>
 
 <p align="center">
   <a href="https://github.com/GabeMed/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/GabeMed/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
@@ -167,5 +170,5 @@ owners' trademarks, used only to name the models.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-night.png">
-  <img src=".github/assets/footer-day.png" width="100%" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
+  <img src=".github/assets/footer-day.png" width="100%" align="top" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
 </picture>

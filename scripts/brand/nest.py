@@ -151,8 +151,8 @@ def logo(name: Optional[str], theme: str) -> Optional[str]:
     return None
 
 
-def svg(w: float, h: float, body: List[str], label: str, fonts: bool = True) -> str:
-    style = f"<style>{fonts_css()}</style>" if fonts else ""
+def svg(w: float, h: float, body: List[str], label: str, fonts: bool = True, css: str = "") -> str:
+    style = f"<style>{fonts_css() if fonts else ''}{css}</style>" if (fonts or css) else ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:g} {h:g}" width="{w:g}" height="{h:g}" '
             f'role="img" aria-label="{escape(label, {chr(34): "&quot;"})}"><title>{escape(label)}</title>{style}'
             + "".join(body) + "</svg>\n")
