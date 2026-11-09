@@ -142,7 +142,7 @@ def _chip(P: Dict[str, Any], theme: str, mk: Optional[str], letter: str, x: floa
     return "".join(out)
 
 
-def draw(bars: List[Dict[str, Any]], theme: str, title: str = TITLE, metric: str = "Execution accuracy",
+def draw(bars: List[Dict[str, Any]], theme: str, title: str = "", metric: str = "Execution accuracy",
          source: str = SOURCE, foot: str = FOOT, url: str = URL, pending: Optional[str] = None,
          lowest_use: str = "20%") -> str:
     P = nest.PAL[theme]
@@ -156,19 +156,22 @@ def draw(bars: List[Dict[str, Any]], theme: str, title: str = TITLE, metric: str
     body.append(nest.lockup(X, 64, 28, P["ink"]))
     body.append(nest.text(R, 62, nest.fit(source.upper(), CW - 280, 15, weight=500, mono=True, tracking=1.4), 15, P["dim"],
                           500, mono=True, anchor="end", tracking=1.4))
-    # the title: up to 2 lines, smaller if it does not fit
-    ts, lines = 40, []
-    while ts >= 30:
-        lines = nest.wrap(title, CW, ts, 3, weight=450, tracking=-ts * 0.032)
-        if len(lines) <= 2:
-            break
-        ts -= 2
-    if len(lines) > 2:
-        lines = nest.wrap(title, CW, ts, 2, weight=450, tracking=-ts * 0.032)
-    lh, ty = round(ts * 1.14), 112 + round(ts * 0.8)
-    for i, line in enumerate(lines):
-        body.append(nest.text(X, ty + i * lh, line, ts, P["ink"], 450, tracking=round(-ts * 0.032, 2)))
-    top = ty + (len(lines) - 1) * lh + 46
+    # the title (the finding, when there is one): up to 2 lines, smaller if it does not fit; none, the chart moves up
+    if title:
+        ts, lines = 40, []
+        while ts >= 30:
+            lines = nest.wrap(title, CW, ts, 3, weight=450, tracking=-ts * 0.032)
+            if len(lines) <= 2:
+                break
+            ts -= 2
+        if len(lines) > 2:
+            lines = nest.wrap(title, CW, ts, 2, weight=450, tracking=-ts * 0.032)
+        lh, ty = round(ts * 1.14), 112 + round(ts * 0.8)
+        for i, line in enumerate(lines):
+            body.append(nest.text(X, ty + i * lh, line, ts, P["ink"], 450, tracking=round(-ts * 0.032, 2)))
+        top = ty + (len(lines) - 1) * lh + 46
+    else:
+        top = 118
     # the chart card
     cy = top + 8
     ch = 618 - cy
@@ -225,7 +228,7 @@ def draw(bars: List[Dict[str, Any]], theme: str, title: str = TITLE, metric: str
         note = f"Pre-registered. Under each model: cost per correct query (SLMs: full to {lowest_use} use)."
     body.append(nest.text(X, 652, nest.fit(note, CW - 330, 18, tracking=-0.2), 18, P["dim"], 400, tracking=-0.2))
     body.append(nest.text(R, 652, url, 18, P["ink"], 500, mono=True, anchor="end", tracking=-0.2))
-    label = title + ". " + ", ".join(f"{b['arm']} {b['name']}, {b['variant']}: {b['txt']}" + (f" ({b['cost']} per correct query)" if b["cost"] else "")
+    label = (title + ". " if title else "Results. ") + ", ".join(f"{b['arm']} {b['name']}, {b['variant']}: {b['txt']}" + (f" ({b['cost']} per correct query)" if b["cost"] else "")
                                      for b in bars)
     return nest.svg(W, H, body, label)
 
@@ -253,7 +256,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--pending", action="store_true", help="no result yet: the arms, with no numbers")
     ap.add_argument("--config", help="the configuration that names the models (default: config.yaml)")
     ap.add_argument("--out", help="where to write results-{light,dark}.svg (default: the report's directory)")
-    ap.add_argument("--title", default=TITLE, help="the headline (the finding, once there is one)")
+    ap.add_argument("--title", default="", help="a headline over the chart (the finding, once there is one); none by default")
     ap.add_argument("--arms", nargs="+", choices=ARMS, help="the arms to draw, in order (default: every arm reported)")
     args = ap.parse_args(argv)
     config = load_config(args.config)

@@ -38,7 +38,7 @@ The protocol is [`SPEC.md`](SPEC.md) (in Portuguese), fixed before any result.
 
 [`RUNBOOK.md`](RUNBOOK.md) is the order of the two days, command by command.
 
-<a id="how-it-works"></a>
+## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/how-dark.svg">
@@ -56,9 +56,11 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B4** | the SLM fine-tuned with LoRA, one adapter per cluster, in every call site | the paper's V1 in its strongest form |
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
-The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). LoRA (r 16) is trained with TRL and
-PEFT on Modal's L40S GPUs (the registered configuration) or on Thinking Machines' Tinker (`bench train --on tinker`,
-Qwen3-8B only), and the adapters are served with vLLM.
+The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
+trained with TRL and PEFT on Modal's L40S GPUs (the registered configuration) or on
+[Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API (`bench train --on tinker`, Qwen3-8B
+only), and served with vLLM. Both backends write the same adapter and a manifest that pairs runs of the same plan, so
+a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 ## Results
 
@@ -169,6 +171,6 @@ owners' trademarks, used only to name the models.
 <p align="center"><sub>A <a href="https://nest.technology">Nest</a> research project · <a href="https://nest.technology/benchmarks">nest.technology/benchmarks</a></sub></p>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-night.png">
-  <img src=".github/assets/footer-day.png" width="100%" align="top" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-dark.svg">
+  <img src=".github/assets/footer-light.svg" width="100%" align="top" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
 </picture>

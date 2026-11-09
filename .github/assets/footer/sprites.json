@@ -1,0 +1,79 @@
+{
+ "loop_s": 40.8,
+ "scale": 2,
+ "frame": [
+  1536,
+  512
+ ],
+ "background": {
+  "day": "footer-bg-day.png",
+  "night": "footer-bg-night.png"
+ },
+ "rule": "x(t) = x0 + dir*speed*t, wrapped into [exit_x, enter_x): when x < exit_x, x += wrap_px (2x px; t in s from the start of the loop, which is frame 0 of the background)",
+ "sprites": [
+  {
+   "name": "banner",
+   "file": {
+    "day": "banner-day.png",
+    "night": "banner-night.png"
+   },
+   "w": 286,
+   "h": 46,
+   "y": 74,
+   "x0": 616,
+   "dir": -1,
+   "enter_x": 1538,
+   "exit_x": -288,
+   "wrap_px": 1826,
+   "speed": 44.7549
+  },
+  {
+   "name": "blimp1",
+   "file": {
+    "day": "blimp1-day.png",
+    "night": "blimp1-night.png"
+   },
+   "w": 92,
+   "h": 60,
+   "y": 72,
+   "x0": 198,
+   "dir": -1,
+   "enter_x": 1538,
+   "exit_x": -94,
+   "wrap_px": 1632,
+   "speed": 40.0
+  },
+  {
+   "name": "blimp2",
+   "file": {
+    "day": "blimp2-day.png",
+    "night": "blimp2-night.png"
+   },
+   "w": 70,
+   "h": 56,
+   "y": 72,
+   "x0": 1308,
+   "dir": -1,
+   "enter_x": 1538,
+   "exit_x": -72,
+   "wrap_px": 1610,
+   "speed": 39.4608
+  },
+  {
+   "name": "blimp3",
+   "file": {
+    "day": "blimp3-day.png",
+    "night": "blimp3-night.png"
+   },
+   "w": 44,
+   "h": 32,
+   "y": 84,
+   "x0": 1078,
+   "dir": -1,
+   "enter_x": 1538,
+   "exit_x": -46,
+   "wrap_px": 1584,
+   "speed": 38.8235
+  }
+ ]
+}
