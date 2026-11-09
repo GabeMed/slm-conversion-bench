@@ -74,11 +74,11 @@ def _b0_runs(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
 
 
 def _hours(manifest: Dict[str, Any]) -> Optional[float]:
-    try:
-        started, finished = (datetime.fromisoformat(manifest[k]) for k in ("started_at", "finished_at"))
-    except (KeyError, TypeError, ValueError):
-        return None
-    return (finished - started).total_seconds() / 3600
+    """The time the run worked: the sum of its sessions for a resumed run (`bench run --resume-from`),
+    whose started_at is that of its last session only."""
+    from bench.agent.resume import working_seconds
+    seconds = working_seconds(manifest)
+    return None if seconds is None else seconds / 3600
 
 
 def check_agent_runs(config: Dict[str, Any]) -> Dict[str, Any]:

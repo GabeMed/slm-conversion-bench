@@ -536,10 +536,19 @@ def claude_code_version() -> str:
 
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
-              batch: bool = False, via_claude_code: bool = False) -> Path:
+              batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None) -> Path:
+    """One agent run. With `resume_from`, a new run that copies what a failed or interrupted run
+    answered and answers only the questions left (`bench.agent.resume`)."""
     config = load_config(config_path)
     from bench.agent import hooks
     hooks.configure(config)
+    source = None
+    if resume_from is not None:
+        from bench.agent import resume
+        if ids or limit:
+            raise data.DataError("--resume-from answers the source run's questions: no --ids or --limit")
+        source = resume.load_source(resume_from, split)
+        ids = source["question_ids"]
     if workers < 1:
         raise data.DataError("--workers must be at least 1")
     if batch and via_claude_code:
@@ -581,9 +590,26 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         key_envs = used_key_envs(config, [engine], retrieval=False)
     else:
         key_envs = used_key_envs(config, possible_engines(arm, config), retrieval=True)
+    if source is not None:
+        resume.check_same(source, {
+            "arm": arm, "split": split, "engine": fields.get("engine"), "mode": fields.get("mode"),
+            "facts": facts, "few_shot_k": recorded["few_shot_k"], "few_shot_sha256": recorded["few_shot_sha256"],
+            "batch": batch, "config_sha256": config_sha256(config),
+            "splits_sha256": data.sha256_file(paths.SPLITS), "data_manifest_sha256": data.sha256_file(paths.DATA_MANIFEST)})
+        if bool(source.get("via_claude_code")) != via_claude_code:
+            raise data.DataError(f"{resume_from} was {'' if source.get('via_claude_code') else 'not '}sent through "
+                                 f"Claude Code: a resumed run must be the same run")
+        complete = resume.complete_questions(source)
+        source_calls = resume.read_calls_of(source)  # before the run exists: an invalid source leaves none
     run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
                                           split, fields, key_envs)
     outcome = new_outcome()
+    remaining = selected
+    if source is not None:
+        manifest.update(resume.manifest_fields(source, complete, resume.copy_source(source, source_calls, run_dir, complete, outcome)))
+        resume.open_session(manifest, workers)
+        _write_manifest(run_dir, manifest, config)
+        remaining = [q for q in selected if q not in set(complete)]
     stopped_by = None
     from bench.agent.anthropic_engine import BATCH_ENV
     from bench.agent.claude_code_engine import VIA_ENV
@@ -592,14 +618,16 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     if via_claude_code:
         os.environ[VIA_ENV] = "1"
     try:
-        dataset = [{**questions[q], "question_id": int(q)} for q in selected]
+        dataset = [{**questions[q], "question_id": int(q)} for q in remaining]
         kwargs = {"config": config, "run_id": manifest["run_id"], "run_dir": run_dir,
                   "db_root": paths.bird_root(config), "allowed_call_sites": allowed}
         if arm == "B2":
             execute, kwargs = _execute_single_call, {**kwargs, "engine": engine}
         else:
             execute, kwargs = _execute_questions, {**kwargs, "arm": arm, "few_shot": few_shot}
-        if workers == 1:
+        if not dataset:  # a resumed run whose source had answered every question: nothing to answer
+            pass
+        elif workers == 1:
             execute(dataset=dataset, outcome=outcome, **kwargs)
         else:
             _in_workers(execute, kwargs, worker_parts(dataset, workers), outcome)
@@ -649,6 +677,8 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
         "c1_errors": c1_errors, **fields, "harness_errors": outcome["harness_errors"],
         "databases_changed": changed,
     })
+    if manifest.get("sessions"):  # a resumed run: this session ends with the run
+        manifest["sessions"][-1]["finished_at"] = manifest["finished_at"]
     if manifest["split"] == "test":
         manifest["unregistered_call_sites"] = outcome.get("unregistered_call_sites", [])
     _write_manifest(run_dir, manifest, config)
