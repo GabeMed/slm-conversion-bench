@@ -15,7 +15,7 @@ from bench import cli, paths
 from bench.contracts import facts
 from bench.train import TrainError, plan_id, training_plan
 from bench import train_tinker as tt
-from test_train_fixtures import TINY, make_s5_repo, rows
+from test_train_fixtures import TINY, make_s5_repo, rows, save
 
 SHIPPED = paths.ROOT / "configs" / "train-tinker.yaml"
 ASSISTANT, END = 900, 901  # the fake template's assistant header and end of message
@@ -51,7 +51,7 @@ class Future:
         return self.value
 
 
-def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None):
+def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None, close_error=None, step_error=None):
     """The parts of `tinker` bench/train_tinker.py uses, recording every call in `calls`."""
 
     class TrainingClient:
@@ -60,6 +60,8 @@ def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None)
 
         def forward_backward(self, datums, loss_fn):
             calls["forward_backward"].append((datums, loss_fn))
+            if step_error:
+                raise step_error
             loss = -sum(w * -1.0 for d in datums for w in d.loss_fn_inputs["weights"])  # logprob -1 per token
             return Future(types.SimpleNamespace(metrics={"loss:sum": loss}))
 
@@ -85,6 +87,8 @@ def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None)
 
         def close(self, status):
             calls["close"].append(status)
+            if close_error:
+                raise close_error
             return Future(None)
 
     class Datum:
@@ -97,12 +101,15 @@ def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None)
         AdamParams=lambda **params: params)
 
 
-def fake_export(calls, alpha=16, modules=("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")):
-    def export(external_weights, plan, out: Path):
-        calls["export"].append(external_weights)
+def fake_export(calls, alpha=16, modules=("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"),
+                error=None):
+    def export(external_weights, base_dir, out: Path):
+        calls["export"].append((external_weights, base_dir))
+        if error:
+            raise error
         out.mkdir()
         (out / "adapter_config.json").write_text(json.dumps({
-            "peft_type": "LORA", "base_model_name_or_path": "/hf-cache/snapshots/x", "r": plan["hyperparameters"]["lora"]["r"],
+            "peft_type": "LORA", "base_model_name_or_path": base_dir, "r": 8,
             "lora_alpha": alpha, "lora_dropout": 0.0, "target_modules": list(modules), "rank_pattern": {}, "alpha_pattern": {}}))
         (out / "adapter_model.safetensors").write_bytes(b"weights of " + external_weights.encode())
     return export
@@ -112,11 +119,19 @@ def fake_export(calls, alpha=16, modules=("q_proj", "k_proj", "v_proj", "o_proj"
 def tinker(monkeypatch):
     """A fake SDK, tokenizer and export in place; returns the calls they record."""
     calls = {k: [] for k in ("ServiceClient", "create_lora_training_client", "forward_backward", "optim_step",
-                             "save_weights_external", "close", "export")}
+                             "save_weights_external", "close", "export", "base_snapshot")}
     monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(calls))
     monkeypatch.setattr(tt, "_tokenizer", lambda plan: FakeTokenizer())
+    monkeypatch.setattr(tt, "base_snapshot", lambda plan: calls["base_snapshot"].append(plan["base"]) or "/hf/base")
     monkeypatch.setattr(tt, "export_adapter", fake_export(calls))
     return calls
+
+
+def full_repo(tmp_path, monkeypatch):
+    """The S5 repository with no train.sft.max_steps (a full run: 2 epochs of 4 rows, 2 rows a step, 4 steps)."""
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    config["train"]["sft"]["max_steps"] = None
+    return config_path, save(config, config_path)
 
 
 def train(config_path, settings_path, cluster="c0"):
@@ -253,29 +268,30 @@ def test_malformed_settings_are_refused(tmp_path, change, match):
 # ---------------------------------------------------------------- the command, against a fake service
 
 def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp_path, monkeypatch, tinker, capsys):
-    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    config_path, config = full_repo(tmp_path, monkeypatch)
     assert train(config_path, settings(tmp_path)) == 0
     adapter = paths.ROOT / "train" / "adapters" / "c0" / "adapter"
     assert sorted(p.name for p in adapter.iterdir()) == ["adapter_config.json", "adapter_model.safetensors"]
     adapter_config = json.loads((adapter / "adapter_config.json").read_text())
     assert adapter_config["base_model_name_or_path"] == TINY["repo"] and adapter_config["revision"] == TINY["revision"]
+    assert tinker["base_snapshot"] == [TINY]  # what the converter reads, fetched before anything is paid for
 
-    # the service: rank and seed from config.yaml, no unembedding; 2 steps (max_steps) of 2 rows, the loss
+    # the service: rank and seed from config.yaml, no unembedding; 4 steps (2 epochs) of 2 rows, the loss
     # weighted to the step's completion-token mean, AdamW with the TRL path's defaults at the scheduled rate
     assert tinker["create_lora_training_client"] == [{"base_model": "tiny/Tinker-Qwen3", "rank": 8,
                                                      "seed": config["train"]["seed"], "train_attn": True,
                                                      "train_mlp": True, "train_unembed": False}]
-    assert [len(d) for d, _ in tinker["forward_backward"]] == [2, 2]
+    assert [len(d) for d, _ in tinker["forward_backward"]] == [2, 2, 2, 2]
     assert {loss for _, loss in tinker["forward_backward"]} == {"cross_entropy"}
     for datums, _ in tinker["forward_backward"]:
         assert sum(w for d in datums for w in d.loss_fn_inputs["weights"]) == pytest.approx(1)
         assert all(len(d.model_input) == len(d.loss_fn_inputs["target_tokens"]) == len(d.loss_fn_inputs["weights"])
                    for d in datums)
     sched = tt.schedule(4, config["train"]["sft"])
-    assert [p["learning_rate"] for p in tinker["optim_step"]] == [tt.learning_rate(s, sched, 2e-4) for s in (0, 1)]
+    assert [p["learning_rate"] for p in tinker["optim_step"]] == [tt.learning_rate(s, sched, 2e-4) for s in range(4)]
     assert all(p["beta2"] == 0.999 and p["eps"] == 1e-8 and p["grad_clip_norm"] == 1.0 for p in tinker["optim_step"])
-    assert tinker["close"] == ["success"] and tinker["export"] == ["tinker://run-1/external_weights/" +
-                                                                    tinker["save_weights_external"][0][0]]
+    assert tinker["close"] == ["success"] and tinker["export"] == [("tinker://run-1/external_weights/" +
+                                                                     tinker["save_weights_external"][0][0], "/hf/base")]
 
     manifest = json.loads((adapter.parent / "manifest.json").read_text())
     assert manifest["where"] == "tinker" and manifest["adapter_sha256"] == facts.sha256_dir(adapter)
@@ -289,10 +305,11 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
     stats = manifest["stats"]
     assert stats["backend"] == "tinker" and stats["run"]["base_model"] == "tiny/Tinker-Qwen3"
     assert stats["external_weights"].startswith("tinker://run-1/external_weights/") and stats["training_run"] == "run-1"
-    assert stats["global_step"] == 2 and stats["examples_seen"] == 4 and not stats["collected_from_earlier_run"]
+    assert stats["global_step"] == 4 and stats["examples_seen"] == 8 and not stats["collected_from_earlier_run"]
+    assert not stats["probe"]
     assert stats["train_loss"] == pytest.approx(1)  # the fake's log-probability is -1 on every token: mean NLL 1
     assert stats["tokens_seen"] == sum(len(d.model_input) for ds, _ in tinker["forward_backward"] for d in ds)
-    assert stats["completion_tokens_seen"] == stats["completion_tokens"]  # 4 rows, once each
+    assert stats["completion_tokens_seen"] == 2 * stats["completion_tokens"]  # 4 rows, once each epoch
     assert stats["trained"] == {"r": 8, "lora_alpha": 16, "target_modules": sorted(config["train"]["lora"]["target_modules"]),
                                 "rank_pattern": {}, "alpha_pattern": {}}
     assert "lora.dropout" in stats["run"]["differences"] and stats["versions"]["tinker"] == "0.39.0"
@@ -300,6 +317,7 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
     assert not list((paths.ROOT / "train" / "adapters" / ".tinker").iterdir())  # the pending record is cleared
     out = capsys.readouterr().out
     assert "prereg/DEVIATIONS.md" in out and f"/{manifest['adapter_sha256']}" in out
+    assert "bench.train_tinker.plan_sha256 gives the same" in out
 
     # again: nothing is trained, the adapter is kept, the set is registered once c1 has one too
     assert train(config_path, settings(tmp_path)) == 0
@@ -309,7 +327,7 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
 
 
 def test_a_tinker_run_and_a_modal_run_of_the_same_plan_pair(tmp_path, monkeypatch, tinker):
-    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    config_path, config = full_repo(tmp_path, monkeypatch)
     assert train(config_path, settings(tmp_path)) == 0
     adapters = paths.ROOT / "train" / "adapters"
     tinker_manifest = json.loads((adapters / "c0" / "manifest.json").read_text())
@@ -323,7 +341,7 @@ def test_a_tinker_run_and_a_modal_run_of_the_same_plan_pair(tmp_path, monkeypatc
 
 
 def test_an_adapter_from_another_plan_or_backend_is_never_replaced(tmp_path, monkeypatch, tinker, capsys):
-    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)
+    config_path, config = full_repo(tmp_path, monkeypatch)
     from test_train_fixtures import fake_adapter
 
     fake_adapter("c0", config)
@@ -333,7 +351,7 @@ def test_an_adapter_from_another_plan_or_backend_is_never_replaced(tmp_path, mon
 
 def test_an_adapter_with_another_alpha_is_not_installed_and_the_trained_weights_are_collected_later(
         tmp_path, monkeypatch, tinker, capsys):
-    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    config_path, _ = full_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(tt, "export_adapter", fake_export(tinker, alpha=32))
     assert train(config_path, settings(tmp_path)) == 2
     assert "'lora_alpha': 32" in capsys.readouterr().err
@@ -383,3 +401,120 @@ def test_the_settings_pin_the_sdk_version_env_tinker_installs():
                 if "==" in line and not line.startswith("#"))
     assert tt.load_settings(str(SHIPPED))["sdk_version"] == pins["tinker"]
     assert f"\ntinker=={pins['tinker']}\n" in (env / "requirements.lock").read_text()
+
+
+# ---------------------------------------------------------------- after the paid run: nothing lost, nothing paid twice
+
+def pending_records():
+    root = paths.ROOT / "train" / "adapters" / ".tinker"
+    return sorted(root.iterdir()) if root.is_dir() else []
+
+
+def test_a_failed_close_after_the_export_neither_loses_it_nor_fails_the_run(tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(tinker, close_error=ConnectionError("gone")))
+    assert train(config_path, settings(tmp_path)) == 0
+    assert "closing the Tinker session (success) failed: ConnectionError: gone" in capsys.readouterr().err
+    assert (paths.ROOT / "train" / "adapters" / "c0" / "manifest.json").is_file()
+
+
+def test_a_failed_close_does_not_hide_the_error_that_ended_the_run(tmp_path, monkeypatch, tinker):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(tinker, close_error=ConnectionError("gone"),
+                                                     step_error=RuntimeError("the step failed")))
+    with pytest.raises(RuntimeError, match="the step failed"):
+        train(config_path, settings(tmp_path))
+    assert tinker["close"] == ["errored"] and not pending_records()
+
+
+def test_the_export_is_recorded_before_the_session_closes(tmp_path, monkeypatch, tinker):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    seen = []
+    sdk = fake_sdk(tinker)
+    close = sdk.ServiceClient.close
+
+    def close_and_look(self, status):
+        seen.append([json.loads(p.read_text()) for p in pending_records()])
+        return close(self, status)
+
+    monkeypatch.setattr(sdk.ServiceClient, "close", close_and_look)
+    monkeypatch.setattr(tt, "_sdk", lambda: sdk)
+    assert train(config_path, settings(tmp_path)) == 0
+    [[record]] = seen
+    assert record["stats"]["external_weights"].startswith("tinker://run-1/external_weights/")
+    assert record["expires_at"] > record["exported_at"]  # export_ttl_s after it
+
+
+def test_a_failed_download_or_conversion_says_how_to_retry_and_a_retry_does_not_train_again(
+        tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(tt, "export_adapter", fake_export(tinker, error=OSError("No space left on device")))
+    assert train(config_path, settings(tmp_path)) == 2
+    err = capsys.readouterr().err
+    [pending] = pending_records()
+    assert "could not be downloaded or converted (OSError: No space left on device)" in err
+    assert f"recorded in train/adapters/.tinker/{pending.name}" in err and "delete that file to train again" in err
+    assert not (paths.ROOT / "train" / "adapters" / "c0").exists()
+    monkeypatch.setattr(tt, "export_adapter", fake_export(tinker))
+    assert train(config_path, settings(tmp_path)) == 0
+    assert len(tinker["ServiceClient"]) == 1 and not pending_records()
+
+
+def test_expired_weights_are_named_and_the_way_to_train_again_given(tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(tt, "export_adapter", fake_export(tinker, error=OSError("x")))
+    assert train(config_path, settings(tmp_path)) == 2
+    [pending] = pending_records()
+    record = json.loads(pending.read_text())
+    pending.write_text(json.dumps({**record, "expires_at": "2026-01-01T00:00:00+00:00"}))
+    capsys.readouterr()
+    assert train(config_path, settings(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert "expired on Tinker at 2026-01-01T00:00:00+00:00 (export_ttl_s)" in err
+    assert f"delete train/adapters/.tinker/{pending.name} to train again" in err
+    assert len(tinker["export"]) == 1 and len(tinker["ServiceClient"]) == 1  # neither downloaded nor trained
+    pending.unlink()  # as the message says: the next run trains again
+    monkeypatch.setattr(tt, "export_adapter", fake_export(tinker))
+    assert train(config_path, settings(tmp_path)) == 0 and len(tinker["ServiceClient"]) == 2
+
+
+def test_what_the_export_needs_fails_before_anything_is_paid_for(tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+
+    def no_base(plan):
+        raise TrainError("cannot fetch the base")
+
+    monkeypatch.setattr(tt, "base_snapshot", no_base)
+    assert train(config_path, settings(tmp_path)) == 2
+    assert "cannot fetch the base" in capsys.readouterr().err and not tinker["ServiceClient"]
+
+
+def test_a_missing_cookbook_is_refused_by_name(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tinker_cookbook", None)
+    with pytest.raises(tt.TinkerMissing, match="install env/tinker"):
+        tt.base_snapshot({"base": dict(TINY)})
+
+
+# ---------------------------------------------------------------- the probe
+
+def test_a_run_cut_short_is_a_probe_kept_apart_and_never_registered(tmp_path, monkeypatch, tinker, capsys):
+    _, config_path, config = make_s5_repo(tmp_path, monkeypatch)  # train.sft.max_steps: 2
+    assert train(config_path, settings(tmp_path)) == 0
+    assert train(config_path, settings(tmp_path), "c1") == 0
+    out = capsys.readouterr().out
+    adapters = paths.ROOT / "train" / "adapters"
+    assert "a probe (train.sft.max_steps)" in out and "adapters fact" not in out
+    assert not (adapters / "c0").exists() and not (adapters / "c1").exists()
+    manifest = json.loads((adapters / ".probe" / "c0" / "manifest.json").read_text())
+    assert manifest["stats"]["probe"] and manifest["stats"]["global_step"] == 2
+    # its first step runs at learning rate 0 (warm-up), which the probe shows the service accepts or not
+    assert tinker["optim_step"][0]["learning_rate"] == 0
+    from bench.train import register_adapters
+
+    assert register_adapters(config) == (None, ["c0", "c1"])
+    # the full run is not in its way, and the probe again only collects
+    config["train"]["sft"]["max_steps"] = None
+    full = tmp_path / "full.yaml"
+    save(config, full)
+    assert train(full, settings(tmp_path)) == 0 and (adapters / "c0" / "manifest.json").is_file()
+    assert train(config_path, settings(tmp_path)) == 0 and "nothing was trained" in capsys.readouterr().out

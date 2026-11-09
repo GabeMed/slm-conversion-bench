@@ -2,8 +2,9 @@
 to a first adapter; Qwen3-8B only). The registered configuration trains on Modal (`--on modal`, bench/train.py), so
 an adapter trained here and used in the registered run is recorded in prereg/DEVIATIONS.md (SPEC §6).
 
-A Tinker run and a Modal run of the same plan pair by `plan_sha256` (the plan alone, whatever the backend: the
-manifest of either gives it) and differ in `where`, so their adapters can be compared.
+A Tinker run and a Modal run of the same plan pair by `plan_sha256` (the plan alone, whatever the backend: a
+Tinker manifest records it, and `plan_sha256(manifest)` computes it from either) and differ in `where`, so their
+adapters can be compared.
 
 The same plan as bench/train.py (`training_plan`: the chosen base at its pinned revision, the dataset, the
 `choice` and `centroids` facts, train.seed/lora/sft from config.yaml), trained through Tinker's SDK with the
@@ -23,7 +24,8 @@ optimizer loop on this machine:
     export      `save_weights_external`, downloaded and converted to a PEFT adapter by tinker-cookbook's
                 `weights.download` and `weights.build_lora_adapter` (adapter_config.json +
                 adapter_model.safetensors, what vLLM's `--lora-modules` and HF PEFT load); the converter reads
-                the base's tensor names, so the base at its pinned revision is downloaded into the HF cache
+                the base's safetensors, so the base at its pinned revision is downloaded into the HF cache, with
+                the cookbook checked, before anything is paid for (`base_snapshot`)
 
 What Tinker cannot honour is never silent: configs/train-tinker.yaml's `accept_differences` must name every
 difference this plan has (`differences`), and the manifest records them; a hyper-parameter this module does not
@@ -32,19 +34,25 @@ installed.
 
 Writes what bench/train.py writes (train/adapters/<cluster>/adapter/ and manifest.json, `where: tinker`), and
 registers the `adapters` fact the same way. It never replaces an existing adapter. Tinker bills per token: the
-manifest records the tokens trained, and no price (none is kept in the repository). Once training has exported
-its weights, the Tinker path is kept in train/adapters/.tinker/<key>.json, so running the same command again
-downloads them instead of training twice; with an adapter installed from the same plan it only registers.
+manifest records the tokens trained, and no price (none is kept in the repository). The moment the export
+answers, its Tinker path and expiry are kept in train/adapters/.tinker/<key>.json, so running the same command
+again downloads them instead of training twice (until they expire, which it says); with an adapter installed
+from the same plan it only registers. Not covered: a run interrupted before the export starts over (no mid-run
+checkpoint), and two processes on the same cluster are not locked against each other.
+
+A plan with train.sft.max_steps set (the one-step probe of RUNBOOK step 9) is a probe: its adapter goes to
+train/adapters/.probe/<cluster>/, never served nor registered, and never in the way of the full run.
 
 `tinker` and `tinker-cookbook` are imported only here (env/tinker); `bench train --on modal|local` never needs them.
 """
 import json
 import math
 import random
+import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -52,10 +60,11 @@ import yaml
 
 from bench import paths
 from bench.contracts.facts import sha256_dir
-from bench.train import (TrainError, _install_adapter, _token_ids, _write_json, adapters_dir, check_rows,
+from bench.train import (TrainError, _token_ids, _write_json, adapters_dir, check_rows,
                          parse_dataset, plan_id, register_adapters, training_plan, write_manifest)
 
 SETTINGS = "configs/train-tinker.yaml"
+PROBES = ".probe"  # train/adapters/.probe/<cluster>: runs cut short by train.sft.max_steps
 # every hyper-parameter of config.yaml's train section this module honours or records; another one refuses
 HYPERPARAMETERS = {"seed", "precision", "lora", "sft"}
 LORA = {"r", "alpha", "dropout", "target_modules"}
@@ -244,8 +253,11 @@ def _tokenizer(plan: Dict[str, Any]) -> Any:
 
 
 def train_on_tinker(sdk: Any, run: Dict[str, Any], encoded: List[Dict[str, List]], sched: Dict[str, int],
-                    sft: Dict[str, Any], name: str, ttl_s: Optional[int], log: Callable[[str], None]) -> Dict[str, Any]:
-    """The optimizer loop, client side; returns the exported weights' Tinker path and the run's numbers."""
+                    sft: Dict[str, Any], name: str, ttl_s: Optional[int], log: Callable[[str], None],
+                    exported: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    """The optimizer loop, client side; returns the exported weights' Tinker path and the run's numbers, which it
+    hands to `exported` as soon as the export answers (before the session closes: what was paid for is recorded
+    whatever happens next)."""
     service = sdk.ServiceClient(user_metadata={"created_by": "bench train", "adapter": name})
     status = "errored"
     try:
@@ -280,28 +292,50 @@ def train_on_tinker(sdk: Any, run: Dict[str, Any], encoded: List[Dict[str, List]
             if (step + 1) % sft["logging_steps"] == 0 or step + 1 == sched["total_steps"]:
                 log(f"step {step + 1}/{sched['total_steps']}: loss {losses[-1]:.4f}, lr {lr:.3g}")
         train_seconds = time.perf_counter() - started
-        exported = client.save_weights_external(name, ttl_seconds=ttl_s).result().path
+        stats = {"external_weights": client.save_weights_external(name, ttl_seconds=ttl_s).result().path,
+                 "training_run": str(info.model_id), "global_step": len(losses), "examples_seen": examples,
+                 "train_loss": sum(losses) / len(losses) if all(map(math.isfinite, losses)) else None,
+                 "train_seconds": round(train_seconds, 3),
+                 # what was run through the model (Tinker bills per token) and what the loss fell on
+                 "tokens_seen": tokens, "completion_tokens_seen": completion_tokens,
+                 "tokens_per_second": round(tokens / train_seconds, 3) if train_seconds else None}
+        exported(stats)
         status = "success"
     finally:
-        service.close(status).result()
-    return {"external_weights": exported, "training_run": str(info.model_id), "global_step": len(losses),
-            "examples_seen": examples,
-            "train_loss": sum(losses) / len(losses) if all(map(math.isfinite, losses)) else None, "train_seconds": round(train_seconds, 3),
-            # what was run through the model (Tinker bills per token) and what the loss fell on
-            "tokens_seen": tokens, "completion_tokens_seen": completion_tokens,
-            "tokens_per_second": round(tokens / train_seconds, 3) if train_seconds else None}
+        # best effort: a failed close must neither lose a recorded export nor hide the error that ended the run
+        try:
+            service.close(status).result()
+        except Exception as e:  # noqa: BLE001 (any SDK or transport error)
+            log(f"closing the Tinker session ({status}) failed: {type(e).__name__}: {e}")
+    return stats
 
 
-def export_adapter(external_weights: str, plan: Dict[str, Any], out: Path) -> None:
-    """Tinker's exported weights to a PEFT adapter at `out`, for the base at its pinned revision."""
-    from huggingface_hub import snapshot_download
+def base_snapshot(plan: Dict[str, Any]) -> str:
+    """What the export's converter reads, fetched before anything is paid for, so a missing package, a full disk
+    or the HF Hub fails here and not after training. The converter (tinker-cookbook 0.6.1,
+    weights._artifacts.get_model_state_keys) opens the base's *.safetensors files themselves for their tensor
+    names, with no fallback to model.safetensors.index.json: the whole base at its pinned revision (~16 GB for
+    Qwen3-8B, kept in the HF cache)."""
+    try:
+        from huggingface_hub import snapshot_download
+        from tinker_cookbook import weights  # noqa: F401 (the export's converter: missing, it fails here)
+    except ImportError as e:
+        raise TinkerMissing(f"`--on tinker` exports through tinker-cookbook, which is missing ({e}): install "
+                            "env/tinker (uv pip install -r env/tinker/requirements.lock)") from None
+    try:
+        return snapshot_download(plan["base"]["repo"], revision=plan["base"]["revision"],
+                                 allow_patterns=["*.json", "*.safetensors"])
+    except Exception as e:  # noqa: BLE001 (network, auth, disk: all refuse before training)
+        raise TrainError(f"cannot fetch {plan['base']['repo']}@{plan['base']['revision']}, which the export's "
+                         f"converter reads: {type(e).__name__}: {e}") from None
+
+
+def export_adapter(external_weights: str, base_dir: str, out: Path) -> None:
+    """Tinker's exported weights to a PEFT adapter at `out`, for the base in `base_dir` (`base_snapshot`)."""
     from tinker_cookbook import weights
 
     with tempfile.TemporaryDirectory(dir=out.parent) as work:
         raw = weights.download(tinker_path=external_weights, output_dir=str(Path(work) / "raw"))
-        # the converter matches the adapter's keys to the base's tensor names, read from its safetensors
-        base_dir = snapshot_download(plan["base"]["repo"], revision=plan["base"]["revision"],
-                                     allow_patterns=["*.json", "*.safetensors"])
         weights.build_lora_adapter(base_model=base_dir, adapter_path=raw, output_path=str(out))
 
 
@@ -357,17 +391,21 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
     sched = schedule(len(rows), plan["hyperparameters"]["sft"])
     run["schedule"] = sched
     key = plan_id({**plan, "run": run})
-    target = adapters_dir() / cluster
+    # a run cut short (train.sft.max_steps, e.g. the one-step probe) is a probe: kept apart, never served or
+    # registered (register_adapters compares no hyper-parameters), and never in the way of the full run
+    probe = bool(plan["hyperparameters"]["sft"].get("max_steps"))
+    target = (adapters_dir() / PROBES if probe else adapters_dir()) / cluster
+    where = rel(target)
+    result = {"probe": probe, "volume": config["modal"]["volumes"]["adapters"]}
     if (target / "manifest.json").is_file():
         manifest = json.loads((target / "manifest.json").read_text())
         if manifest.get("tinker_key") != key or sha256_dir(target / "adapter") != manifest.get("adapter_sha256"):
-            raise TrainError(f"train/adapters/{cluster} holds another adapter (where: {manifest.get('where')}); "
+            raise TrainError(f"{where} holds another adapter (where: {manifest.get('where')}); "
                              "`--on tinker` never replaces one: move it away first")
-        fact, missing = register_adapters(config)  # already trained on this plan: nothing to spend
-        return {"manifest": target / "manifest.json", "fact": fact, "missing": missing, "collected": True,
-                "volume": config["modal"]["volumes"]["adapters"]}
+        fact, missing = (None, []) if probe else register_adapters(config)  # already trained: nothing to spend
+        return {**result, "manifest": target / "manifest.json", "fact": fact, "missing": missing, "collected": True}
     if target.exists():
-        raise TrainError(f"train/adapters/{cluster} exists without a manifest: move it away first")
+        raise TrainError(f"{where} exists without a manifest: move it away first")
 
     sdk = _sdk()
     if sdk.__version__ != settings["sdk_version"]:
@@ -378,22 +416,42 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
     collected = pending.is_file()
     if collected:  # trained and exported by an earlier run of the same plan: download it again
         record = json.loads(pending.read_text())
+        expires = record.get("expires_at")
+        if expires and datetime.now(timezone.utc) >= datetime.fromisoformat(expires):
+            raise TrainError(f"the weights {record['stats']['external_weights']} expired on Tinker at {expires} "
+                             f"(export_ttl_s): delete {rel(pending)} to train again")
+        base_dir = base_snapshot(plan)
         log(f"collecting {record['stats']['external_weights']} (trained {record['started_at']})")
     else:
+        base_dir = base_snapshot(plan)  # before anything is paid for
         started = datetime.now(timezone.utc).isoformat()
-        stats = train_on_tinker(sdk, run, encoded, sched, plan["hyperparameters"]["sft"], f"{cluster}-{key[:12]}",
-                                settings.get("export_ttl_s"), log)
-        record = {"stats": stats, "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
-                  **git_state()}
-        pending.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(pending, record)
+        ttl = settings.get("export_ttl_s")
+
+        def keep(stats: Dict[str, Any]) -> None:  # the moment the export answers: a re-run collects, never retrains
+            now = datetime.now(timezone.utc)
+            record.update(stats=stats, started_at=started, finished_at=now.isoformat(), exported_at=now.isoformat(),
+                          expires_at=(now + timedelta(seconds=ttl)).isoformat() if ttl else None, **git_state())
+            pending.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(pending, record)
+
+        record: Dict[str, Any] = {}
+        train_on_tinker(sdk, run, encoded, sched, plan["hyperparameters"]["sft"], f"{cluster}-{key[:12]}", ttl, log,
+                        keep)
+    external = record["stats"]["external_weights"]
     with tempfile.TemporaryDirectory(dir=adapters_dir()) as work:
         converted = Path(work) / "adapter"
-        export_adapter(record["stats"]["external_weights"], plan, converted)
-        trained = check_adapter(converted, plan, record["stats"]["external_weights"])
-        adapter = _install_adapter(cluster, converted)
+        try:
+            export_adapter(external, base_dir, converted)
+        except Exception as e:  # noqa: BLE001 (the cookbook's download and conversion errors, disk, network)
+            raise TrainError(f"the trained weights {external} could not be downloaded or converted "
+                             f"({type(e).__name__}: {e}); they are recorded in {rel(pending)}: run the same command "
+                             f"again to retry, or delete that file to train again") from None
+        trained = check_adapter(converted, plan, external)
+        target.mkdir(parents=True)
+        shutil.move(str(converted), str(target / "adapter"))
+    adapter = target / "adapter"
     stats = {**record["stats"], **token_stats, "backend": "tinker", "device": "tinker", "run": run,
-             "trained": trained, "collected_from_earlier_run": collected,
+             "trained": trained, "collected_from_earlier_run": collected, "probe": probe,
              "versions": {"tinker": sdk.__version__, "tinker_cookbook": _cookbook_version()}}
     # Tinker bills tokens, not GPU-seconds: no GPU, no cost here (the tokens are in stats; no price in the repo)
     billing = {"gpu": None, "gpu_seconds": None, "cost_usd": None, "price_usd_per_s": None, "price_as_of": None}
@@ -401,9 +459,12 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
     path = write_manifest(config, plan, stats, adapter, "tinker", billing, code,
                           {"started_at": record["started_at"], "finished_at": record["finished_at"]})
     pending.unlink()
-    fact, missing = register_adapters(config)
-    return {"manifest": path, "fact": fact, "missing": missing, "collected": False,
-            "volume": config["modal"]["volumes"]["adapters"]}
+    fact, missing = (None, []) if probe else register_adapters(config)
+    return {**result, "manifest": path, "fact": fact, "missing": missing, "collected": False}
+
+
+def rel(path: Path) -> str:
+    return str(path.relative_to(paths.ROOT))
 
 
 def _cookbook_version() -> Optional[str]:
@@ -425,10 +486,14 @@ def cli(args) -> int:
     print(result["manifest"].relative_to(paths.ROOT))
     if result["collected"]:
         print("already trained on Tinker from this plan: nothing was trained")
-    print(f"plan {manifest['plan_sha256']} (a Modal run of the same plan has the same; the registered configuration "
-          f"trains on Modal: using this adapter in the registered run goes in prereg/DEVIATIONS.md). The server "
-          f"loads it from the adapters volume: modal volume put {result['volume']} "
-          f"train/adapters/{args.cluster}/adapter /{manifest['adapter_sha256']}")
+    if result["probe"]:
+        print(f"a probe (train.sft.max_steps): kept apart, neither served nor registered; check its manifest's "
+              f"stats.trained (rank, alpha, modules) before a full run")
+        return 0
+    print(f"plan {manifest['plan_sha256']} (bench.train_tinker.plan_sha256 gives the same from the manifest of a "
+          f"Modal run of this plan; the registered configuration trains on Modal: using this adapter in the "
+          f"registered run goes in prereg/DEVIATIONS.md). The server loads it from the adapters volume: modal volume "
+          f"put {result['volume']} train/adapters/{args.cluster}/adapter /{manifest['adapter_sha256']}")
     if result["fact"]:
         print(f"adapters fact: {result['fact'].relative_to(paths.ROOT)} (point arms.B4.adapters and arms.B5.adapters at it)")
     else:
