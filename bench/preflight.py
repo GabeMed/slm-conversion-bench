@@ -347,8 +347,8 @@ def probe_engine(config: Dict[str, Any], engine: str, temperature: float) -> Dic
             if kind == "transport" and attempt < attempts:
                 hooks._backoff(attempt)
                 continue
-            reading = {"model": "refused the configured parameters", "transport": "did not answer",
-                       "harness": "refused the request"}[kind]
+            reading = {"model": "rejected the probe as longer than its context", "transport": "did not answer",
+                       "harness": "refused the request (the configured parameters, model, key or account)"}[kind]
             return {**found, "status": FAIL, "kind": kind,
                     "why": redact(f"{reading}: {type(e).__name__}: {e}", config)}  # provider text may echo a key
     problems = []

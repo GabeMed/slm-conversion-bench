@@ -349,15 +349,15 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
 
 # ---------------------------------------------------------------- calls
 
-MODEL_REJECTIONS = (400, 413)  # the request this engine rejects (a prompt longer than its context)
 
 
 def classify(exception: BaseException) -> str:
     """What an exception of the model call is: `transport` (retried: 408, 429, >= 500, and any timeout
     or lost connection, whichever layer raised it: the OpenAI client's own, httpx's, Python's), `model`
-    (the closed set of the model's failures: the engine rejects this request, 400 or 413), or
-    `harness` (everything else: another status, a response that does not validate, anything
-    unrecognised)."""
+    (the closed set of the model's failures: the engine rejects this request as longer than its
+    context, 413 or a 400 that says so, `rejections.is_model_rejection`), or `harness` (everything
+    else: any other 400, such as a workspace, key, billing or credit state, an invalid parameter or
+    model; another status, a response that does not validate, anything unrecognised)."""
     import httpx
     import openai
     if getattr(exception, "classified_as", None) in ("transport", "model", "harness"):
@@ -371,12 +371,13 @@ def classify(exception: BaseException) -> str:
     if isinstance(exception, connection + (httpx.TransportError, TimeoutError, ConnectionError)):
         return "transport"  # APIConnectionError includes APITimeoutError
     if isinstance(exception, status):
+        from bench.agent.rejections import is_model_rejection
         code = exception.status_code
-        if code == 400 and "credit balance" in str(exception).lower():
-            return "harness"  # Anthropic's empty balance is a 400: the account's state, never the model's failure
         if code in (408, 429) or code >= 500:
             return "transport"
-        if code in MODEL_REJECTIONS:
+        body = getattr(exception, "body", None)
+        detail = " ".join(str(part) for part in (exception, getattr(exception, "code", None), body) if part)
+        if is_model_rejection(code, detail):
             return "model"
     return "harness"
 

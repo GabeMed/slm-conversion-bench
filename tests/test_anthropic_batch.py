@@ -136,6 +136,11 @@ def test_the_first_call_of_a_cached_prefix_is_a_batch_of_its_own(batch):
 @pytest.mark.parametrize("kind, message, classified", [
     ("invalid_request_error", "prompt is too long", "model"),
     ("invalid_request_error", "Your credit balance is too low", "harness"),
+    ("invalid_request_error", "prompt is too long: 250000 tokens > 200000 maximum", "model"),
+    ("invalid_request_error", "temperature: unexpected", "harness"),
+    ("invalid_request_error", "max_tokens: 64000 > 32000, which is the maximum allowed number of output tokens",
+     "harness"),
+    ("invalid_request_error", "This API key is not scoped to a workspace", "harness"),
     ("billing_error", "no", "harness"),
     ("overloaded_error", "no", "transport"),
     ("api_error", "no", "transport"),

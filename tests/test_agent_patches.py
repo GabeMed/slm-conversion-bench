@@ -31,8 +31,8 @@ USAGE = {"prompt_tokens": 12, "completion_tokens": 3}
 REQUEST = httpx.Request("POST", "http://engine.example/v1/chat/completions")
 
 
-def status_error(cls, code):
-    return cls(f"Error code: {code}", response=httpx.Response(code, request=REQUEST), body=None)
+def status_error(cls, code, message=""):
+    return cls(f"Error code: {code}{message}", response=httpx.Response(code, request=REQUEST), body=None)
 
 
 class ScriptedModel:
@@ -130,9 +130,12 @@ def validation_error():
     lambda: status_error(openai.ConflictError, 409),
     lambda: status_error(openai.UnprocessableEntityError, 422),
     lambda: status_error(openai.APIStatusError, 418),
+    lambda: status_error(openai.BadRequestError, 400, " - this request must include the anthropic-workspace-id header"),
+    lambda: status_error(openai.BadRequestError, 400, " - temperature: unexpected"),
     validation_error,
     lambda: ValueError("nothing the classification knows"),
-], ids=["401", "402", "403", "404", "409", "422", "other-status", "validation", "unrecognised"])
+], ids=["401", "402", "403", "404", "409", "422", "other-status", "400-workspace", "400-parameter", "validation",
+        "unrecognised"])
 def test_every_other_api_or_client_error_is_the_harnesss_failure(calls, make):
     calls["model"] = ScriptedModel([make()])
     with pytest.raises(hooks.HarnessError):
@@ -143,7 +146,7 @@ def test_every_other_api_or_client_error_is_the_harnesss_failure(calls, make):
 
 @pytest.mark.parametrize("code,cls", [(400, openai.BadRequestError), (413, openai.APIStatusError)])
 def test_only_a_rejected_request_is_the_models_failure_and_is_not_retried(calls, code, cls):
-    calls["model"] = ScriptedModel([status_error(cls, code)])  # e.g. the prompt exceeds this engine's context
+    calls["model"] = ScriptedModel([status_error(cls, code, " - prompt is too long")])  # longer than its context
     with pytest.raises(openai.APIStatusError):
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     assert calls["model"].calls == 1 and calls["sleeps"] == [] and hooks.take_harness_errors() == []
