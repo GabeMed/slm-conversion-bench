@@ -46,9 +46,15 @@ APPLY = _apply_script()
 
 
 def shipped_runpod_section():
-    """The `runpod` section configs/runpod.patch.yaml adds to the shipped config.yaml."""
-    text = APPLY.patched_text((REPO / "config.yaml").read_text(), yaml.safe_load((REPO / "configs" / "runpod.patch.yaml").read_text()))
-    return yaml.safe_load(text)["runpod"]
+    """The `runpod` section of the shipped config.yaml (configs/runpod.patch.yaml is applied to it)."""
+    return yaml.safe_load((REPO / "config.yaml").read_text())["runpod"]
+
+
+def unpatched_text():
+    """The shipped config.yaml before configs/runpod.patch.yaml: each replacement undone, last first."""
+    patch = yaml.safe_load(PATCH.read_text())
+    undo = [{**change, "old": change["new"], "new": change["old"]} for change in reversed(patch["replace"])]
+    return APPLY.patched_text((REPO / "config.yaml").read_text(), {"replace": undo})
 
 
 # ---------------------------------------------------------------- the REST client
@@ -213,6 +219,13 @@ def test_the_bodies_sent_and_the_fields_read_are_the_openapi_specs():
     assert {"uptime", "ports"} <= set(schemas["PodRuntime"]["properties"])
     assert {"private", "public", "ip"} <= set(schemas["PodRuntimePort"]["properties"])
     assert {"nextCursor", "hasNextPage"} <= set(schemas["Pagination"]["properties"])
+    from fixtures.fake_runpod import FakeRunPod as Fake
+    fake = Fake()
+    try:  # the data center catalog the fake answers, and the field setup reads to skip a data center
+        assert list(openapi_validator("ListDataCentersResponse").iter_errors({"dataCenters": fake.datacenters})) == []
+    finally:
+        fake.close()
+    assert "networkVolumeTypes" in schemas["DataCenter"]["required"]
     assert {"id", "name", "size", "dataCenter"} <= set(schemas["NetworkVolume"]["properties"])
     assert "networkVolumes" in schemas["ListNetworkVolumesResponse"]["properties"]
     assert {"id", "dataCenters"} <= set(schemas["GpuType"]["properties"])
@@ -331,6 +344,34 @@ def test_setup_creates_the_volume_where_the_gpu_is_and_keeps_it(runpod_repo):
     assert State().read()["volume"]["id"] == volume["id"] and len(world.fake.volumes) == 1
     again = rserve.setup(world.provider())
     assert again["existing"] is True and again["id"] == volume["id"] and len(world.fake.volumes) == 1
+
+
+def test_setup_passes_over_a_data_center_without_network_volumes_for_the_next_one_with_the_gpu(runpod_repo):
+    """CA-MTL-1 has the most L40S but holds no volumes: EU-RO-1, as available, is next."""
+    world = runpod_repo
+    world.fake.datacenters[0]["networkVolumeTypes"] = []
+    volume = rserve.setup(world.provider())
+    assert volume["datacenter"] == "EU-RO-1" and list(world.fake.volumes.values())[0]["dataCenter"] == "EU-RO-1"
+    assert State().read()["volume"]["skipped_without_volumes"] == ["CA-MTL-1"]
+
+
+def test_setup_fails_naming_the_way_out_when_no_data_center_with_the_gpu_holds_volumes(runpod_repo):
+    world = runpod_repo
+    for d in world.fake.datacenters:
+        if d["id"] != "US-KS-2":
+            d["networkVolumeTypes"] = []
+    with pytest.raises(RunPodError, match=r"without network volumes \(CA-MTL-1, EU-RO-1, US-TX-3\): try later, or "
+                                          r"set runpod.datacenter.*volumes: US-KS-2"):
+        rserve.setup(world.provider())
+    assert not world.fake.volumes and State().read()["volume"] is None
+
+
+def test_a_pinned_data_center_is_used_as_is_without_asking_the_data_center_catalog(runpod_repo):
+    world = runpod_repo
+    world.config["runpod"]["datacenter"] = "US-TX-3"
+    volume = rserve.setup(world.provider())
+    assert volume["datacenter"] == "US-TX-3" and State().read()["volume"]["skipped_without_volumes"] == []
+    assert not [r for r in world.fake.requests if r["path"] == "/v2/catalog/datacenters"]
 
 
 def test_setup_adopts_a_volume_of_the_same_name_and_honours_a_pinned_data_center(runpod_repo):
@@ -699,7 +740,8 @@ def test_training_time_reads_tinker_manifests_when_training_on_tinker(tmp_path, 
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
     count_tokens(monkeypatch, {"c0": 90_000, "c1": 100})
     trained("c1", config, where="tinker", gpu="none", tokens_per_second=50.0)
-    assert check_training_time(config)["status"] == PENDING  # the registered backend, Modal: no Modal run yet
+    config.pop("runpod", None)  # no runpod section: the registered backend, Modal
+    assert check_training_time(config)["status"] == PENDING  # no Modal run yet
     config["runpod"] = {"train_backend": "tinker"}
     measured = check_training_time(config)
     assert measured["status"] == PASS and measured["evidence"]["backend"] == "tinker"
@@ -903,13 +945,14 @@ def test_a_lock_whose_pod_no_longer_runs_is_removed_from_the_local_side(runpod_r
 
 # ---------------------------------------------------------------- the config patch
 
-def test_the_config_patch_applies_to_the_shipped_config_and_says_what_j8_reads(tmp_path):
+def test_the_config_patch_turns_the_pre_patch_config_into_the_shipped_one_and_says_what_j8_reads(tmp_path):
     from bench.judge import j8
 
     config_path = tmp_path / "config.yaml"
-    config_path.write_text((REPO / "config.yaml").read_text())
+    config_path.write_text(unpatched_text())
+    assert "runpod" not in yaml.safe_load(config_path.read_text())
     shown = APPLY.apply(REPO / "configs" / "runpod.patch.yaml", config_path)
-    assert shown["written"] is False and config_path.read_text() == (REPO / "config.yaml").read_text()
+    assert shown["written"] is False and config_path.read_text() == unpatched_text()
     assert "+  unauthenticated: true" in shown["diff"] and shown["sha256_before"] != shown["sha256_after"]
     APPLY.apply(REPO / "configs" / "runpod.patch.yaml", config_path, write=True)
     from bench.contracts.config import config_sha256, load_config
@@ -922,6 +965,7 @@ def test_the_config_patch_applies_to_the_shipped_config_and_says_what_j8_reads(t
     for entry in config["roles"]["slm_candidates"]:
         assert rserve.check_endpoint(config, settings, entry["name"]) == settings["local_ports"][entry["name"]]
     assert "# Modal's price before this deviation" in config_path.read_text()  # every comment kept, Modal's price too
+    assert config_path.read_text() == (REPO / "config.yaml").read_text()  # the patch is what config.yaml ships
     with pytest.raises(APPLY.PatchError, match="occurs 0 times"):  # applied once only
         APPLY.apply(REPO / "configs" / "runpod.patch.yaml", config_path)
     assert APPLY.main([str(REPO / "configs" / "runpod.patch.yaml"), "--config", str(config_path)]) == 2

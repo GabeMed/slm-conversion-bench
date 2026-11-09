@@ -1,5 +1,5 @@
 """A small typed client of RunPod's REST API v2 (https://api.runpod.io/v2/openapi.json, read 2026-11-09):
-pods, network volumes, the GPU catalog and secrets (names only). Standard library only.
+pods, network volumes, the GPU and data center catalogs and secrets (names only). Standard library only.
 
 Retries: a 429 waits for its Retry-After; a 5xx, a connection failure or an answer that is not the JSON
 asked for (cut short, an HTML page) backs off exponentially, up to `max_attempts`. Creating a pod is not
@@ -179,6 +179,12 @@ class RunPodClient:
     def gpu_availability(self, cloud: str, min_cuda_version: Optional[str]) -> List[Dict[str, Any]]:
         query = {"include": "AVAILABILITY", "product": "POD", "cloud": cloud, "minCudaVersion": min_cuda_version}
         return (self.request("GET", "/v2/catalog/gpus", query=query) or {}).get("gpus") or []
+
+    def volume_datacenters(self) -> List[str]:
+        """The data centers that can hold a network volume: those listing a volume tier (networkVolumeTypes; empty
+        means none, and creating a volume there is a 400)."""
+        found = (self.request("GET", "/v2/catalog/datacenters") or {}).get("dataCenters") or []
+        return sorted(d["id"] for d in found if d.get("networkVolumeTypes"))
 
     def secret_names(self) -> List[str]:
         return [s["name"] for s in (self.request("GET", "/v2/account/secrets") or {}).get("secrets") or []]

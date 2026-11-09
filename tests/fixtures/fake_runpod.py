@@ -54,6 +54,10 @@ class FakeRunPod:
             {"id": "NVIDIA H100 80GB HBM3", "name": "H100", "memory": 80, "secure": True, "community": False,
              "price": {"secure": 2.69, "community": 0}, "maxCount": {"secure": 8, "community": 0},
              "availability": "HIGH", "dataCenters": [{"id": "US-KS-2", "name": "Kansas", "availability": "HIGH"}]}]
+        # the catalog of data centers: networkVolumeTypes empty where a network volume cannot be made (RunPod 400s)
+        self.datacenters = [{"id": d, "name": d, "region": "UNKNOWN", "compliance": [], "globalNetwork": False,
+                             "networkVolumeTypes": ["STANDARD"]}
+                            for d in ("CA-MTL-1", "EU-RO-1", "EU-SE-1", "US-KS-2", "US-TX-3")]
         self.polls: Dict[str, int] = {}
         self.made = 0
         self.status: Dict[str, str] = {}
@@ -176,6 +180,10 @@ class FakeRunPod:
                 return 200, {"networkVolumes": list(self.volumes.values()),
                              "pagination": {"nextCursor": None, "hasNextPage": False}}
             if len(parts) == 2 and method == "POST":
+                if not any(d["id"] == body["dataCenter"] and d["networkVolumeTypes"] for d in self.datacenters):
+                    return 400, {"title": "Bad Request", "status": 400,
+                                 "detail": f'Data center "{body["dataCenter"]}" not found or does not support network '
+                                           "volumes"}
                 volume = {"id": f"vol{len(self.volumes) + 1}", "name": body["name"], "size": body["size"],
                           "dataCenter": body["dataCenter"], "type": "STANDARD"}
                 self.volumes[volume["id"]] = volume
@@ -184,6 +192,8 @@ class FakeRunPod:
             return (200, volume) if volume else (404, {"title": "Not Found", "status": 404, "detail": "no volume"})
         if path == "/v2/catalog/gpus":
             return 200, {"gpus": self.gpus}
+        if path == "/v2/catalog/datacenters":
+            return 200, {"dataCenters": self.datacenters}
         if path == "/v2/account/secrets":
             return 200, {"secrets": [{"id": f"s{i}", "name": n, "createdAt": "2026-11-01T00:00:00Z"}
                                      for i, n in enumerate(self.secrets)]}

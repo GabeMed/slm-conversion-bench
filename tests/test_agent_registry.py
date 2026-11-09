@@ -287,11 +287,14 @@ def test_what_is_committed_never_carries_a_key(monkeypatch):
 
 
 def test_what_is_committed_never_carries_a_header_credential(monkeypatch):
-    """`headers_env` values (the Modal proxy token of config.yaml's candidates) are credentials like any key:
-    redacted from the public record, and checked for length before a test execution."""
+    """`headers_env` values (the Modal proxy token of the candidates on Modal) are credentials like any key:
+    redacted from the public record, and checked for length before a test execution. The shipped
+    configuration (RunPod) sends none: vLLM's key is the only one its candidates use."""
     config = json.loads(json.dumps(runner.load_config(paths.ROOT / "config.yaml")))
-    headers = config["roles"]["slm_candidates"][0]["endpoint"]["headers_env"]
-    assert set(headers.values()) == {"SLM_MODAL_KEY", "SLM_MODAL_SECRET"}
+    assert config["roles"]["slm_candidates"][0]["endpoint"]["headers_env"] is None
+    assert set(runner.used_key_envs(config, ["slm:qwen3-8b+lora:c0-aa"], retrieval=False)) == {"SLM_VLLM_API_KEY"}
+    for entry in config["roles"]["slm_candidates"]:  # on Modal, behind its proxy auth
+        entry["endpoint"]["headers_env"] = {"Modal-Key": "SLM_MODAL_KEY", "Modal-Secret": "SLM_MODAL_SECRET"}
     monkeypatch.setenv("SLM_MODAL_KEY", "wk-modal-key-0001")
     monkeypatch.setenv("SLM_MODAL_SECRET", "ws-modal-secret-0002")
     assert registry.redact("proxy refused wk-modal-key-0001 / ws-modal-secret-0002", config) == \

@@ -3,7 +3,8 @@ RunPod GPU pod, the same server modal_apps/serve_vllm.py deploys (`common.serve_
 `common.vllm_command`, unchanged), reached at http://127.0.0.1:<runpod.local_ports[candidate]>/v1 through an
 SSH tunnel.
 
-    setup      the network volume, in the data center that has the serving GPU now (or runpod.datacenter);
+    setup      the network volume, in the data center that has the serving GPU now and holds network volumes
+               (or runpod.datacenter);
                once: a volume lives in one data center, and every pod is created there
     download   the candidate's weights at the pinned revision onto the volume, from a CPU pod (once)
     up         a GPU pod: the code, the adapters missing from the volume, vLLM; warm; then the local tunnel.
@@ -68,17 +69,27 @@ def setup(provider: rp.Provider) -> Dict[str, Any]:
     gpu = rs.gpu_id(settings, provider.config["serving"]["gpu"])
     datacenter = settings["datacenter"]
     choices = best_datacenters(api.gpu_availability(settings["cloud"], settings["min_cuda_version"]), gpu)
+    skipped = []  # where the GPU is but a network volume cannot be
     if datacenter is None:
         if not choices:
             raise RunPodError(f"no data center has {gpu} available now ({settings['cloud']}, CUDA >= "
-                              f"{settings['min_cuda_version']}): try later or set runpod.datacenter")
-        datacenter = choices[0]["id"]
+                              f"{settings['min_cuda_version']}): try later, or set runpod.datacenter to one that "
+                              "offers it")
+        holding = set(api.volume_datacenters())
+        skipped = [c["id"] for c in choices if c["id"] not in holding]
+        usable = [c for c in choices if c["id"] in holding]
+        if not usable:
+            raise RunPodError(f"{gpu} is available now only in data centers without network volumes "
+                              f"({', '.join(skipped)}): try later, or set runpod.datacenter to one with both "
+                              f"(volumes: {', '.join(sorted(holding)) or 'none listed'})")
+        datacenter = usable[0]["id"]
     name = settings["volume"]["name"]
     same = [v for v in api.list_volumes() if v.get("name") == name and v.get("dataCenter") == datacenter]
     volume = same[0] if same else api.create_volume(name, settings["volume"]["size_gb"], datacenter)
     record = {"id": volume["id"], "name": volume["name"], "datacenter": volume["dataCenter"],
               "size_gb": volume["size"], "created_at": now(),
-              "gpu_availability_then": {c["id"]: c["availability"] for c in choices}}
+              "gpu_availability_then": {c["id"]: c["availability"] for c in choices},
+              "skipped_without_volumes": skipped}
     provider.state.update(lambda d: d.__setitem__("volume", record))
     return {**record, "existing": bool(same)}
 
