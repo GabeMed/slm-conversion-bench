@@ -34,6 +34,11 @@ def main(argv=None) -> int:
     p.add_argument("--engine", choices=("production_llm", "cheap_alt"), help="B2 only: the engine of the single call")
     p.add_argument("--workers", type=int, default=1,
                    help="answer the questions in this many processes: still one run and one manifest (default 1)")
+    p.add_argument("--resume-from", metavar="RUN_ID",
+                   help="resume an agent run that stopped on an infrastructure failure (status failed or "
+                        "interrupted; train or calib only): a new run that copies the questions it completed "
+                        "(C1 lines, predictions) and answers the others; arm, split, engine and configuration "
+                        "(by hash) must be the source's")
     teacher = p.add_mutually_exclusive_group()
     teacher.add_argument("--batch", action="store_true",
                          help="K1 only (B0 on train, Anthropic teacher): send the calls through the Message Batches "
@@ -105,7 +110,7 @@ def main(argv=None) -> int:
             from bench.agent.runner import run_agent
             print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
                             workers=args.workers, batch=args.batch,
-                            via_claude_code=args.via_claude_code))
+                            via_claude_code=args.via_claude_code, resume_from=args.resume_from))
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,

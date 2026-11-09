@@ -173,6 +173,16 @@ A call can hold a worker for up to about 105 minutes in the worst case: 7 attemp
 backoff. If a run stalls, Ctrl-C: no further model call is made, what was answered is merged, and
 the run ends `interrupted`. On train and calib the questions left can be run as another run (`--ids`).
 
+A run that stopped on an infrastructure failure (an embeddings or network error, a dead worker:
+status `failed` or `interrupted`) is resumed on train and calib with `bench run --arm <arm> --split
+<split> --workers 8 --resume-from <run_id>`, with the same arm, split, engine and configuration (by
+hash; the commit may differ). It is a new run: it copies the questions the source completed (their C1
+lines unchanged, every attempt, and their predictions), answers the others from the start (those in
+flight or failed included), and ends `done` like any run, so it is the run eval, replay and the
+judgments read. Its manifest records the source (`resumed_from`, with the calls the source spent on
+questions it did not complete under `discarded`), `resumed_question_ids`, and `sessions`, whose sum is
+the run's working time. It is refused on test.
+
 ### 6. K1: the teacher's logs on train
 
 ```sh

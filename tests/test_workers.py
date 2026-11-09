@@ -35,7 +35,7 @@ class FakeChess:
 
     def __init__(self, refuse=None, hold=None):
         fake, script = self, ScriptedChess()
-        self.prompts = []
+        self.prompts, self.refuse = [], refuse  # `refuse` can be changed while the endpoint serves
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -45,7 +45,7 @@ class FakeChess:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 text = body["messages"][-1]["content"]
                 fake.prompts.append(text)
-                if refuse and refuse in text:
+                if fake.refuse and fake.refuse in text:
                     code, answer = 401, {"error": {"message": "this key is not allowed", "type": "authentication_error"}}
                 else:
                     if hold:
