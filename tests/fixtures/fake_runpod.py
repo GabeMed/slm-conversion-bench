@@ -45,8 +45,8 @@ class FakeRunPod:
         self.fail: List[Dict[str, Any]] = []
         self.ready_after, self.secrets = ready_after, list(secrets)
         self.gpus = gpus if gpus is not None else [
-            {"id": "NVIDIA L40S", "name": "L40S", "memory": 48, "secure": True, "community": True,
-             "price": {"secure": 1.09, "community": 0.79}, "maxCount": {"secure": 8, "community": 8},
+            {"id": "NVIDIA A100 80GB PCIe", "name": "A100 PCIe", "memory": 80, "secure": True, "community": True,
+             "price": {"secure": 1.79, "community": 1.19}, "maxCount": {"secure": 8, "community": 8},
              "availability": "HIGH", "dataCenters": [{"id": "US-TX-3", "name": "Texas", "availability": "LOW"},
                                                      {"id": "EU-RO-1", "name": "Romania", "availability": "HIGH"},
                                                      {"id": "CA-MTL-1", "name": "Montreal", "availability": "HIGH"},

@@ -170,9 +170,9 @@ def test_the_price_is_the_containers_gpu_cpu_and_memory(tmp_path, monkeypatch):
 def test_the_shipped_configuration_prices_the_container_all_in(tmp_path, monkeypatch):
     _, config = repo(tmp_path, monkeypatch)
     assert config["cost"]["p95_slo_cap_ms"] == 17000 and config["loadtest"]["concurrency"] == [4, 8, 16, 32, 64, 128]
-    per_second = j8.container_price(config, config["serving"]["gpu"])  # RunPod's L40S pod
-    assert per_second == pytest.approx({"gpu": 0.000303, "cpu": 0, "memory": 0})  # CPU and RAM bundled in the pod
-    assert sum(per_second.values()) * 3600 == pytest.approx(1.0908)  # US$1.09/h, the pod's price
+    per_second = j8.container_price(config, config["serving"]["gpu"])  # RunPod's A100 80GB PCIe pod
+    assert per_second == pytest.approx({"gpu": 0.000497, "cpu": 0, "memory": 0})  # CPU and RAM bundled in the pod
+    assert sum(per_second.values()) * 3600 == pytest.approx(1.7892)  # US$1.79/h, the pod's price
 
 
 def test_adapters_are_measured_apart_and_combined_by_the_stated_rule(tmp_path, monkeypatch):

@@ -4,11 +4,19 @@
 #   python scripts/apply_config_patch.py configs/runpod.patch.yaml            # shows the diff, writes nothing
 #   python scripts/apply_config_patch.py configs/runpod.patch.yaml --write    # applies it
 #
+# Applied to config.yaml on 2026-11-09. Then, the same day and before the zero-shot pilot reading, the reference
+# GPU changed from L40S to the A100 80GB PCIe (prereg/DEVIATIONS.md): L40S Secure was not available on RunPod in
+# any data center that holds network volumes. The patch says both, so it is still exactly config.yaml's change
+# from the Stage 0 registration.
+#
 # What changes, and why:
-# - modal.gpu_prices: the serving GPU's price is RunPod's. runpod.io/pricing (updated 2026-11-04): a Secure Cloud
-#   L40S pod is $1.09/h = 1.09 / 3600 = 0.000303 USD per second, its vCPUs and RAM bundled (16 vCPU, 94 GB), so
-#   the CPU and memory prices are 0. The key stays `modal.gpu_prices` because J8 (frozen) reads it there; the
-#   comment says whose price it is. Modal's price (2026-09-30) is kept in a comment, for J8's sensitivity run.
+# - modal.gpu_prices: the serving GPU's price is RunPod's. RunPod's catalog (GET /v2/catalog/gpus, 2026-11-09):
+#   a Secure Cloud A100 80GB PCIe pod is $1.79/h = 1.79 / 3600 = 0.000497 USD per second, its vCPUs and RAM
+#   bundled (16 vCPU, 117 GB), so the CPU and memory prices are 0. The key stays `modal.gpu_prices` because J8
+#   (frozen) reads it there; the comment says whose price it is. Modal's price for the same GPU (2026-11-09) is
+#   kept in a comment, for J8's sensitivity run.
+# - serving.gpu and train.gpu: A100-80GB (Modal's name for it; runpod.gpu_ids maps it to RunPod's), and the
+#   triage's footprints, which say the candidates fit it.
 # - the candidates' endpoints: http://127.0.0.1:<port>/v1, the SSH tunnel `bench serve --on runpod up` opens
 #   (runpod.local_ports); no proxy headers (headers_env null); vLLM's key stays (SLM_VLLM_API_KEY, whose value
 #   is also the RunPod secret runpod.secrets.vllm_api_key).
@@ -61,13 +69,14 @@ replace:
         cpu_usd_per_core_s: 0.0000131                 # per core-second (fetched 2026-10-01)
         memory_usd_per_gib_s: 0.00000222              # per GiB-second (fetched 2026-10-01)
     new: |
-      gpu_prices:                  # the serving pod's price, RunPod's (runpod.io/pricing, updated 2026-11-04): a Secure Cloud
-        as_of: "2026-11-04"        # L40S pod at $1.09/h, its 16 vCPU and 94 GB of RAM bundled; J8 prices GPU + CPU + memory
-        usd_per_s: {L40S: 0.000303}                   # 1.09 / 3600 per second, billed per second
+      gpu_prices:                  # the serving pod's price, RunPod's (GET /v2/catalog/gpus, Secure Cloud, 2026-11-09): an
+        as_of: "2026-11-09"        # A100 80GB PCIe pod at $1.79/h, its vCPU (16) and RAM (117 GB) bundled; J8 prices GPU + CPU + memory
+        usd_per_s: {A100-80GB: 0.000497}              # 1.79 / 3600 per second, billed per second
         cpu_usd_per_core_s: 0                         # bundled in the pod's price
         memory_usd_per_gib_s: 0                       # bundled in the pod's price
-        # Modal's price before this deviation (2026-09-30), J8's sensitivity: L40S 0.000542 per GPU-second,
-        # H100 0.001097, CPU 0.0000131 per core-second, memory 0.00000222 per GiB-second
+        # Modal's price for the same GPU (modal.com/pricing, fetched 2026-11-09), J8's sensitivity: A100-80GB 0.000694
+        # per GPU-second, CPU 0.0000131 per core-second, memory 0.00000222 per GiB-second (before this deviation, on
+        # 2026-09-30: L40S 0.000542, H100 0.001097)
   - indent: 2
     old: |
       unauthenticated: false       # Modal proxy auth (the candidates' headers_env); the server refuses to start with neither
@@ -78,14 +87,17 @@ replace:
   - indent: 0
     old: |
       train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
+        gpu: L40S
     new: |
       runpod:                        # the inference provider (runpod_apps/; bench serve | loadtest | preflight --on runpod). Read
                                      # only by runpod_apps/ and preflight's training_time (train_backend), never by a judgment
         api_key_env: RUNPOD_API_KEY  # a RunPod API key: pods, network volumes, secrets (names), catalog, billing
         cloud: SECURE                # RunPod-owned data centers: the price in modal.gpu_prices is Secure Cloud's
-        datacenter: null             # null: `bench serve --on runpod setup` takes the data center with the most L40S available
-                                     # then, and the volume fixes it (.runpod/state.json); an id (e.g. EU-RO-1) is used as is
-        gpu_ids: {L40S: NVIDIA L40S} # RunPod's GPU type id of serving.gpu and train.gpu (GET /v2/catalog/gpus)
+        datacenter: null             # null: `bench serve --on runpod setup` takes the data center with the most A100 80GB PCIe
+                                     # available then among those that hold network volumes (2026-11-09: CA-MTL-3, EU-RO-1), and
+                                     # the volume fixes it (.runpod/state.json); an id (e.g. EU-RO-1) is used as is
+        gpu_ids: {A100-80GB: NVIDIA A100 80GB PCIe}   # RunPod's GPU type id of serving.gpu and train.gpu (GET /v2/catalog/gpus);
+                                                      # the SXM variant is only where network volumes are not
         min_cuda_version: "13.0"     # the host driver vLLM 0.30's CUDA 13 wheels need
         volume: {name: slm-bench, size_gb: 100}   # weights (~16 GB per candidate), adapters, the train lock's venv (~10 GB)
         images:
@@ -105,10 +117,39 @@ replace:
         train_backend: tinker        # where the adapters are trained (bench train --on tinker): preflight's training_time
 
       train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
+        gpu: A100-80GB
+  - indent: 2
+    old: |
+      base_image: nvidia/cuda:13.0.3-devel-ubuntu24.04   # CUDA 13, as vLLM 0.30's wheels
+      gpu: L40S
+    new: |
+      base_image: nvidia/cuda:13.0.3-devel-ubuntu24.04   # CUDA 13, as vLLM 0.30's wheels
+      gpu: A100-80GB
+  - indent: 31
+    old: |
+      # pinned revisions, fetched 2026-10-21; the reference GPU is serving.gpu (L40S, 48 GB);
+    new: |
+      # pinned revisions, fetched 2026-10-21; the reference GPU is serving.gpu (A100 80GB PCIe, 80 GB);
+  - indent: 6
+    old: |
+      footprint: "16.38 GB of bf16 weights, 8.19B parameters: fits one L40S with room for the KV cache"
+    new: |
+      footprint: "16.38 GB of bf16 weights, 8.19B parameters: fits one A100 80GB with room for the KV cache"
+  - indent: 6
+    old: |
+      footprint: "17.58 GB of bf16 weights, 8.79B parameters: fits one L40S with room for the KV cache"
+    new: |
+      footprint: "17.58 GB of bf16 weights, 8.79B parameters: fits one A100 80GB with room for the KV cache"
+  - indent: 6
+    old: |
+      footprint: "7.95 GB of bf16 weights: fits one L40S"
+    new: |
+      footprint: "7.95 GB of bf16 weights: fits one A100 80GB"
 expect:
-  modal.gpu_prices: {as_of: "2026-11-04", usd_per_s: {L40S: 0.000303}, cpu_usd_per_core_s: 0, memory_usd_per_gib_s: 0}
+  modal.gpu_prices: {as_of: "2026-11-09", usd_per_s: {A100-80GB: 0.000497}, cpu_usd_per_core_s: 0, memory_usd_per_gib_s: 0}
   serving.unauthenticated: true
-  serving.gpu: L40S
+  serving.gpu: A100-80GB
+  train.gpu: A100-80GB
   roles.slm_candidates[qwen3-8b].endpoint: {kind: vllm, base_url: "http://127.0.0.1:18001/v1", api_key_env: SLM_VLLM_API_KEY,
                                            headers_env: null}
   roles.slm_candidates[granite-4.2-8b].endpoint: {kind: vllm, base_url: "http://127.0.0.1:18002/v1",

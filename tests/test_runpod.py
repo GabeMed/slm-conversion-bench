@@ -78,7 +78,7 @@ def tagged(name, token="t0k3n", **fields):
 
 def test_a_pod_is_created_polled_until_it_runs_and_terminated(fake):
     api = client(fake)
-    pod = api.create_pod(tagged("slm-bench-x", gpu={"id": "NVIDIA L40S", "count": 1}))
+    pod = api.create_pod(tagged("slm-bench-x", gpu={"id": "NVIDIA A100 80GB PCIe", "count": 1}))
     assert pod["status"] == "PROVISIONING" and rp.ssh_endpoint(pod) is None
     running = api.get_pod(pod["id"])
     assert running["status"] == "RUNNING" and rp.ssh_endpoint(running) == {"host": "203.0.113.7", "port": 40000}
@@ -100,7 +100,7 @@ def test_5xx_and_429_are_retried_429_after_its_retry_after(fake):
                   {"method": "GET", "path": "/v2/catalog/gpus", "status": 429, "headers": {"Retry-After": "7"}}]
     api = client(fake, sleeps)
     assert api.list_volumes() == []
-    assert api.gpu_availability("SECURE", "13.0")[0]["id"] == "NVIDIA L40S"
+    assert api.gpu_availability("SECURE", "13.0")[0]["id"] == "NVIDIA A100 80GB PCIe"
     assert sleeps == [0.5, 1.0, 7.0]  # exponential backoff, then the server's own wait
     query = [r["query"] for r in fake.requests if r["path"] == "/v2/catalog/gpus"][-1]
     assert query == {"include": "AVAILABILITY", "product": "POD", "cloud": "SECURE", "minCudaVersion": "13.0"}
@@ -202,7 +202,7 @@ def test_the_bodies_sent_and_the_fields_read_are_the_openapi_specs():
     volume = {"id": "vol1", "datacenter": "EU-RO-1"}
     env = {"VLLM_API_KEY": "{{ RUNPOD_SECRET_slm-bench-vllm-api-key }}"}
     bodies = [rp.pod_body(settings, volume, "serve", "vllm/vllm-openai:v0.30.0", 3600, "ssh-ed25519 AAAA k",
-                          candidate="qwen3-8b", gpu="NVIDIA L40S", env=env),
+                          candidate="qwen3-8b", gpu="NVIDIA A100 80GB PCIe", env=env),
               rp.pod_body(settings, volume, "loadtest", "python:3.12-slim-bookworm", 3600, "ssh-ed25519 AAAA k",
                           candidate="qwen3-8b", cpu_vcpus=4, env=env)]
     for body in bodies:
@@ -235,12 +235,12 @@ def test_the_bodies_sent_and_the_fields_read_are_the_openapi_specs():
 
 def test_the_fake_refuses_a_body_the_spec_refuses(fake):
     with pytest.raises(rapi.ApiError, match="HTTP 400.*unexpected"):
-        client(fake).create_pod({**tagged("slm-bench-x"), "gpuTypeId": "NVIDIA L40S"})
+        client(fake).create_pod({**tagged("slm-bench-x"), "gpuTypeId": "NVIDIA A100 80GB PCIe"})
 
 
 def test_the_data_center_is_the_most_available_one_ties_by_id(fake):
     gpus = client(fake).gpu_availability("SECURE", "13.0")
-    assert [d["id"] for d in rapi.best_datacenters(gpus, "NVIDIA L40S")] == ["CA-MTL-1", "EU-RO-1", "US-TX-3"]
+    assert [d["id"] for d in rapi.best_datacenters(gpus, "NVIDIA A100 80GB PCIe")] == ["CA-MTL-1", "EU-RO-1", "US-TX-3"]
     assert rapi.best_datacenters(gpus, "NVIDIA B200") == []
 
 
@@ -293,7 +293,7 @@ def serve_job(world):
         plan = json.loads(shell.local("/bench/plan.json").read_text())
         state = shell.local(f"/runpod-volume/vllm-cache/bench-serving/{plan['name']}.json")
         state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({**common.serving_state(plan, "NVIDIA L40S"), "provider": "runpod",
+        state.write_text(json.dumps({**common.serving_state(plan, "NVIDIA A100 80GB PCIe"), "provider": "runpod",
                                      "versions": {"vllm": "0.30.0", "torch": "2.13.0", "transformers": "5.18.0", "flashinfer-python": "0.9.1"}}))
         shell.local("/bench/jobs/serve.ready").write_text(str(state))
         world.served_plan = plan
@@ -347,7 +347,7 @@ def test_setup_creates_the_volume_where_the_gpu_is_and_keeps_it(runpod_repo):
 
 
 def test_setup_passes_over_a_data_center_without_network_volumes_for_the_next_one_with_the_gpu(runpod_repo):
-    """CA-MTL-1 has the most L40S but holds no volumes: EU-RO-1, as available, is next."""
+    """CA-MTL-1 has the most A100s but holds no volumes: EU-RO-1, as available, is next."""
     world = runpod_repo
     world.fake.datacenters[0]["networkVolumeTypes"] = []
     volume = rserve.setup(world.provider())
@@ -383,7 +383,7 @@ def test_setup_adopts_a_volume_of_the_same_name_and_honours_a_pinned_data_center
     State().write({"volume": None, "pods": {}, "terminated": [], "downloaded": {}})
     world.config["runpod"]["datacenter"] = None
     world.fake.gpus[0]["dataCenters"] = [{"id": "EU-SE-1", "name": "Sweden", "availability": "NONE"}]
-    with pytest.raises(RunPodError, match="no data center has NVIDIA L40S available"):
+    with pytest.raises(RunPodError, match="no data center has NVIDIA A100 80GB PCIe available"):
         rserve.setup(world.provider())
 
 
@@ -410,7 +410,7 @@ def test_a_pod_is_recorded_before_anything_waits_on_it_and_down_all_finds_every_
     with pytest.raises(KeyboardInterrupt):  # the operator's Ctrl-C while the pod boots
         rserve.up(provider, TINY_NAME)
     assert not world.fake.pods  # up terminates a pod that did not come up
-    pod = provider.create("serve", tagged("slm-bench-serve-x", gpu={"id": "NVIDIA L40S"}), "x")
+    pod = provider.create("serve", tagged("slm-bench-serve-x", gpu={"id": "NVIDIA A100 80GB PCIe"}), "x")
     assert State().read()["pods"][pod["id"]]["role"] == "serve"
     stray = client(world.fake).create_pod(tagged("slm-bench-loadtest-y", token="a1"))
     other = client(world.fake).create_pod(tagged("someone-else", token="b2"))
@@ -449,7 +449,7 @@ def test_up_serves_the_modal_plan_on_a_gpu_pod_behind_ssh(runpod_repo):
     served_now = rserve.up(world.provider(), TINY_NAME, tunnel=fake_tunnel(world))
     assert served_now["base_url"] == f"http://127.0.0.1:{world.port}/v1" and served_now["reused"] is False
     body = world.fake.created("serve")[0]
-    assert body["gpu"] == {"id": "NVIDIA L40S", "count": 1, "minCudaVersion": "13.0"}
+    assert body["gpu"] == {"id": "NVIDIA A100 80GB PCIe", "count": 1, "minCudaVersion": "13.0"}
     assert body["image"] == "vllm/vllm-openai:v0.30.0" and body["cloud"] == "SECURE"
     assert body["dataCenterIds"] == ["CA-MTL-1"] and body["ports"] == ["22/tcp"]  # vLLM's port is not published
     assert body["env"]["VLLM_API_KEY"] == "{{ RUNPOD_SECRET_slm-bench-vllm-api-key }}"  # RunPod substitutes it
@@ -467,7 +467,7 @@ def test_up_serves_the_modal_plan_on_a_gpu_pod_behind_ssh(runpod_repo):
     assert (shell.pod_dir / "bench/code/runpod_apps/job.py").is_file()
     assert (shell.pod_dir / "bench/code/env/train/requirements.lock").is_file()
     record = State().serving(TINY_NAME)
-    assert record["tunnel_pid"] == 424242 and record["local_port"] == world.port and record["observed_gpus"] == ["NVIDIA L40S"]
+    assert record["tunnel_pid"] == 424242 and record["local_port"] == world.port and record["observed_gpus"] == ["NVIDIA A100 80GB PCIe"]
     assert world.tunnels == [("203.0.113.7", 40001, world.port)]  # the pod's direct SSH, never the HTTPS proxy
 
 
@@ -607,9 +607,9 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     manifests = [json.loads((d / "manifest.json").read_text()) for d in run_dirs]
     for m, level in zip(manifests, (1, 4)):
         assert (m["type"], m["status"], m["where"], m["engine"], m["concurrency"]) == ("loadtest", "done", "runpod", engine, level)
-        assert m["gpu"] == "L40S" and m["gpu"] in world.config["modal"]["gpu_prices"]["usd_per_s"]
+        assert m["gpu"] == "A100-80GB" and m["gpu"] in world.config["modal"]["gpu_prices"]["usd_per_s"]
         assert m["prefix_cache"] is True and m["sweep_id"] == manifests[0]["sweep_id"] and m["source_run_id"]
-        assert m["observed"]["gpus"] == ["NVIDIA L40S"] and m["observed"]["prompt_cache_read_pct"] == 61.0
+        assert m["observed"]["gpus"] == ["NVIDIA A100 80GB PCIe"] and m["observed"]["prompt_cache_read_pct"] == 61.0
         assert m["secrets_redacted_in"] == ["aiperf.log"]
         assert m["server_versions"] == {"vllm": "0.30.0", "torch": "2.13.0", "transformers": "5.18.0", "flashinfer-python": "0.9.1"}  # the serving image's, as it recorded them
         top = max(world.config["loadtest"]["concurrency"])
@@ -633,16 +633,16 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     assert all(o in tunnel_cmd for o in ("Compression=no", "IPQoS=none", "ForwardAgent=no"))
     # J8 over the runs, with the patch's prices: the pod's price per second, CPU and memory bundled (0)
     patched = copy.deepcopy(world.config)
-    patched["modal"]["gpu_prices"] = {"as_of": "2026-11-04", "usd_per_s": {"L40S": 0.000303},
+    patched["modal"]["gpu_prices"] = {"as_of": "2026-11-09", "usd_per_s": {"A100-80GB": 0.000497},
                                       "cpu_usd_per_core_s": 0, "memory_usd_per_gib_s": 0}
     patched["cost"].update(p95_slo_cap_ms=5000, slo_from=None)
     pilot = "agent-B0-calib-pilot"
     write_run(pilot, {"type": "agent", "arm": "B0", "split": "calib"},
               [call(pilot, str(q), "select_tables", latency_ms=3000) for q in (1, 2, 3)])
     result = read_result(j8.run([d.name for d in run_dirs], patched, slo_from=pilot), "J8")["result"]
-    assert result["gpu"] == "L40S" and result["gpu_prices_as_of"] == "2026-11-04"
-    assert result["price_per_hour"] == pytest.approx(0.000303 * 3600)
-    assert result["cost_per_request"]["100%"] == pytest.approx(0.000303 * 3600 / (2.5 * 3600))
+    assert result["gpu"] == "A100-80GB" and result["gpu_prices_as_of"] == "2026-11-09"
+    assert result["price_per_hour"] == pytest.approx(0.000497 * 3600)
+    assert result["cost_per_request"]["100%"] == pytest.approx(0.000497 * 3600 / (2.5 * 3600))
 
 
 def test_the_load_test_needs_the_server_up(runpod_repo):
@@ -685,7 +685,7 @@ def test_p4_on_runpod_runs_the_reference_on_a_gpu_pod(runpod_repo):
     world.jobs["parity"] = parity_job(reference)
     state = world.tmp / "volume" / "vllm-cache" / "bench-serving" / f"{TINY_NAME}.json"  # what the server recorded
     state.parent.mkdir(parents=True)
-    state.write_text(json.dumps({"gpus": ["NVIDIA L40S"], "versions": {"vllm": "0.30.0", "torch": "2.13.0",
+    state.write_text(json.dumps({"gpus": ["NVIDIA A100 80GB PCIe"], "versions": {"vllm": "0.30.0", "torch": "2.13.0",
                                                                        "transformers": "5.18.0",
                                                                        "flashinfer-python": "0.9.1"}}))
     world.config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
@@ -696,7 +696,7 @@ def test_p4_on_runpod_runs_the_reference_on_a_gpu_pod(runpod_repo):
     assert verdict["status"] == PASS and verdict["reference_on"] == "runpod" and verdict["reference_gpu_seconds"] == 31.5
     assert verdict["reference_versions"]["peft"] == "0.21.1" and verdict["serving_versions"] == {"vllm": "0.30.0", "torch": "2.13.0", "transformers": "5.18.0", "flashinfer-python": "0.9.1"}
     body, = world.fake.created("parity")
-    assert body["gpu"]["id"] == "NVIDIA L40S" and body["image"] == "nvidia/cuda:13.0.3-devel-ubuntu24.04"
+    assert body["gpu"]["id"] == "NVIDIA A100 80GB PCIe" and body["image"] == "nvidia/cuda:13.0.3-devel-ubuntu24.04"
     assert not world.fake.pods  # terminated
     command = next(c for s in world.shells.values() for c in s.commands if c.startswith("# bench-job parity"))
     assert "env/train/requirements.lock" in command and "/opt/bench-train" in command  # the train lock's environment
@@ -776,7 +776,7 @@ def test_a_pod_has_a_gpu_or_a_cpu_count():
     with pytest.raises(RunPodError):
         rp.pod_body(settings, volume, "n", "i", 60, "k")
     with pytest.raises(RunPodError):
-        rp.pod_body(settings, volume, "n", "i", 60, "k", gpu="NVIDIA L40S", cpu_vcpus=4)
+        rp.pod_body(settings, volume, "n", "i", 60, "k", gpu="NVIDIA A100 80GB PCIe", cpu_vcpus=4)
 
 
 def test_jobs_run_detached_and_their_exit_code_is_the_completion_signal(tmp_path):
@@ -827,7 +827,7 @@ def test_the_serve_job_checks_the_vllm_version_and_the_weights_then_records_itse
     def start(plan, environ, launch):
         state = common.state_path(common.VLLM_CACHE, plan["name"])
         state.parent.mkdir(parents=True)
-        state.write_text(json.dumps({"gpus": ["NVIDIA L40S"], "auth": "vllm-key"}))
+        state.write_text(json.dumps({"gpus": ["NVIDIA A100 80GB PCIe"], "auth": "vllm-key"}))
         return types.SimpleNamespace(wait=lambda: 0)
 
     monkeypatch.setattr(common, "start_serving", start)
@@ -836,7 +836,7 @@ def test_the_serve_job_checks_the_vllm_version_and_the_weights_then_records_itse
     monkeypatch.setenv("BENCH_IMAGE", "vllm/vllm-openai:v0.30.0")
     assert job.serve(str(tmp_path / "plan.json")) == 0
     state = json.loads(Path((tmp_path / "serve.ready").read_text()).read_text())
-    assert state == {"gpus": ["NVIDIA L40S"], "auth": "vllm-key", "provider": "runpod",
+    assert state == {"gpus": ["NVIDIA A100 80GB PCIe"], "auth": "vllm-key", "provider": "runpod",
                      "image": "vllm/vllm-openai:v0.30.0", "pod_id": None, "vllm_version": "0.30.0",
                      "versions": {"vllm": "x", "torch": "x", "transformers": "x", "flashinfer-python": "x"}}
 
@@ -880,7 +880,7 @@ def test_up_refuses_a_serving_pod_it_did_not_record_and_hours_that_are_not_hours
         with pytest.raises(RunPodError, match="--hours must be a finite number"):
             rserve.up(world.provider(), TINY_NAME, hours=hours, tunnel=fake_tunnel(world))
     unrecorded = client(world.fake).create_pod(tagged(f"slm-bench-serve-{TINY_NAME}", token="ab12",
-                                                      gpu={"id": "NVIDIA L40S", "count": 1}))
+                                                      gpu={"id": "NVIDIA A100 80GB PCIe", "count": 1}))
     world.fake.pods[unrecorded["id"]]["env"].update(BENCH_ROLE="serve", BENCH_CANDIDATE=TINY_NAME)
     with pytest.raises(RunPodError, match=f"{unrecorded['id']} already serve {TINY_NAME}.*down --all"):
         rserve.up(world.provider(), TINY_NAME, tunnel=fake_tunnel(world))
@@ -959,12 +959,12 @@ def test_the_config_patch_turns_the_pre_patch_config_into_the_shipped_one_and_sa
 
     config = load_config(config_path)
     assert config_sha256(config) == shown["sha256_after"]
-    assert j8.container_price(config, "L40S") == {"gpu": 0.000303, "cpu": 0, "memory": 0}
-    assert config["serving"]["unauthenticated"] is True and config["serving"]["gpu"] == "L40S"
+    assert j8.container_price(config, "A100-80GB") == {"gpu": 0.000497, "cpu": 0, "memory": 0}
+    assert config["serving"]["unauthenticated"] is True and config["serving"]["gpu"] == "A100-80GB"
     settings = rs.runpod_settings(config)
     for entry in config["roles"]["slm_candidates"]:
         assert rserve.check_endpoint(config, settings, entry["name"]) == settings["local_ports"][entry["name"]]
-    assert "# Modal's price before this deviation" in config_path.read_text()  # every comment kept, Modal's price too
+    assert "# Modal's price for the same GPU" in config_path.read_text()  # every comment kept, Modal's price too
     assert config_path.read_text() == (REPO / "config.yaml").read_text()  # the patch is what config.yaml ships
     with pytest.raises(APPLY.PatchError, match="occurs 0 times"):  # applied once only
         APPLY.apply(REPO / "configs" / "runpod.patch.yaml", config_path)
@@ -977,7 +977,7 @@ def test_runpod_settings_say_what_is_missing():
     with pytest.raises(RunPodError, match="lacks"):
         rs.runpod_settings({"runpod": {"cloud": "SECURE"}})
     settings = shipped_runpod_section()
-    assert rs.gpu_id(settings, "L40S") == "NVIDIA L40S"
+    assert rs.gpu_id(settings, "A100-80GB") == "NVIDIA A100 80GB PCIe"
     with pytest.raises(RunPodError, match="H100"):
         rs.gpu_id(settings, "H100")
     with pytest.raises(RunPodError, match="RUNPOD_API_KEY is not set"):
