@@ -316,7 +316,11 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
     assert "price" not in json.dumps(stats)
     assert not list((paths.ROOT / "train" / "adapters" / ".tinker").iterdir())  # the pending record is cleared
     out = capsys.readouterr().out
-    assert "prereg/DEVIATIONS.md" in out and f"/{manifest['adapter_sha256']}" in out
+    assert "prereg/DEVIATIONS.md" in out
+    if config.get("runpod"):  # the shipped configuration serves on RunPod: up uploads the adapter
+        assert f"bench serve --on runpod up --candidate {manifest['slm']}" in out
+    else:  # on Modal, the adapters volume
+        assert f"/{manifest['adapter_sha256']}" in out
     assert "bench.train_tinker.plan_sha256 gives the same" in out
 
     # again: nothing is trained, the adapter is kept, the set is registered once c1 has one too

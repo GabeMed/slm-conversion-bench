@@ -162,11 +162,12 @@ def test_a_result_of_another_judgment_in_the_slot_is_listed(world):
 
 def test_a_result_of_another_configuration_or_code_is_listed(world, monkeypatch):
     other = copy.deepcopy(world["config"])
-    other["serving"]["memory_gib"] = 64  # a key J8 read: the container costs more
+    gpu = other["serving"]["gpu"]
+    other["modal"]["gpu_prices"]["usd_per_s"][gpu] *= 2  # a key J8 read: the container costs more
     before = stored()
     verified, divergences = verify.verify(other, world["plan"])
     assert len(divergences) == 1 and divergences[0].startswith(f"{relative(world['results']['j8'])}: recomputes to judgments/J8/")
-    assert "serving.memory_gib" in divergences[0]
+    assert "modal.gpu_prices" in divergences[0]
     assert stored() == before  # judgments/ is left as it was: what the divergent recomputation wrote is removed
     assert len(verified) == 5  # the others read the stored J8, which is still the bytes they were built on
     monkeypatch.setattr(j2, "truncation", lambda calls: {})  # the code changed since the result was stored
