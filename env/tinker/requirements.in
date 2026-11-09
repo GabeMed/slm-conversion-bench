@@ -1,0 +1,17 @@
+# `bench train --on tinker` (bench/train_tinker.py), the alternative training backend: Thinking Machines'
+# Tinker SDK, and tinker-cookbook for its PEFT export (weights.download, weights.build_lora_adapter). The packages
+# env/train also has (torch, transformers, huggingface-hub, ...) are held to env/train's pins, so the tokenizer
+# that builds the Tinker datums is the one the TRL path tokenizes with. Kept apart from env/train: its lock is part
+# of the Modal training's identity (bench.train.TRAINING_CODE), which an optional backend must not change.
+#
+# Lock (universal, constrained by env/train's lock):
+#   uv pip compile --universal --python-version 3.12 env/tinker/requirements.in -c env/train/requirements.lock \
+#     -o env/tinker/requirements.lock
+# Install (beside or instead of env/train; needs TINKER_API_KEY to train, nothing to run the tests):
+#   uv venv .venv-tinker --python 3.12
+#   uv pip install --python .venv-tinker/bin/python -r env/tinker/requirements.lock -e ".[test]"
+tinker==0.39.0
+tinker-cookbook==0.6.1
+transformers
+huggingface-hub
+torch

@@ -4,7 +4,7 @@ The order below is the one SPEC.md §7 fixes. Every step names the command, what
 what to do when it does not. Nothing here is paid until step 2.
 
 **The days need not be consecutive (SPEC D26).** The project may pause between phases while the next
-phase's budget is not in hand: after step 5 (before K1) and after step 12 (before the test). The order
+phase's funding is not in place: after step 5 (before K1) and after step 12 (before the test). The order
 does not change, and nothing on the test split runs before step 12.
 
 - `<...>` is a value a previous step printed (a run id, a result path).
@@ -21,10 +21,10 @@ does not change, and nothing on the test split runs before step 12.
    - In Modal: a token, and the two secrets `modal.secrets` names. `slm-bench-vllm-api-key` holds
      `VLLM_API_KEY`; `slm-bench-proxy-auth` holds the proxy-auth variables of `headers_env`.
 2. **A spending limit on each provider account:** a prepaid balance, or the provider's own limit
-   where it has one. The API budget is **US$ 500 for the teacher** (the pre-Stage-0 probes project
-   about US$ 210–350 with K1 on the author's subscription, SPEC §11.3) plus the cheap alternative's. The harness has no spend cap
-   of its own; step 5 projects the spend by hand, and this limit is what stops a projection that was
-   wrong. A balance below a phase's projection pauses the project before that phase (D26).
+   where it has one, set to the API budget for the teacher plus the cheap alternative. The harness
+   has no spend cap of its own; step 5 projects the spend by hand, and this limit is what stops a
+   projection that was wrong. A balance below a phase's projection pauses the project before that
+   phase (D26).
 3. **Fill every `before runs` value of `config.yaml`:**
    - each API role's `endpoint.base_url`, `provider` (name, quantization, checkpoint) and, for the
      teacher, `terms` (licence, provider terms, date);
@@ -151,10 +151,10 @@ bench judge j3 --run <B0 calib> --eval <its eval>
 | B1 on test, the calib replay, the two B1 pilot replays | 498, 200, 50 + 50 | cheap alternative |
 | B2-cheap on test | 498, one call each | cheap alternative |
 
-- **Cost:** USD per question × questions, per engine; K1 on the subscription costs no API (D25). For B2 use its smoke
+- **Cost:** USD per question × questions, per engine; K1 through `--via-claude-code` makes no API call (D25). For B2 use its smoke
   run's cost per question. The total API spend must stay under the budget (Before Day 1, item 2).
 - **Time:** the pilot run's wall time per question (`finished_at` − `started_at`, ÷ 200) × the
-  questions left, at the same `--workers`. On the subscription, K1 runs at its own pace (step 6), not the pilot's.
+  questions left, at the same `--workers`. Through `--via-claude-code`, K1 runs at its own pace (step 6), not the pilot's.
 - **Cache:** the share of `usage.cached_input` in the input tokens. If it is zero, the provider is
   not caching: fix that before K1, since it changes every cost of the report.
 
@@ -184,22 +184,22 @@ git commit -m "The call sites observed on train and calib"
 
 Accept K1 with at least 90% of the questions answered end to end (`predictions.json`).
 
-**K1 runs on the author's Claude subscription (SPEC D25)**, through Claude Code, which Anthropic
-authorized verbally for this project only: add `--via-claude-code` to the `bench run` above. Only K1 may: its
+**The registered run sends K1 through Claude Code (SPEC D25)**: add `--via-claude-code` to the
+`bench run` above. It needs the provider's permission for that use. Only K1 may: its
 answers become training data and no judgment reads its cost or latency. The manifest records the
 CLI's version in `via_claude_code`.
 
 - **In `bash`, with the API key loaded** (`source ~/.config/slm-bench/env`): the harness checks it is
   set, and the wrapper drops it from every `claude` process, so no call goes to the paid API.
 - **`--workers 4`.** Speed is not the limit: 4 workers spent a whole usage window in about 25 minutes.
-- **The subscription's usage limit pauses the run**, which tries again every 10 minutes and goes on when
+- **The Claude account's usage limit pauses the run**, which tries again every 10 minutes and goes on when
   the window reopens (stderr prints each pause). About 5,300 calls fit in a window, so K1 (about 88,000
   calls) takes about 17 windows: several days. It is one run; Ctrl-C stops it as any run.
-- **The same limit is the author's Claude Code.** Run K1 when you do not need it.
+- **The same limit covers every other use of that Claude account.** Run K1 when it is not otherwise needed.
 - **Check after the first window:** every `calls.jsonl` line `finish_reason: stop`, and the share of
   `parsed_ok: false` on `agent_ss` near the probes' (1 in 94, SPEC §11.3).
 
-**The fallback is the Message Batches API at half price** (`--batch` instead): about US$125 for K1. Each
+**The fallback is the Message Batches API at half price** (`--batch` instead). Each
 CHESS step waits for its batch, 2–8 minutes a step, so it needs many `--workers`; run a small `--ids` set
 first. Cache reads inside a batch are best-effort.
 
@@ -254,6 +254,51 @@ BENCH_CANDIDATE=<the chosen candidate> modal deploy -m modal_apps.serve_vllm
 
 The last `bench train` prints the adapters fact. Write its path into `arms.B4.adapters` and
 `arms.B5.adapters` **before** that deploy: the server serves the adapters the fact names.
+
+#### Training on Tinker (alternative backend)
+
+`--on tinker` trains the same plan on Thinking Machines' Tinker, usually sooner than a Modal GPU. It writes
+the same outputs (adapter and manifest, `where: tinker`). The registered configuration trains on Modal, so
+using a Tinker adapter in the registered run is recorded in `prereg/DEVIATIONS.md` (SPEC §6).
+
+```sh
+uv venv .venv-tinker --python 3.12
+uv pip install --python .venv-tinker/bin/python -r env/tinker/requirements.lock -e ".[test]"
+TINKER_API_KEY=... bench train --cluster <c> --on tinker
+modal volume put slm-bench-adapters train/adapters/<c>/adapter /<adapter_sha256>   # the command it prints
+```
+
+- Settings besides config.yaml's `train` section: `configs/train-tinker.yaml`.
+- Qwen3-8B only (Tinker's lineup, 2026-11-09). Granite-4.2-8B and Nemotron-3-Nano-4B are refused.
+- Tinker sets no alpha, dropout, target modules or revision. Each difference is listed in
+  `accept_differences` and recorded in the manifest. An adapter whose exported rank, alpha or modules differ
+  from config.yaml is not installed.
+- Tinker bills per token. The manifest records the tokens, not a price.
+- Before any paid call it downloads the base at its pinned revision into the HF cache (~16 GB for
+  Qwen3-8B). The export's converter reads its safetensors.
+- The exported weights stay on Tinker for `export_ttl_s`. Running the same command again collects them. Once
+  they expire, it says so; delete the `train/adapters/.tinker/` file it names to train again.
+- A run interrupted before the export starts over: there is no mid-run checkpoint. Two processes on the same
+  cluster are not locked against each other: run one.
+
+**The probe, before the first full Tinker run (required).** This path has not yet run against the service.
+Run one step on the smallest cluster, with a `--config` that extends config.yaml and sets
+`train.sft.max_steps: 1`. A run with `max_steps` set is a probe: its adapter goes to
+`train/adapters/.probe/<c>/`, never served, never registered, never in the full run's way. Check:
+
+- it finishes: the service accepts the schedule's first step, which warm-up sends at learning rate 0;
+- the manifest's `stats.trained`: rank 16, alpha 32 and the seven modules (otherwise it stops before installing);
+- no row is over the service's context for Qwen3-8B (checked before the first step).
+
+Still unverified after it: determinism, the revision of Tinker's Qwen3-8B, and vLLM loading the converted
+adapter (P-4 checks it on the first full adapter, as for Modal).
+
+**Comparing backends.** Train a cluster on Tinker, move `train/adapters/<c>` out of `train/adapters/`
+(serving and registration read everything there), then train the same cluster on Modal. Both manifests
+give the same plan hash (`plan_sha256` in Tinker's; `bench.train_tinker.plan_sha256` computes it from
+Modal's) and differ in `where`. To compare the adapters, serve each in turn and replay the calib split on
+it (`bench replay <B0 calib> --engine slm:<candidate>+lora:<served name>`, then `bench eval --per-call`).
+`--on tinker` never replaces an adapter; `--on modal` does.
 
 ## Day 2
 

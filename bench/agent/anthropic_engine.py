@@ -33,7 +33,7 @@ What differs from an OpenAI-compatible engine, and how it is mapped:
   answer raises an error classified as the API's own status would be (`classified_as`); stopping the
   run, or losing the parent process, cancels the batches still open.
 - **Through Claude Code** (`bench run --via-claude-code`, K1 only; the environment variable
-  `BENCH_VIA_CLAUDE_CODE`): the same request sent by the `claude` CLI on the author's subscription
+  `BENCH_VIA_CLAUDE_CODE`): the same request sent by the `claude` CLI on the logged-in Claude subscription
   (`claude_code_engine`).
 """
 import hashlib

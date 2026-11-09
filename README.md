@@ -57,9 +57,10 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
 The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
-trained on [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API, and served with vLLM.
-The training code in this repository (`bench train`, `modal_apps/train.py`) still runs TRL and PEFT on Modal and is
-moving to Tinker.
+trained with TRL and PEFT on Modal's L40S GPUs (the registered configuration) or on
+[Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API (`bench train --on tinker`, Qwen3-8B
+only), and served with vLLM. Both backends write the same adapter and a manifest that pairs runs of the same plan, so
+a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 ## Results
 
@@ -140,10 +141,9 @@ right and take no responsibility for how it is used with any provider.
 SPEC v2.2 (D6, D10) amended the design for this before Stage 0: up to v2.1 the teacher was an open-weight
 model whose licence allows training on its outputs, and no closed LLM was in the core.
 
-SPEC v2.3 (D25) runs K1, the teacher's logs on train, through Claude Code on the author's own Claude
-subscription (`bench run --via-claude-code`), which Anthropic authorized verbally for this project only.
-Calibration and test go through the paid API. Do not run `--via-claude-code` on your own subscription
-without the provider's permission for that use.
+`bench run --via-claude-code` sends K1, the teacher's logs on train, through Claude Code instead of the
+paid API; calibration and test always go through the API. Whoever runs it needs the provider's permission
+for that use. The details of the registered run are in SPEC.md (D25).
 
 ## Cite
 

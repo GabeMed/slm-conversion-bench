@@ -40,7 +40,7 @@ def main(argv=None) -> int:
                               "API, at half price; latencies are then not measurements")
     teacher.add_argument("--via-claude-code", action="store_true",
                          help="K1 only (B0 on train, Anthropic teacher): send the calls through `claude -p` on the "
-                              "author's Claude subscription (SPEC D25); costs and latencies are then not measurements")
+                              "logged-in Claude subscription (SPEC D25); costs and latencies are then not measurements")
 
     # ---- F1: replay and the call-site registry
     p = sub.add_parser("replay", help="resend the first attempt of every invocation of a B0 run to another engine")
@@ -71,7 +71,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("train", help="S5: one LoRA adapter for a cluster; registers the adapters fact once every cluster has one")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--cluster", required=True)
-    p.add_argument("--on", required=True, choices=("local", "modal"), help="local: this machine; modal: a Modal GPU")
+    p.add_argument("--on", required=True, choices=("local", "modal", "tinker"),
+                   help="local: this machine; modal: a Modal GPU (the registered configuration's); tinker: "
+                        "Thinking Machines' Tinker, Qwen3-8B only (bench/train_tinker.py)")
+    p.add_argument("--tinker-config", default="configs/train-tinker.yaml",
+                   help="--on tinker only: what Tinker needs besides config.yaml's train section")
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")
@@ -120,6 +124,9 @@ def main(argv=None) -> int:
                 print(f"bench prereg: registered with null values: {', '.join(registered['unset'])}", file=sys.stderr)
             print(f"{registered['hash']} ({'committed' if registered['new'] else 'already registered'} at "
                   f"{registered['commit'][:12]}; `git push` publishes it)")
+        elif args.command == "train" and args.on == "tinker":  # optional: the only import of the Tinker SDK
+            from bench import train_tinker
+            return train_tinker.cli(args)
         elif args.command in ("train", "loadtest", "preflight"):  # F3: each reports its own errors
             from bench import loadtest, preflight, train
             return {"train": train.cli, "loadtest": loadtest.cli, "preflight": preflight.cli}[args.command](args)

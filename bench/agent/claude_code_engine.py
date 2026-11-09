@@ -1,7 +1,7 @@
 """K1 through Claude Code (`bench run --via-claude-code`, K1 only): the teacher's calls sent by the
-`claude` CLI in headless mode, on the author's Claude subscription, instead of the Messages API.
+`claude` CLI in headless mode, on the logged-in Claude subscription, instead of the Messages API.
 
-Anthropic allowed this for this project only (SPEC D25). Each call runs `claude -p` once, with the CHESS
+It needs the provider's permission for that use (SPEC D25). Each call runs `claude -p` once, with the CHESS
 prompt on stdin and everything Claude Code can switch off switched off: its system prompt (replaced by an
 empty one), its tools, settings, MCP servers, skills, CLAUDE.md files, git instructions, attribution
 header, compaction and prompt caching. `max_tokens` and the effort are the role's. What Claude Code
