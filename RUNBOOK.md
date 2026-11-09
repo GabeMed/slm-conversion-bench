@@ -255,6 +255,33 @@ BENCH_CANDIDATE=<the chosen candidate> modal deploy -m modal_apps.serve_vllm
 The last `bench train` prints the adapters fact. Write its path into `arms.B4.adapters` and
 `arms.B5.adapters` **before** that deploy: the server serves the adapters the fact names.
 
+#### Training on Tinker (optional)
+
+Not the registered protocol: the registered run trains on Modal, as above. Using a Tinker adapter in it is a
+deviation; record it in `prereg/DEVIATIONS.md` (SPEC §6).
+
+```sh
+uv venv .venv-tinker --python 3.12
+uv pip install --python .venv-tinker/bin/python -r env/tinker/requirements.lock -e ".[test]"
+TINKER_API_KEY=... bench train --cluster <c> --on tinker
+modal volume put slm-bench-adapters train/adapters/<c>/adapter /<adapter_sha256>   # the command it prints
+```
+
+- Same plan, dataset checks and outputs as `--on modal` (adapter and manifest, `where: tinker`). Settings
+  besides config.yaml's `train` section: `configs/train-tinker.yaml`.
+- Only Qwen3-8B is offered (2026-11-09). Granite-4.2-8B and Nemotron-3-Nano-4B are refused.
+- Tinker cannot set alpha, dropout or a revision. Every difference is listed in `accept_differences` and
+  recorded in the manifest. An adapter whose exported rank, alpha or modules differ from config.yaml is not
+  installed.
+- Tinker bills per token. The manifest records the tokens and no price.
+- Exported weights are kept on Tinker (`export_ttl_s`): re-running collects them. A run interrupted before
+  the export is lost.
+- This path has never run against the service. Unverified: the alpha Tinker trains with, the exact modules,
+  its Qwen3-8B context and revision, determinism, and vLLM loading the converted adapter. Settle them with a
+  one-step probe on the smallest cluster: a `--config` that extends config.yaml and sets
+  `train.sft.max_steps: 1`. Move its adapter out of `train/adapters/<c>` afterwards: `--on tinker` never
+  replaces one.
+
 ## Day 2
 
 ### 10. The load test and the SLM's cost
