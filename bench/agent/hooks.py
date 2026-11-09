@@ -26,6 +26,7 @@ split over worker processes (`bench run --workers`) gives each its own C1 file a
 import json
 import os
 import random
+import sys
 import threading
 import time
 import uuid
@@ -494,15 +495,34 @@ def invoke_agent_call(call_site: str, invocation_key: str, message: str, parse: 
 
 def _recording(inner: Any) -> Any:
     """Retrieval embeddings are the harness's infrastructure, not the model under test: any failure
-    (a missing or rejected key, a network error) is a harness failure, even where CHESS swallows it."""
+    (a missing or rejected key, a network error) is a harness failure, even where CHESS swallows it.
+    A transport failure (what `classify` calls one: 408, 429, >= 500, a timeout or lost connection)
+    is first retried as a model call's is (patch 5b: `retries.http_max_attempts`, the same backoff),
+    each retry reported on stderr; the last one, or any other failure, is the harness error."""
     from langchain_core.embeddings import Embeddings
+
+    def retried(fn: Callable[[], Any]) -> Any:
+        http_max_attempts = _config["retries"]["http_max_attempts"]
+        failures = 0
+        while True:
+            try:
+                return fn()
+            except Exception as e:
+                if classify(e) != "transport":
+                    raise
+                failures += 1
+                if failures >= http_max_attempts:
+                    raise
+                message = f"embeddings: transport failure on attempt {failures} of {http_max_attempts}, retrying: {type(e).__name__}: {e}"
+                print(redact(scrub(message), _config), file=sys.stderr, flush=True)
+                _backoff(failures)
 
     class Recording(Embeddings):
         def embed_documents(self, texts):
-            return _harness("embeddings", lambda: inner.embed_documents(texts))
+            return _harness("embeddings", lambda: retried(lambda: inner.embed_documents(texts)))
 
         def embed_query(self, text):
-            return _harness("embeddings", lambda: inner.embed_query(text))
+            return _harness("embeddings", lambda: retried(lambda: inner.embed_query(text)))
 
     return Recording()
 
@@ -515,7 +535,8 @@ def embeddings(purpose: str):
         if not os.environ.get("OPENAI_API_KEY"):
             raise HarnessError("embeddings.provider is openai and OPENAI_API_KEY is not set")
         from langchain_openai import OpenAIEmbeddings
-        return _recording(OpenAIEmbeddings(model=settings[f"{purpose}_model"]))
+        # max_retries=0: the client's own retries (2 by default) would multiply ours; one policy, every retry reported
+        return _recording(OpenAIEmbeddings(model=settings[f"{purpose}_model"], max_retries=0))
     if provider == "fake":
         from langchain_core.embeddings import DeterministicFakeEmbedding
         return _recording(DeterministicFakeEmbedding(size=settings["fake_size"]))
