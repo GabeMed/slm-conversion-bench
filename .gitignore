@@ -25,3 +25,6 @@ train/datasets/
 
 # generated reports (bench report): regenerated from judgments, never edited by hand
 reports/
+
+# RunPod: what this machine created there (pods, volume, tunnels) and the pods' host keys (runpod_apps/state.py)
+.runpod/

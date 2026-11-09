@@ -310,6 +310,116 @@ Modal's) and differ in `where`. To compare the adapters, serve each in turn and 
 it (`bench replay <B0 calib> --engine slm:<candidate>+lora:<served name>`, then `bench eval --per-call`).
 `--on tinker` never replaces an adapter; `--on modal` does.
 
+`bench train --on tinker` needs `TINKER_API_KEY` set in the shell (a key named otherwise, such as
+`TINKER_MACHINES_API_KEY`, is not read: export it as `TINKER_API_KEY`).
+
+### RunPod: the inference provider (after K1)
+
+RunPod can replace Modal for **inference**: the SLM servers, the load test's client and P-4's HF-PEFT
+reference (`runpod_apps/`). Training stays on Tinker (`bench train --on tinker`, above). The pods run what the
+Modal apps run: the serving plan and the `vllm serve` command come from `modal_apps/common.py`, unchanged, the
+adapters at `/adapters/<sha256>`, the weights at the pinned revision, offline.
+
+**How it differs from Modal.** A pod bills by the second from creation to termination, CPU and RAM included
+(an L40S Secure pod: $1.09/h on 2026-11-04). There is no scale-to-zero: **`down` when done.** A pod publishes
+SSH only. vLLM is reached through an SSH tunnel to `http://127.0.0.1:<port>/v1`, not through RunPod's HTTPS
+proxy: the proxy ends every request at 100 s, and an agent call may take 600. vLLM's own key is the auth
+behind SSH.
+
+**Apply the configuration after K1, never before:** a running `--resume-from` checks `config.yaml`'s hash.
+
+```sh
+python scripts/apply_config_patch.py configs/runpod.patch.yaml           # the diff, nothing written
+python scripts/apply_config_patch.py configs/runpod.patch.yaml --write
+```
+
+The patch makes four changes:
+- `modal.gpu_prices`: RunPod's L40S price, $0.000303 a second, with CPU and memory at 0 because the pod's
+  price includes them;
+- each candidate's `endpoint`: `base_url` at the tunnel's port, `headers_env: null`;
+- `serving.unauthenticated: true`;
+- a new `runpod` section.
+
+Its header explains each change. This is a change after Stage 0 to the serving provider, the GPU price
+J8 reads, and (with `train_backend: tinker`) the training backend. Before `bench prereg` (step 12), add it
+to `prereg/DEVIATIONS.md` and commit it:
+
+```
+- 2026-11-xx · provider changed after Stage 0: config.yaml (modal.gpu_prices, the candidates' endpoints,
+  serving.unauthenticated, runpod): inference on RunPod (L40S Secure, $1.09/h, CPU and RAM bundled) instead
+  of Modal; adapters trained on Tinker instead of Modal; J8's cost is also reported at Modal's price
+  (2026-09-30), as sensitivity
+```
+
+For that sensitivity, run J8 again on the same load tests with a `--config` that extends config.yaml and
+sets `modal.gpu_prices` back to Modal's values. The patch keeps them in a comment. Report both costs.
+
+**Once, before the first pod** (no pod is created yet):
+
+1. **The API key.** RunPod console > Settings > API Keys, with read/write on pods and network volumes. Export it
+   as `RUNPOD_API_KEY` in the shell, never in a file of this repository. No command prints it.
+2. **An SSH key** at `runpod.ssh_key` (default `~/.ssh/id_ed25519`, created with `ssh-keygen -t ed25519`).
+   Each pod authorizes its `.pub` through `PUBLIC_KEY`, so it need not be registered in the account.
+3. **vLLM's key as a RunPod secret:** console > Secrets, named `slm-bench-vllm-api-key`
+   (`runpod.secrets.vllm_api_key`). Its value is the one exported locally as `SLM_VLLM_API_KEY` (the
+   candidates' `api_key_env`). The pods receive it as `VLLM_API_KEY` through
+   `{{ RUNPOD_SECRET_slm-bench-vllm-api-key }}`, so this machine never sends it to RunPod.
+4. **A spend limit** on the RunPod account (Settings > Billing; the default is $80/h) and a prepaid balance
+   no larger than this phase needs.
+5. **The volume and its data center:**
+   ```sh
+   bench serve --on runpod setup
+   ```
+   This creates the network volume `slm-bench` (100 GB) in the data center with the most L40S available
+   now, or in `runpod.datacenter` when one is set. A network volume lives in one data center and attaches
+   only to pods created there, so every pod goes to that data center. The volume bills per GB-month while
+   it exists. It holds the weights, the adapters and the training environment.
+6. **The weights,** once per candidate, from a CPU pod that is terminated afterwards:
+   ```sh
+   bench serve --on runpod download --candidate <name>
+   ```
+
+**Serving** (in the training environment: computing the plan reads the candidate's tokenizer, as
+`modal deploy` does):
+
+```sh
+bench serve --on runpod up --candidate <name>       # prints http://127.0.0.1:<port>/v1
+bench serve --on runpod status                      # the pods, $/h, the spend so far, the tunnels
+bench serve --on runpod tunnel --candidate <name>   # reopens the tunnel after the laptop slept
+bench serve --on runpod down --candidate <name>
+bench serve --on runpod down --all                  # every pod, recorded or named slm-bench-*
+```
+
+`up` does the following, in order:
+- creates the GPU pod;
+- uploads this checkout's code and the adapters missing from the volume;
+- starts vLLM, which checks its own version, the adapters' bytes and the auth, then warms up;
+- opens the local tunnel.
+
+A pod that does not come up is terminated. `.runpod/state.json` records every pod the moment it is created.
+Each pod also terminates itself after `runpod.max_pod_hours` (12 h for a server, 8 h for a job; `up --hours`
+overrides). That is a backstop, not the plan.
+
+**Cost discipline.** Run `status` before stepping away and `down` when done. `down --all` also terminates
+any pod named `slm-bench-*` that this machine did not record. At the end of the day, check the console's
+Pods page, and the network volume if it is no longer needed.
+
+- **Step 3 (smoke) and step 4 (pilot):** `up` each candidate before `bench replay ... --engine slm:<name>`.
+  `bench preflight`'s `engines` check calls every candidate, so both must be up while it runs.
+- **Step 9:** P-4's reference runs on a RunPod GPU, with the adapter uploaded from `train/adapters/` when it
+  is missing:
+  ```sh
+  bench train --cluster <the smallest> --on tinker
+  bench serve --on runpod down --candidate <chosen> ; bench serve --on runpod up --candidate <chosen>
+  bench preflight --parity <the smallest> --on runpod
+  ```
+  A server serves the adapters that exist when it starts, so restart it after training. `training_time`
+  reads the Tinker manifests (`runpod.train_backend: tinker`; `--train-backend` overrides).
+- **Step 10:** `bench loadtest ... --on runpod`. AIPerf runs in a CPU pod in the server's data center. That
+  pod reaches vLLM through its own SSH tunnel with a key pair made for this load test, which the server
+  authorizes and then removes. The runs come back into `runs/<id>/` with `where: runpod` and `gpu: L40S`,
+  the key of the price J8 reads.
+
 ## Day 2
 
 ### 10. The load test and the SLM's cost
@@ -320,6 +430,7 @@ bench loadtest --engine slm:<candidate>+lora:<served name> --source <B0 calib> -
 bench judge j8 --loadtest <run> --loadtest <run> --slo-from <B0 calib>
 ```
 
+- On RunPod (the section after step 9): `--on runpod` instead of `--on modal`, with the candidate up.
 - The first load test is the base (B3's engine); the second runs once per adapter.
 - Each `bench loadtest` writes one run per concurrency level. J8 takes every run of every engine,
   each as a `--loadtest`.
@@ -348,7 +459,9 @@ J7 prints the allocation fact. Write its path into `arms.B5.allocation`.
 - what steps 2 and 3 corrected so that every engine answers (endpoints, `params`, `reasoning`);
 - the arms' facts (`choice`, `centroids`, `adapters`, `allocation`);
 - `arms.B1.few_shot` (`k`, `source_run`) and `cost.slo_from`;
-- `curation.max_per_question_call_site`, if step 9 lowered it.
+- `curation.max_per_question_call_site`, if step 9 lowered it;
+- `configs/runpod.patch.yaml`, if inference moved to RunPod (its line in `prereg/DEVIATIONS.md`, the
+  section after step 9).
 
 Check it, keep the output for the report, and register:
 

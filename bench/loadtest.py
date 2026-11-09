@@ -16,11 +16,12 @@ prefix cache holds only what real traffic shares, never an exact repeat carried 
 
 `--on local` runs AIPerf here against the engine's endpoint (the llama.cpp smoke server);
 `--on modal` runs it in a Modal CPU container (`modal_apps/loadtest.py`) against the deployed vLLM server,
-so the client sits in the same cloud as the server. Either way it first waits for the server to list the
-model (a cold vLLM loads its weights first), records the model card the server lists (for an adapter, the
-path it was loaded from), and warms it up before measuring. The manifest keeps what was configured
-(`gpu`, `prefix_cache`) apart from what was observed (`observed`): the GPUs the Modal server reports it
-got, and the share of prompt tokens the server says it read from its cache (AIPerf's
+so the client sits in the same cloud as the server; `--on runpod` in a RunPod CPU pod in the serving pod's
+data center (`runpod_apps/loadtest.py`), through its own SSH tunnel to the server. Either way it first waits
+for the server to list the model (a cold vLLM loads its weights first), records the model card the server
+lists (for an adapter, the path it was loaded from), and warms it up before measuring. The manifest keeps
+what was configured (`gpu`, `prefix_cache`) apart from what was observed (`observed`): the GPUs the Modal or
+RunPod server reports it got, and the share of prompt tokens the server says it read from its cache (AIPerf's
 `overall_usage_prompt_cache_read_pct`, from the servers' own `usage`). The levels of one invocation share a
 `sweep_id` and run in increasing order on one warm server, so later levels meet a fuller prefix cache.
 
@@ -296,7 +297,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
         raise LoadtestError(f"engine {engine} has no endpoint.base_url: serve it first")
     url = server_root(endpoint["base_url"])
     api_key, headers = None, {}
-    if on == "local":  # on Modal, the credentials are the load client's secrets, never sent from here
+    if on == "local":  # on Modal or RunPod, the credentials are the load client's secrets, never sent from here
         if endpoint.get("api_key_env"):
             api_key = os.environ.get(endpoint["api_key_env"])
             if not api_key:
@@ -320,8 +321,15 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
         from modal_apps import loadtest as modal_loadtest
 
         remote = modal_loadtest
+    elif on == "runpod":
+        if not (vllm and engine.startswith("slm:")):
+            raise LoadtestError("--on runpod load-tests an SLM candidate's vLLM server (slm:<candidate>[+lora:...])")
+        sys.path.insert(0, str(paths.ROOT))
+        from runpod_apps import loadtest as runpod_loadtest
+
+        remote = runpod_loadtest.connect(config, engine[len("slm:"):].partition("+lora:")[0])
     elif on != "local":
-        raise LoadtestError(f"--on must be local or modal, not {on!r}")
+        raise LoadtestError(f"--on must be local, modal or runpod, not {on!r}")
 
     run_dirs = []
     sweep_id = f"sweep-{_slug(engine)}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
@@ -394,9 +402,15 @@ def cli(args) -> int:
             print("bench loadtest: --tokenizer needs --tokenizer-revision, a 40-hex commit", file=sys.stderr)
             return 2
         tokenizer = {"repo": args.tokenizer, "revision": args.tokenizer_revision}
+    errors: Tuple[type, ...] = (LoadtestError,)
+    if args.on == "runpod":  # a pod or RunPod call that failed is reported like a load test error
+        sys.path.insert(0, str(paths.ROOT))
+        from runpod_apps.settings import RunPodError
+
+        errors += (RunPodError,)
     try:
         run_dirs = loadtest(args.config, args.engine, args.source, args.on, args.concurrency, tokenizer)
-    except LoadtestError as e:
+    except errors as e:
         print(f"bench loadtest: {e}", file=sys.stderr)
         return 2
     for run_dir in run_dirs:

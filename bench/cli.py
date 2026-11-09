@@ -85,14 +85,28 @@ def main(argv=None) -> int:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")
     p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed")
-    p.add_argument("--on", required=True, choices=("local", "modal"), help="where the AIPerf client runs")
+    p.add_argument("--on", required=True, choices=("local", "modal", "runpod"),
+                   help="where the AIPerf client runs (modal, runpod: beside the server, in the same cloud)")
     p.add_argument("--concurrency", type=int, nargs="+", help="levels (default: loadtest.concurrency)")
     p.add_argument("--tokenizer", help="HF repo of the engine's tokenizer, when the engine is not an SLM candidate")
     p.add_argument("--tokenizer-revision", help="its 40-hex commit")
     p = sub.add_parser("preflight", help="the Day-1 preconditions of SPEC 7.1 and P-4, each with its action")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--parity", metavar="CLUSTER", help="run P-4 on this cluster's adapter against the served candidate")
-    p.add_argument("--on", default="modal", choices=("local", "modal"), help="where P-4's HF-PEFT reference runs")
+    p.add_argument("--on", default="modal", choices=("local", "modal", "runpod"), help="where P-4's HF-PEFT reference runs")
+    p.add_argument("--train-backend", choices=("modal", "tinker"),
+                   help="where the adapters are trained, for training_time (default: runpod.train_backend when the "
+                        "configuration has a runpod section, else modal)")
+    p = sub.add_parser("serve", help="the SLM server on RunPod: setup, download, up, down, status, tunnel "
+                                     "(on Modal: modal deploy -m modal_apps.serve_vllm)")
+    p.add_argument("action", choices=("setup", "download", "up", "down", "status", "tunnel"))
+    p.add_argument("--on", required=True, choices=("runpod",))
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--candidate", help="roles.slm_candidates[].name (download, up, down, tunnel)")
+    p.add_argument("--all", action="store_true", help="down: every pod, recorded or listed under runpod.name_prefix")
+    p.add_argument("--force", action="store_true", help="download: again, although recorded as done")
+    p.add_argument("--hours", type=float, help="up: the pod terminates itself after this long (default "
+                                               "runpod.max_pod_hours.serve)")
 
     f4_commands(sub)
     args = parser.parse_args(argv)
@@ -132,6 +146,11 @@ def main(argv=None) -> int:
         elif args.command == "train" and args.on == "tinker":  # optional: the only import of the Tinker SDK
             from bench import train_tinker
             return train_tinker.cli(args)
+        elif args.command == "serve":  # RunPod only: the only import of runpod_apps from the CLI
+            from bench import paths
+            sys.path.insert(0, str(paths.ROOT))
+            from runpod_apps import serve
+            return serve.cli(args)
         elif args.command in ("train", "loadtest", "preflight"):  # F3: each reports its own errors
             from bench import loadtest, preflight, train
             return {"train": train.cli, "loadtest": loadtest.cli, "preflight": preflight.cli}[args.command](args)

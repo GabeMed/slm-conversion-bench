@@ -17,7 +17,12 @@ every prompt. With no decisive prompt, P-4 is `undecided`, never a pass nor a re
 is among the other side's top-k (a numerical near-tie, after which the sequences are compared no further).
 The served base is compared with HF too, so a failure says whether the adapter or the serving itself
 (template, revision, dtype) disagrees, which changes the action. The reference runs in the Modal GPU
-function `modal_apps/train.py:peft_reference` on Day 1, or locally for a small model.
+function `modal_apps/train.py:peft_reference` on Day 1 (`--on modal`), on a RunPod GPU pod
+(`runpod_apps/parity.py`, `--on runpod`), or locally for a small model.
+
+**The training backend** (`training_time`): the throughput is measured on the backend the adapters are trained
+on: Modal (`where: modal`, on `train.gpu`, the registered configuration) or Tinker (`where: tinker`), by
+`--train-backend`, else `runpod.train_backend` when the configuration has a `runpod` section, else Modal.
 """
 import json
 import re
@@ -157,27 +162,42 @@ def check_pilot_spend(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
-def check_training_time(config: Dict[str, Any]) -> Dict[str, Any]:
+TRAIN_BACKENDS = ("modal", "tinker")
+
+
+def train_backend(config: Dict[str, Any], backend: Optional[str] = None) -> str:
+    """Where the adapters are trained: the one asked, else the `runpod` section's, else Modal (the registered)."""
+    backend = backend or (config.get("runpod") or {}).get("train_backend") or "modal"
+    if backend not in TRAIN_BACKENDS:
+        raise PreflightError(f"the training backend must be one of {TRAIN_BACKENDS}, not {backend!r}")
+    return backend
+
+
+def check_training_time(config: Dict[str, Any], backend: Optional[str] = None) -> Dict[str, Any]:
     """The hours the largest dataset takes to train: its tokens, counted as training counts them, times
-    the epochs, at the tokens per second the first adapter trained on Modal measured, on the GPU and the
-    base this configuration trains. The adapters train at the same time, each in its own container, so
-    the largest one decides."""
+    the epochs, at the tokens per second the first adapter trained on the backend measured (on Modal: on the
+    GPU this configuration trains on), on the base this configuration trains. The adapters train at the same
+    time, each in its own container (or Tinker run), so the largest one decides."""
     from bench import train
 
+    backend = train_backend(config, backend)
     budget_h = config["preflight"]["schedule"]["train_hours_max"]
     precondition = ("the measured training time confirms the schedule: the adapters train at the same time, "
                     "and the largest one overnight (SPEC 7.1, 7.3)")
     manifests, unreadable = _manifests("*/manifest.json", train.adapters_dir())
-    gpu_runs = [m for m in manifests if m.get("where") == "modal" and m.get("gpu") == config["train"]["gpu"]
-                and m["stats"].get("tokens_per_second")]
+    gpu_runs = [m for m in manifests if m.get("where") == backend and m["stats"].get("tokens_per_second")
+                and (backend != "modal" or m.get("gpu") == config["train"]["gpu"])]
     evidence: Dict[str, Any] = {"train_hours_max": budget_h, "unreadable_manifests": unreadable}
+    if backend != "modal":
+        evidence["backend"] = backend
     try:
         datasets = sorted(train.datasets_dir().glob("*.jsonl")) if gpu_runs else []
         plans = {path.stem: train.training_plan(config, path.stem) for path in datasets}
         gpu_runs = [m for m in gpu_runs if m.get("base") in [plan["base"] for plan, _ in plans.values()]]
         if not gpu_runs:
-            evidence["needs"] = ("the datasets (bench datasets) and one adapter trained on Modal on this base and GPU "
-                                 "(bench train --on modal), to measure the tokens trained per second")
+            evidence["needs"] = (f"the datasets (bench datasets) and one adapter trained on {backend.capitalize()} on "
+                                 f"this base{' and GPU' if backend == 'modal' else ''} (bench train --on {backend}), "
+                                 "to measure the tokens trained per second")
             return _check("training_time", precondition, PENDING, evidence,
                           "train the smallest cluster first, then run preflight again")
         tokens = {cluster: train.precheck(plan, train.parse_dataset(raw, f"{cluster}.jsonl"))["tokens"]
@@ -525,8 +545,15 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
 
         with modal_train.app.run():
             ref = modal_train.peft_reference.remote(manifest["adapter_sha256"], *args)
+    elif on == "runpod":
+        import sys
+
+        sys.path.insert(0, str(paths.ROOT))
+        from runpod_apps import parity
+
+        ref = parity.peft_reference(config, cluster, manifest["adapter_sha256"], *args)
     else:
-        raise PreflightError(f"--on must be local or modal, not {on!r}")
+        raise PreflightError(f"--on must be local, modal or runpod, not {on!r}")
     verdict = parity_verdict(served_base, served_adapter, ref["base"], ref["adapter"], ref["stop_ids"])
     verdict.update({"cluster": cluster, "slm": manifest["slm"], "adapter_sha256": manifest["adapter_sha256"],
                     "served": {"base": entry["name"], "adapter": manifest["served_name"]}, "reference_on": on,
@@ -534,18 +561,27 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
     return verdict
 
 
-def _unreachable() -> tuple:
-    """What makes P-4 undecidable rather than a bug of this code: a missing input, a server or the Modal
-    reference that cannot be reached or refuses."""
+def _unreachable(on: str = "modal") -> tuple:
+    """What makes P-4 undecidable rather than a bug of this code: a missing input, a server or the
+    reference (Modal's or RunPod's) that cannot be reached or refuses. Only the provider P-4 runs on is
+    imported."""
+    import sys
+
     from bench.train import TrainError
 
-    errors = (PreflightError, TrainError, urllib.error.URLError, OSError)
-    try:
-        import modal.exception
+    errors: tuple = (PreflightError, TrainError, urllib.error.URLError, OSError)
+    if on == "modal":
+        try:
+            import modal.exception
 
-        errors += (modal.exception.Error,)
-    except ImportError:
-        pass
+            errors += (modal.exception.Error,)
+        except ImportError:
+            pass
+    elif on == "runpod":
+        sys.path.insert(0, str(paths.ROOT))
+        from runpod_apps.settings import RunPodError
+
+        errors += (RunPodError,)
     return errors
 
 
@@ -558,7 +594,7 @@ def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -
                       "run it before the full training and the load test")
     try:
         verdict = lora_parity(config, cluster, on)
-    except _unreachable() as e:  # a missing adapter, server or reference is a failed check, with its reason
+    except _unreachable(on) as e:  # a missing adapter, server or reference is a failed check, with its reason
         return _check("lora_parity", precondition, FAIL, {"error": f"{type(e).__name__}: {e}"},
                       "serve the base and the adapter, then run P-4 again; P-4 is not decided")
     return _check("lora_parity", precondition, verdict["status"], verdict, verdict["action"])
@@ -566,13 +602,15 @@ def check_lora_parity(config: Dict[str, Any], cluster: Optional[str], on: str) -
 
 # ---------------------------------------------------------------- the command
 
-def run_checks(config: Dict[str, Any], parity_cluster: Optional[str] = None, on: str = "modal") -> List[Dict[str, Any]]:
+def run_checks(config: Dict[str, Any], parity_cluster: Optional[str] = None, on: str = "modal",
+               backend: Optional[str] = None) -> List[Dict[str, Any]]:
     return [check_engines(config), check_agent_runs(config), check_call_sites(config), check_data(config),
-            check_teacher_terms(config), check_pilot_spend(config), check_training_time(config), check_throughput(),
-            check_lora_parity(config, parity_cluster, on)]
+            check_teacher_terms(config), check_pilot_spend(config), check_training_time(config, backend),
+            check_throughput(), check_lora_parity(config, parity_cluster, on)]
 
 
-def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = "modal") -> int:
+def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = "modal",
+              backend: Optional[str] = None) -> int:
     from bench.contracts.config import config_sha256, load_config
     from bench.provenance import git_state, redact, scrub
 
@@ -582,7 +620,7 @@ def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = 
     if on == "modal":
         os.environ["BENCH_CONFIG"] = str(Path(config_path).resolve())  # the Modal reference reads this configuration
     started = datetime.now(timezone.utc)
-    checks = run_checks(config, parity_cluster, on)
+    checks = run_checks(config, parity_cluster, on, backend) if backend else run_checks(config, parity_cluster, on)
     run_dir = paths.RUNS / f"preflight-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
     run_dir.mkdir(parents=True)
     report = {"type": "preflight", "config_sha256": config_sha256(config), **git_state(),
@@ -597,7 +635,7 @@ def preflight(config_path: str, parity_cluster: Optional[str] = None, on: str = 
 
 def cli(args) -> int:
     try:
-        return preflight(args.config, args.parity, args.on)
+        return preflight(args.config, args.parity, args.on, getattr(args, "train_backend", None))
     except PreflightError as e:
         import sys
 

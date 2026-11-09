@@ -1,0 +1,23 @@
+# The training environment (env/train/requirements.lock) as an image, for RunPod jobs on a GPU (P-4's
+# reference): runpod.images.train. Optional: without it, the first such job installs the same lock onto the
+# network volume (runpod_apps/pods.py:TRAIN_ENV), which takes minutes once. RunPod does not build images, so
+# build it here and push it to a registry RunPod can pull from (a public GHCR package, or a private one with a
+# registry credential added in RunPod's console):
+#
+#   TAG=$(sha256sum env/train/requirements.lock | cut -c1-12)
+#   docker build --platform linux/amd64 -f env/runpod/Dockerfile.train -t ghcr.io/<owner>/slm-bench-train:$TAG .
+#   echo $GITHUB_TOKEN | docker login ghcr.io -u <owner> --password-stdin
+#   docker push ghcr.io/<owner>/slm-bench-train:$TAG
+#
+# then set runpod.images.train to that reference. A job uses /opt/bench-train only when its LOCK_SHA256 is the
+# lock's in the checkout that runs it; otherwise it falls back to the volume's environment.
+FROM nvidia/cuda:13.0.3-devel-ubuntu24.04
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server openssh-client curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
+COPY env/train/requirements.lock /opt/bench-train.lock
+RUN UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR=/opt/python uv venv --python 3.12 /opt/bench-train \
+ && uv pip install --python /opt/bench-train/bin/python --no-cache -r /opt/bench-train.lock \
+ && sha256sum /opt/bench-train.lock | cut -d' ' -f1 > /opt/bench-train/LOCK_SHA256

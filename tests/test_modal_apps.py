@@ -341,12 +341,19 @@ def test_the_server_fails_closed_without_any_auth():
 
 
 def test_the_shipped_config_serves_behind_proxy_auth_with_headers_for_every_candidate():
+    """On Modal, proxy auth and its headers; once configs/runpod.patch.yaml is applied (a `runpod` section), no
+    proxy (SSH and vLLM's key) and each candidate on its tunnel's port. Either way vLLM's key is required."""
     from bench.contracts.config import load_config
 
     config = load_config(paths.ROOT / "config.yaml")
-    assert config["serving"]["unauthenticated"] is False
+    runpod = config.get("runpod")
+    assert config["serving"]["unauthenticated"] is bool(runpod)
     for entry in config["roles"]["slm_candidates"]:
-        assert set(entry["endpoint"]["headers_env"]) == {"Modal-Key", "Modal-Secret"}
+        if runpod:
+            assert not entry["endpoint"]["headers_env"]
+            assert entry["endpoint"]["base_url"] == f"http://127.0.0.1:{runpod['local_ports'][entry['name']]}/v1"
+        else:
+            assert set(entry["endpoint"]["headers_env"]) == {"Modal-Key", "Modal-Secret"}
         assert entry["endpoint"]["api_key_env"]  # the server always holds vLLM's key: clients must send it
 
 
