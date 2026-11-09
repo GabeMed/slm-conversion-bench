@@ -18,7 +18,7 @@ from xml.sax.saxutils import escape
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nest  # noqa: E402
 
-W = 840  # GitHub draws it at about 1.05×: the cards a little larger than on the site
+W = 960  # GitHub draws it a little under 1×: about two and a half cards in view
 CARD_W, CARD_H, GAP = 420, 458, 20
 HEAD = 8  # no head of its own: the README's "## How it works" is the title
 H = HEAD + CARD_H + 6
