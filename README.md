@@ -171,6 +171,6 @@ owners' trademarks, used only to name the models.
 <p align="center"><sub>A <a href="https://nest.technology">Nest</a> research project · <a href="https://nest.technology/benchmarks">nest.technology/benchmarks</a></sub></p>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-night.png">
-  <img src=".github/assets/footer-day.png" width="100%" align="top" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-dark.svg">
+  <img src=".github/assets/footer-light.svg" width="100%" align="top" alt="Pixel art of the Nest city by day: white towers and domes among green hills, a river with sailboats and a bridge, snowy mountains, and an airship towing a NEST banner.">
 </picture>

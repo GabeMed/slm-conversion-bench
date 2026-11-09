@@ -22,6 +22,7 @@ def _load(name):
 card = _load("results_card")
 diagram = _load("diagram")
 hero = _load("hero")
+footer = _load("footer")
 nest = _load("nest")
 
 CONFIG = {
@@ -102,3 +103,10 @@ def test_text_fits():
 def test_outside_the_registered_analysis_code():
     from bench.prereg import ANALYSIS_CODE
     assert not any("scripts/brand".startswith(p) or p.startswith("scripts") for p in ANALYSIS_CODE)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_footer_is_svg_with_moving_blimps(theme):
+    text = footer.draw(theme)
+    root = _svg(text)
+    assert "@keyframes f-banner" in text and len([e for e in root.iter() if e.tag.endswith("image")]) >= 2
