@@ -1,11 +1,15 @@
 """A small typed client of RunPod's REST API v2 (https://api.runpod.io/v2/openapi.json, read 2026-11-09):
 pods, network volumes, the GPU catalog and secrets (names only). Standard library only.
 
-Retries: a 429 waits for its Retry-After, a 5xx or a connection failure backs off exponentially, up to
-`max_attempts`. Creating a pod is not idempotent, so a create that failed in transit is retried only after
-listing the pods by name: one that was created after all is adopted, never created twice (a pod bills). The
-API key is sent in the Authorization header and never appears in an error's text.
+Retries: a 429 waits for its Retry-After; a 5xx, a connection failure or an answer that is not the JSON
+asked for (cut short, an HTML page) backs off exponentially, up to `max_attempts`. Creating a pod is not
+idempotent, so a create that failed in transit is retried only after looking for the pod it may have made:
+by its name, which carries a token unique to that create, and the same token in its environment
+(BENCH_POD_TOKEN), never a pod that already exited. The same look is made once more after the last attempt;
+when it cannot be made, the error says a pod may exist and how to find it. The API key is sent in the
+Authorization header and never appears in an error's text.
 """
+import http.client
 import json
 import time
 import urllib.error
@@ -17,6 +21,8 @@ from runpod_apps.settings import RunPodError
 
 BASE = "https://api.runpod.io"
 RETRYABLE = {429, 500, 502, 503, 504}
+MAX_PAGES = 100
+DEAD = ("EXITED", "TERMINATED", "ERROR")
 AVAILABILITY_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
 
 
@@ -52,8 +58,8 @@ class RunPodClient:
 
     def request(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Any = None,
                 retry: bool = True, on_retry: Optional[Callable[[], Any]] = None) -> Any:
-        """One API call; `on_retry` runs before a retry and may return the answer instead (the pod a failed
-        create made after all)."""
+        """One API call; `on_retry` runs before each retry and once after the last failed attempt, and may
+        return the answer instead (the pod a failed create made after all)."""
         attempt = 0
         while True:
             attempt += 1
@@ -70,11 +76,17 @@ class RunPodClient:
                         wait = float(e.headers.get("Retry-After") or "")
                     except ValueError:
                         wait = None
-            except (urllib.error.URLError, OSError) as e:  # no answer: connection refused, reset, timeout
-                failure = ApiError(None, self._clean(f"RunPod {method} {path}: {type(e).__name__}: {e}"))
+            except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
+                # no usable answer: refused, reset, timed out, cut short (IncompleteRead), not JSON
+                failure = ApiError(None, self._clean(f"RunPod {method} {path}: no usable answer: "
+                                                     f"{type(e).__name__}: {str(e)[:200]}"))
                 if not retry:
                     raise failure from None
             if attempt >= self.max_attempts:
+                if on_retry is not None:
+                    found = on_retry()
+                    if found is not None:
+                        return found
                 raise failure
             self._sleep(wait if wait is not None else self.backoff_s * 2 ** (attempt - 1))
             if on_retry is not None:
@@ -85,10 +97,32 @@ class RunPodClient:
     # ---------------------------------------------------------------- pods
 
     def create_pod(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /v2/pods. `body` names the pod uniquely and carries the same token as env BENCH_POD_TOKEN
+        (pods.pod_body), which is how a create whose answer was lost is recognised."""
+        name, token = body["name"], (body.get("env") or {}).get("BENCH_POD_TOKEN")
+        if not token or not name.endswith(token):
+            raise RunPodError(f"pod {name}: no unique token in its name and BENCH_POD_TOKEN: it could not be "
+                              "recognised if its answer were lost")
+
         def created_after_all():
-            pods = self.list_pods(name=body["name"])
-            return pods[0] if pods else None
-        return self.request("POST", "/v2/pods", body=body, on_retry=created_after_all)
+            found = [p for p in self.list_pods(name=name) if (p.get("env") or {}).get("BENCH_POD_TOKEN") == token
+                     and p.get("status") not in DEAD]
+            return found[0] if found else None
+
+        def look():
+            try:
+                return created_after_all()
+            except ApiError as e:
+                raise ApiError(e.status, f"creating pod {name} failed and the pods could not be listed to see whether "
+                                         f"it was made ({e}): a pod named {name} may exist: run `bench serve --on "
+                                         f"runpod down --all`") from None
+        try:
+            return self.request("POST", "/v2/pods", body=body, on_retry=look)
+        except ApiError as e:
+            if e.status is None or e.status in RETRYABLE:
+                raise ApiError(e.status, f"{e}; a pod named {name} may exist: run `bench serve --on runpod down "
+                                         "--all`") from None
+            raise
 
     def get_pod(self, pod_id: str) -> Optional[Dict[str, Any]]:
         """The pod, or None once it no longer exists (terminated)."""
@@ -100,14 +134,16 @@ class RunPodClient:
             raise
 
     def list_pods(self, name: Optional[str] = None) -> List[Dict[str, Any]]:
-        pods, cursor = [], None
-        while True:
+        """Every page, at most MAX_PAGES, stopping where the cursor does not advance."""
+        pods, cursor, seen = [], None, set()
+        for _ in range(MAX_PAGES):
             page = self.request("GET", "/v2/pods", query={"cursor": cursor}) or {}
             pods += page.get("pods") or []
             pagination = page.get("pagination") or {}
             cursor = pagination.get("nextCursor")
-            if not pagination.get("hasNextPage") or not cursor:
+            if not pagination.get("hasNextPage") or not cursor or cursor in seen:
                 break
+            seen.add(cursor)
         return [p for p in pods if name is None or p.get("name") == name]
 
     def terminate_pod(self, pod_id: str) -> bool:

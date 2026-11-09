@@ -23,6 +23,7 @@ from typing import Any, Dict
 from runpod_apps import pods as rp
 from runpod_apps import settings as rs
 from runpod_apps.settings import VOLUME, WORK, RunPodError
+from runpod_apps.ssh import TUNNEL_OPTIONS
 
 CLIENT_KEY = "/root/.ssh/bench_client"
 
@@ -54,14 +55,17 @@ def connect(config: Dict[str, Any], candidate: str) -> Any:
             try:
                 server.check(f"echo {rp.quote(public)} >> /root/.ssh/authorized_keys", "authorizing the load client")
                 client.check(f"ssh -f -N -i {CLIENT_KEY} -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
-                             f"-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
+                             f"-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ForwardAgent=no "
+                             f"{' '.join(TUNNEL_OPTIONS)} "
                              f"-L 127.0.0.1:{port}:localhost:{rp.POD_PORT} -p {endpoint['port']} root@{endpoint['host']} "
                              f"> {WORK}/jobs/tunnel.log 2>&1 < /dev/null",
                              "opening the client's tunnel to the server")
                 # the training environment, once per lock on the volume (AIPerf), before any level is timed
+                provider.clear_stale_train_lock(client)
                 client.start_job("train-env", rp.TRAIN_ENV + '"$PY" -c "import aiperf"')
                 client.wait_job("train-env", 3600, provider.poll_s)
-                session.update(provider=provider, client=client, levels=0)
+                calibration = calibrate(config, candidate, port, server, client, provider.poll_s)
+                session.update(provider=provider, client=client, levels=0, calibration=calibration)
                 yield
             finally:
                 session.clear()
@@ -93,9 +97,36 @@ def connect(config: Dict[str, Any], candidate: str) -> Any:
             files = unpack(archive.read_bytes())
         result = json.loads(files.pop("result.json"))
         state = client.read(f"{VOLUME}/vllm-cache/bench-serving/{candidate}.json")
-        return {**result, "server_state": json.loads(state) if state else None, "files": files}
+        return {**result, "server_state": json.loads(state) if state else None, "files": files,
+                "tunnel_calibration": session["calibration"]}
 
     return types.SimpleNamespace(app=types.SimpleNamespace(run=run), run_aiperf=types.SimpleNamespace(remote=run_aiperf))
+
+
+def calibration_spec(config: Dict[str, Any], candidate: str, base_url: str) -> Dict[str, Any]:
+    """Concurrency 1 (8 requests) and the sweep's highest (one request per slot), short and greedy."""
+    top = max(config["loadtest"]["concurrency"])
+    return {"base_url": base_url, "model": candidate, "concurrency": [1, top], "requests": {"1": 8, str(top): top},
+            "max_tokens": 8, "timeout_s": 120}
+
+
+def calibrate(config: Dict[str, Any], candidate: str, port: int, server, client, poll_s: float) -> Dict[str, Any]:
+    """Once per sweep, before it: the same small sample timed on the serving pod against vLLM's own port and on
+    the load client through its tunnel; `overhead_ms` (client minus server, per concurrency, p50) is what the
+    tunnel and the network add to each measured request, which the report can state."""
+    out = {}
+    for where, remote, base in (("server_localhost", server, f"http://127.0.0.1:{rp.POD_PORT}/v1"),
+                                ("client_tunnel", client, f"http://127.0.0.1:{port}/v1")):
+        remote.check(f"echo {rp.quote(json.dumps(calibration_spec(config, candidate, base)))} > {WORK}/calibrate.json",
+                     "writing the calibration")
+        remote.start_job("calibrate", f"python3 -m runpod_apps.job calibrate {WORK}/calibrate.json {WORK}/calibrate.out.json")
+        remote.wait_job("calibrate", 1800, poll_s)
+        out[where] = json.loads(remote.read(f"{WORK}/calibrate.out.json") or "{}").get("levels")
+    by_level = {lv["concurrency"]: lv for lv in out["server_localhost"] or []}
+    out["overhead_ms"] = {str(lv["concurrency"]): round(lv["p50_ms"] - by_level[lv["concurrency"]]["p50_ms"], 2)
+                          for lv in out["client_tunnel"] or []
+                          if lv.get("p50_ms") is not None and (by_level.get(lv["concurrency"]) or {}).get("p50_ms") is not None}
+    return out
 
 
 def unpack(archive: bytes) -> Dict[str, bytes]:

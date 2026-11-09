@@ -101,6 +101,7 @@ replace:
         name_prefix: slm-bench       # every pod's name starts with it: `bench serve --on runpod down --all` terminates them all
         max_pod_hours: {serve: 12, job: 8}   # past it a pod terminates itself (a backstop; `up --hours` overrides serve's)
         uv_version: 0.9.5            # installs the train lock (Python 3.12, uv-managed) onto the volume
+        lock_stale_minutes: 20       # a build lock on the volume with no heartbeat for this long is a dead builder's
         train_backend: tinker        # where the adapters are trained (bench train --on tinker): preflight's training_time
 
       train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)

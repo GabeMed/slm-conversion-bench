@@ -89,16 +89,31 @@ else
     curl -LsSf "https://astral.sh/uv/$BENCH_UV_VERSION/install.sh" | env UV_INSTALL_DIR="$T/uv-$BENCH_UV_VERSION" UV_NO_MODIFY_PATH=1 sh
   fi
   V="/runpod-volume/venvs/train-$SHA"
+  L="$V.lock"
+  STALE="${BENCH_LOCK_STALE_S:-1200}"
   mkdir -p /runpod-volume/venvs
-  n=0; until mkdir "$V.lock" 2>/dev/null; do n=$((n+1)); [ $n -lt 720 ] || { echo "stale $V.lock"; exit 1; }; sleep 5; done
-  trap 'rmdir "$V.lock"' EXIT
+  # one builder at a time: the lock holds its pod and a heartbeat; a lock whose heartbeat is older than STALE
+  # is a builder that died (the local side also removes one whose pod no longer runs)
+  until mkdir "$L" 2>/dev/null; do
+    beat=""; owner="?"
+    [ -f "$L/owner" ] && read -r owner beat < "$L/owner" || true
+    [ -n "$beat" ] || beat=$(stat -c %Y "$L" 2>/dev/null || date +%s)
+    age=$(( $(date +%s) - beat ))
+    if [ "$age" -gt "$STALE" ]; then echo "breaking $L: no heartbeat from $owner for $age s"; rm -rf "$L"; continue; fi
+    sleep 5
+  done
+  echo "${RUNPOD_POD_ID:-unknown} $(date +%s)" > "$L/owner"
+  ( while [ -d "$L" ]; do echo "${RUNPOD_POD_ID:-unknown} $(date +%s)" > "$L/owner.tmp" 2>/dev/null \
+      && mv "$L/owner.tmp" "$L/owner" 2>/dev/null; sleep 60; done ) &
+  HEARTBEAT=$!
+  trap 'kill $HEARTBEAT 2>/dev/null; rm -rf "$L"' EXIT
   if [ ! -f "$V/.complete" ]; then
     rm -rf "$V"
     UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR="$T/python" "$UV" venv --python 3.12 "$V"
     UV_CACHE_DIR="$T/uv-cache" UV_LINK_MODE=copy "$UV" pip install --python "$V/bin/python" -r "$LOCK"
     touch "$V/.complete"
   fi
-  rmdir "$V.lock"; trap - EXIT
+  kill $HEARTBEAT 2>/dev/null; rm -rf "$L"; trap - EXIT
   PY="$V/bin/python"
 fi
 export PATH="$(dirname "$PY"):$PATH"
@@ -106,21 +121,34 @@ set +e
 """
 
 
-def pod_name(settings: Dict[str, Any], role: str, candidate: Optional[str] = None) -> str:
-    return "-".join(p for p in (settings["name_prefix"], role, candidate) if p)
+def pod_name(settings: Dict[str, Any], role: str, candidate: Optional[str] = None, token: str = "") -> str:
+    """<name_prefix>-<role>[-<candidate>]-<token>: the token, unique to one create, is how a create whose
+    answer was lost recognises its pod (api.RunPodClient.create_pod)."""
+    return "-".join(p for p in (settings["name_prefix"], role, candidate, token) if p)
 
 
-def pod_body(settings: Dict[str, Any], volume: Dict[str, Any], name: str, image: str, deadline_s: float,
-             public_key: str, gpu: Optional[str] = None, cpu_vcpus: Optional[int] = None,
-             env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def role_prefix(settings: Dict[str, Any], role: str, candidate: Optional[str] = None) -> str:
+    return pod_name(settings, role, candidate) + "-"
+
+
+def pod_body(settings: Dict[str, Any], volume: Dict[str, Any], role: str, image: str, deadline_s: float,
+             public_key: str, candidate: Optional[str] = None, gpu: Optional[str] = None,
+             cpu_vcpus: Optional[int] = None, env: Optional[Dict[str, str]] = None,
+             token: Optional[str] = None) -> Dict[str, Any]:
     """POST /v2/pods: one GPU (`gpu`, RunPod's id) or a CPU pod (`cpu_vcpus`), in the volume's data center with
-    the volume mounted, publishing SSH only, booting BOOTSTRAP."""
+    the volume mounted, publishing SSH only, booting BOOTSTRAP. Named and tagged (env BENCH_POD_TOKEN, BENCH_ROLE,
+    BENCH_CANDIDATE) so the pod is recognised from the API's listing alone."""
+    import secrets
+
     if (gpu is None) == (cpu_vcpus is None):
         raise RunPodError("a pod has a GPU or a CPU count, not both")
+    token = token or secrets.token_hex(4)
     body: Dict[str, Any] = {
-        "name": name, "image": image, "cloud": settings["cloud"], "dataCenterIds": [volume["datacenter"]],
-        "disk": settings["disk_gb"], "ports": [SSH_PORT],
+        "name": pod_name(settings, role, candidate, token), "image": image, "cloud": settings["cloud"],
+        "dataCenterIds": [volume["datacenter"]], "disk": settings["disk_gb"], "ports": [SSH_PORT],
         "env": {"PUBLIC_KEY": public_key, "BENCH_DEADLINE_S": str(int(deadline_s)), "BENCH_IMAGE": image,
+                "BENCH_POD_TOKEN": token, "BENCH_ROLE": role, "BENCH_CANDIDATE": candidate or "",
+                "BENCH_LOCK_STALE_S": str(int(float(settings.get("lock_stale_minutes", 20)) * 60)),
                 "BENCH_UV_VERSION": str(settings["uv_version"]), "HF_XET_HIGH_PERFORMANCE": "1",
                 "HF_HOME": "/root/.cache/huggingface", **(env or {})},  # the volume's link, whatever the image sets
         "mounts": {"network": [{"volumeId": volume["id"], "path": VOLUME}]},
@@ -258,14 +286,27 @@ class Provider:
             uploaded.append(adapter["sha256"])
         return uploaded
 
+    def clear_stale_train_lock(self, remote: Remote) -> Optional[str]:
+        """The training environment's build lock on the volume, removed when the pod that holds it no longer
+        runs (a builder that died with its pod); the pod id it named, if removed."""
+        sha = hashlib.sha256((REPO / LOCKS[0]).read_bytes()).hexdigest()[:16]
+        lock = f"{VOLUME}/venvs/train-{sha}.lock"
+        owner = (remote.read(f"{lock}/owner") or "").split()
+        if not owner or owner[0] == "unknown":
+            return None
+        pod = self.api.get_pod(owner[0])
+        if pod is not None and pod.get("status") not in ("EXITED", "TERMINATED", "ERROR"):
+            return None
+        remote.shell.run(f"rm -rf {lock}")
+        return owner[0]
+
     @contextmanager
     def job_pod(self, role: str, image: str, gpu: Optional[str] = None, cpu_vcpus: Optional[int] = None,
                 env: Optional[Dict[str, str]] = None, candidate: Optional[str] = None) -> Iterator[Dict[str, Any]]:
         """A pod for one job: created, reached, given the code; terminated whatever happens (and past
         runpod.max_pod_hours.job by itself)."""
-        name = pod_name(self.settings, role, candidate)
-        body = pod_body(self.settings, self.volume(), name, image, deadline(self.settings, "job"),
-                        rs.public_key(self.settings),
+        body = pod_body(self.settings, self.volume(), role, image, deadline(self.settings, "job"),
+                        rs.public_key(self.settings), candidate=candidate,
                         gpu=gpu, cpu_vcpus=cpu_vcpus, env=env)
         pod = self.create(role, body, candidate)
         try:

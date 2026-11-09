@@ -14,11 +14,27 @@ from typing import Any, Callable, Dict, List, Optional
 
 from runpod_apps.ssh import JOB_HEADER, Result, Shell
 
+OPENAPI = Path(__file__).resolve().parent / "runpod_openapi.json"  # https://api.runpod.io/v2/openapi.json, 2026-11-09
+
+
+def openapi_validator(schema: str):
+    """A JSON Schema (2020-12) validator of one of the spec's component schemas, its $refs resolved in the spec."""
+    from jsonschema import Draft202012Validator
+
+    components = json.loads(OPENAPI.read_text())["components"]
+    return Draft202012Validator({"$ref": f"#/components/schemas/{schema}", "components": components})
+
+
+REQUEST_SCHEMAS = {"/v2/pods": "CreatePodRequest", "/v2/network-volumes": "CreateNetworkVolumeRequest"}
+
 
 class FakeRunPod:
     """Pods start PROVISIONING and are RUNNING, with a direct SSH endpoint, after `ready_after` GETs each.
-    `fail` holds faults to inject, each {"method", "path", "status", "times", "apply", "headers"}: `apply`
-    performs the request before answering the error (a create that succeeded although the answer was lost)."""
+    `fail` holds faults to inject, each {"method", "path", "status", "times", "apply", "headers", "raw"}: `apply`
+    performs the request before answering the error (a create that succeeded although the answer was lost);
+    `raw` answers those bytes with that status instead of a problem (an HTML page; with `length`, a body cut
+    short). Every POST body is validated against the OpenAPI spec (a 400 listing the errors). `status`
+    overrides a pod's status ({pod id: "EXITED"})."""
 
     def __init__(self, ready_after: int = 1, gpus: Optional[List[Dict[str, Any]]] = None,
                  secrets=("slm-bench-vllm-api-key",)):
@@ -40,6 +56,8 @@ class FakeRunPod:
              "availability": "HIGH", "dataCenters": [{"id": "US-KS-2", "name": "Kansas", "availability": "HIGH"}]}]
         self.polls: Dict[str, int] = {}
         self.made = 0
+        self.status: Dict[str, str] = {}
+        self.validators = {path: openapi_validator(schema) for path, schema in REQUEST_SCHEMAS.items()}
         self.lock = threading.Lock()
         fake = self
 
@@ -71,9 +89,21 @@ class FakeRunPod:
                         fault["times"] = fault.get("times", 1) - 1
                         if fault.get("apply"):
                             fake.route(method, url.path, query, body)
+                        if "raw" in fault:
+                            self.send_response(fault["status"])
+                            self.send_header("Content-Length", str(fault.get("length", len(fault["raw"]))))
+                            self.end_headers()
+                            self.wfile.write(fault["raw"])
+                            self.close_connection = True
+                            return None
                         return self._send(fault["status"], {"title": "Error", "status": fault["status"],
                                                             "detail": fault.get("detail", "injected")},
                                           fault.get("headers"))
+                    errors = [e.message for e in fake.validators[url.path].iter_errors(body)] \
+                        if method == "POST" and url.path in fake.validators else []
+                    if errors:
+                        return self._send(400, {"title": "Bad Request", "status": 400, "detail": "invalid body",
+                                                "errors": errors})
                     status, payload = fake.route(method, url.path, query, body)
                 self._send(status, payload)
 
@@ -99,7 +129,7 @@ class FakeRunPod:
         n = self.polls.get(pod["id"], 0)
         running = n >= self.ready_after
         view = dict(pod)
-        view.update(status="RUNNING" if running else "PROVISIONING", startedAt="2026-11-09T12:00:00Z" if running else None,
+        view.update(status=self.status.get(pod["id"]) or ("RUNNING" if running else "PROVISIONING"), startedAt="2026-11-09T12:00:00Z" if running else None,
                     ssh={"proxy": {"host": "ssh.runpod.io", "port": 22, "username": f"{pod['id']}-x",
                                    "command": f"ssh {pod['id']}-x@ssh.runpod.io"},
                          "direct": {"host": "203.0.113.7", "port": pod["_ssh_port"], "username": "root",

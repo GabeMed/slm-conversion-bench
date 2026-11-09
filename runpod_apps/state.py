@@ -2,12 +2,16 @@
 volume, every pod still up (recorded the moment the API returns it, before anything waits on it) and each
 serving pod's local SSH tunnel. It is what `bench serve --on runpod down --all` terminates; `down --all`
 also terminates every pod the API lists under `runpod.name_prefix`, so a pod this file missed is not left
-billing. Written whole and atomically (a temporary file renamed over it)."""
+billing. Written whole and atomically (a temporary file of its own renamed over it), each change under an
+exclusive lock."""
+import fcntl
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from bench import paths
 
@@ -33,15 +37,34 @@ class State:
         return data
 
     def write(self, data: Dict[str, Any]) -> None:
+        """Whole, through a temporary file of its own renamed over the state."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        os.replace(tmp, self.path)
+        fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """An exclusive lock (flock on a file beside the state) across one read-modify-write: two commands of
+        this machine (an `up` and a `down`) never lose each other's record."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path.with_suffix(".lock"), "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def update(self, change) -> Dict[str, Any]:
-        data = self.read()
-        change(data)
-        self.write(data)
+        with self.locked():
+            data = self.read()
+            change(data)
+            self.write(data)
         return data
 
     # ---------------------------------------------------------------- pods

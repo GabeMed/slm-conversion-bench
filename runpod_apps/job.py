@@ -5,6 +5,7 @@ checkout's code, uploaded). Each mirrors a Modal function, through the same shar
     download <in.json>             modal_apps/serve_vllm.py:download (the weights at the pinned revision)
     parity <in.json> <out.json>    modal_apps/train.py:peft_reference (bench.preflight.peft_generate on the GPU)
     aiperf <args.json> <run dir>   modal_apps/loadtest.py:run_aiperf (bench.loadtest.run_level)
+    calibrate <in.json> <out.json> a few short requests at fixed concurrencies, timed (the tunnel's overhead)
 """
 import json
 import os
@@ -15,6 +16,21 @@ from pathlib import Path
 
 HF_COMPLETE = "/root/.cache/huggingface/bench-complete"  # one marker per snapshot downloaded whole
 READY = "/bench/jobs/serve.ready"
+SERVING_PACKAGES = ("vllm", "torch", "transformers", "flashinfer-python")
+REFERENCE_PACKAGES = ("torch", "transformers", "peft", "accelerate")
+
+
+def versions(packages) -> dict:
+    """The installed version of each distribution, None for one that is not installed."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    found = {}
+    for name in packages:
+        try:
+            found[name] = version(name)
+        except PackageNotFoundError:
+            found[name] = None
+    return found
 
 
 def complete_marker(repo: str, revision: str) -> str:
@@ -45,7 +61,7 @@ def serve(plan_path: str) -> int:
     state = common.state_path(common.VLLM_CACHE, plan["name"])
     recorded = json.loads(state.read_text())
     recorded.update({"provider": "runpod", "image": environ.get("BENCH_IMAGE"), "pod_id": environ.get("RUNPOD_POD_ID"),
-                     "vllm_version": vllm.__version__})
+                     "vllm_version": vllm.__version__, "versions": versions(SERVING_PACKAGES)})
     state.write_text(json.dumps(recorded, indent=2))
     Path(READY).write_text(str(state))
     return process.wait()
@@ -75,7 +91,11 @@ def parity(in_path: str, out_path: str) -> int:
         raise RuntimeError(f"adapter {spec['adapter_sha256']} is not on the volume intact")
     reference = peft_generate(spec["base"], str(adapter), spec["prompts"], spec["template_kwargs"],
                               spec["max_new_tokens"], spec["top_k"], "cuda")
-    out = {**reference, "function_seconds": round(time.monotonic() - started, 3), "observed_gpus": common.gpu_names()}
+    out = {**reference, "function_seconds": round(time.monotonic() - started, 3), "observed_gpus": common.gpu_names(),
+           "versions": versions(REFERENCE_PACKAGES)}
+    serving = Path(spec.get("serving_state") or "/nonexistent")
+    if serving.is_file():  # the server it is compared with: its image's versions, beside the reference's
+        out["serving_state"] = json.loads(serving.read_text())
     Path(out_path).write_text(json.dumps(out))
     return 0
 
@@ -93,8 +113,45 @@ def aiperf(args_path: str, run_dir: str) -> int:
     return 0
 
 
+def calibrate(in_path: str, out_path: str) -> int:
+    """`requests[c]` short greedy requests at each concurrency c to `base_url`, each timed whole: run on the
+    serving pod against localhost and on the load client through its tunnel, the difference is the tunnel's
+    (and the network's) share of a request's latency. Standard library only (http.client sets TCP_NODELAY)."""
+    import statistics
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    spec = json.loads(Path(in_path).read_text())
+    key = os.environ.get("VLLM_API_KEY")
+    body = json.dumps({"model": spec["model"], "messages": [{"role": "user", "content": "Reply with the word OK."}],
+                       "max_tokens": spec.get("max_tokens", 8), "temperature": 0.0}).encode()
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {key}"} if key else {})}
+
+    def one(_):
+        started = time.perf_counter()
+        request = urllib.request.Request(f"{spec['base_url'].rstrip('/')}/chat/completions", data=body, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=spec.get("timeout_s", 120)) as response:
+                response.read()
+        except Exception:  # noqa: BLE001 (counted, never fatal: a calibration, not a measurement)
+            return None
+        return (time.perf_counter() - started) * 1000
+
+    levels = []
+    for concurrency in spec["concurrency"]:
+        n = int(spec["requests"][str(concurrency)])
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            timed = list(pool.map(one, range(n)))
+        ok = [t for t in timed if t is not None]
+        levels.append({"concurrency": concurrency, "requests": n, "errors": n - len(ok),
+                       "p50_ms": round(statistics.median(ok), 2) if ok else None,
+                       "mean_ms": round(statistics.fmean(ok), 2) if ok else None})
+    Path(out_path).write_text(json.dumps({"base_url": spec["base_url"], "levels": levels}))
+    return 0
+
+
 def main(argv) -> int:
-    jobs = {"serve": serve, "download": download, "parity": parity, "aiperf": aiperf}
+    jobs = {"serve": serve, "download": download, "parity": parity, "aiperf": aiperf, "calibrate": calibrate}
     if not argv or argv[0] not in jobs:
         print(f"usage: python -m runpod_apps.job {{{','.join(jobs)}}} ...", file=sys.stderr)
         return 2

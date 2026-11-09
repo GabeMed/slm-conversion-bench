@@ -139,7 +139,11 @@ def up(provider: rp.Provider, candidate: str, hours: Optional[float] = None,
     """The candidate's server. With a pod already up for it, only its tunnel is checked (and reopened)."""
     from modal_apps import common
 
+    import math
+
     config, settings = provider.config, provider.settings
+    if hours is not None and not (math.isfinite(hours) and hours > 0):
+        raise RunPodError(f"--hours must be a finite number of hours above 0, not {hours}")
     port = check_endpoint(config, settings, candidate)
     existing = provider.state.serving(candidate)
     if existing:
@@ -152,10 +156,14 @@ def up(provider: rp.Provider, candidate: str, hours: Optional[float] = None,
         raise RunPodError("serving.unauthenticated is false (Modal proxy auth), which RunPod does not have: apply "
                           "configs/runpod.patch.yaml (vLLM's key behind SSH is the auth)")
     check_secret(provider)
+    unrecorded = serving_pods(provider, candidate)  # not only this machine's record: the API's listing too
+    if unrecorded:
+        raise RunPodError(f"pod(s) {', '.join(p['id'] for p in unrecorded)} already serve {candidate} but this machine "
+                          f"did not record them: bench serve --on runpod down --all, then up")
     gpu = rs.gpu_id(settings, config["serving"]["gpu"])
     env = {"VLLM_API_KEY": rs.secret_ref(settings["secrets"]["vllm_api_key"]), **_hf_token_env(settings)}
-    body = rp.pod_body(settings, provider.volume(), rp.pod_name(settings, "serve", candidate),
-                       settings["images"]["serve"], rp.deadline(settings, "serve", hours), rs.public_key(settings),
+    body = rp.pod_body(settings, provider.volume(), "serve", settings["images"]["serve"],
+                       rp.deadline(settings, "serve", hours), rs.public_key(settings), candidate=candidate,
                        gpu=gpu, env=env)
     pod = provider.create("serve", body, candidate)
     try:
@@ -185,6 +193,14 @@ def up(provider: rp.Provider, candidate: str, hours: Optional[float] = None,
             "observed_gpus": observed.get("gpus"), "cost_per_hour": pod.get("cost")}
 
 
+def serving_pods(provider: rp.Provider, candidate: str) -> List[Dict[str, Any]]:
+    """The live pods the API lists as serving `candidate` (by their BENCH_ROLE and BENCH_CANDIDATE)."""
+    return [p for p in provider.api.list_pods()
+            if (p.get("env") or {}).get("BENCH_ROLE") == "serve" and (p.get("env") or {}).get("BENCH_CANDIDATE") == candidate
+            and str(p.get("name", "")).startswith(provider.settings["name_prefix"] + "-")
+            and p.get("status") not in ("EXITED", "TERMINATED", "ERROR")]
+
+
 def ensure_tunnel(provider: rp.Provider, candidate: str, tunnel=open_tunnel) -> Dict[str, Any]:
     from modal_apps import common
 
@@ -205,32 +221,49 @@ def ensure_tunnel(provider: rp.Provider, candidate: str, tunnel=open_tunnel) -> 
     return {"candidate": candidate, "base_url": base_url(port), "pod_id": record["id"]}
 
 
-def down(provider: rp.Provider, candidate: Optional[str] = None, everything: bool = False) -> List[Dict[str, Any]]:
-    """Terminate, and say what each pod cost so far by its hourly price. Every pod is tried before an error is
-    raised, so one failure leaves no other pod running."""
+def down(provider: rp.Provider, candidate: Optional[str] = None, everything: bool = False) -> Dict[str, Any]:
+    """Terminate, and say what each pod cost so far by its hourly price. The pods this machine recorded go
+    first; then, with --all, every pod the API lists under runpod.name_prefix (a listing that fails is a
+    warning, never a reason to stop). Every pod is tried whatever fails before it: {"done", "failed",
+    "warnings"}, and the command exits non-zero when anything failed."""
     if not everything and not candidate:
         raise RunPodError("down needs --candidate <name> or --all")
-    recorded = provider.state.read()["pods"]
-    targets = {pid: r for pid, r in recorded.items() if everything or (r["role"] == "serve" and r["candidate"] == candidate)}
-    if everything:
-        prefix = provider.settings["name_prefix"] + "-"
-        for pod in provider.api.list_pods():
-            if str(pod.get("name", "")).startswith(prefix) and pod["id"] not in targets:
-                targets[pod["id"]] = {"id": pod["id"], "name": pod.get("name"), "role": "unrecorded"}
-    done, errors = [], []
-    for pod_id, record in targets.items():
+    done: List[Dict[str, Any]] = []
+    failed: List[str] = []
+    warnings: List[str] = []
+
+    def terminate(pod_id: str, record: Dict[str, Any]) -> None:
         try:
             close_tunnel(record.get("tunnel_pid"))
-            live = provider.api.get_pod(pod_id)
-            spent = _spent(live)
+            live = None
+            try:
+                live = provider.api.get_pod(pod_id)
+            except Exception as e:  # noqa: BLE001 (the price is only reported: terminate anyway)
+                warnings.append(f"{pod_id}: could not read it before terminating ({type(e).__name__}: {e})")
             provider.terminate(pod_id)
             done.append({"id": pod_id, "name": record.get("name"), "was": live.get("status") if live else "gone",
-                         "spent_usd_estimate": spent})
-        except RunPodError as e:
-            errors.append(f"{pod_id}: {e}")
-    if errors:
-        raise RunPodError("could not terminate every pod (check the console): " + "; ".join(errors))
-    return done
+                         "spent_usd_estimate": _spent(live)})
+        except Exception as e:  # noqa: BLE001 (one pod's failure never leaves the others running)
+            failed.append(f"{pod_id}: {type(e).__name__}: {e}")
+
+    recorded = provider.state.read()["pods"]
+    for pod_id, record in list(recorded.items()):
+        if everything or (record["role"] == "serve" and record["candidate"] == candidate):
+            terminate(pod_id, record)
+    if everything:
+        prefix = provider.settings["name_prefix"] + "-"
+        try:
+            listed = provider.api.list_pods()
+        except Exception as e:  # noqa: BLE001
+            listed = []
+            warnings.append(f"the pods could not be listed ({type(e).__name__}: {e}): pods this machine did not "
+                            "record may still run: check the console")
+        tried = {d["id"] for d in done} | {f.split(":")[0] for f in failed}
+        for pod in listed:
+            if str(pod.get("name", "")).startswith(prefix) and pod["id"] not in tried \
+                    and pod.get("status") != "TERMINATED":
+                terminate(pod["id"], {"id": pod["id"], "name": pod.get("name"), "role": "unrecorded"})
+    return {"done": done, "failed": failed, "warnings": warnings}
 
 
 def _spent(pod: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -286,8 +319,13 @@ def cli(args) -> int:
         elif args.action == "tunnel":
             print(ensure_tunnel(provider, args.candidate)["base_url"])
         elif args.action == "down":
-            for pod in down(provider, args.candidate, args.all):
+            result = down(provider, args.candidate, args.all)
+            for pod in result["done"]:
                 print(f"terminated {pod['id']} {pod['name']} (was {pod['was']}; ~${pod['spent_usd_estimate']})")
+            for warning in result["warnings"]:
+                print(f"warning: {warning}", file=sys.stderr)
+            if result["failed"]:
+                raise RunPodError("could not terminate every pod (check the console): " + "; ".join(result["failed"]))
         elif args.action == "status":
             found = status(provider)
             volume = found["volume"]

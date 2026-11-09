@@ -558,6 +558,10 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
     verdict.update({"cluster": cluster, "slm": manifest["slm"], "adapter_sha256": manifest["adapter_sha256"],
                     "served": {"base": entry["name"], "adapter": manifest["served_name"]}, "reference_on": on,
                     "reference_gpu_seconds": ref.get("function_seconds")})
+    if ref.get("versions"):  # RunPod: the reference's torch, transformers, peft
+        verdict["reference_versions"] = ref["versions"]
+    if (ref.get("serving_state") or {}).get("versions"):  # and the serving image's vllm, torch, transformers, flashinfer
+        verdict["serving_versions"] = ref["serving_state"]["versions"]
     return verdict
 
 

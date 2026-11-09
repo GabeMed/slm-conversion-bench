@@ -13,7 +13,8 @@ from typing import Any, Dict, List
 
 from runpod_apps import pods as rp
 from runpod_apps import settings as rs
-from runpod_apps.settings import WORK, RunPodError
+from bench import paths
+from runpod_apps.settings import VOLUME, WORK, RunPodError
 
 
 def peft_reference(config: Dict[str, Any], cluster: str, adapter_sha256: str, base: Dict[str, str],
@@ -28,8 +29,11 @@ def peft_reference(config: Dict[str, Any], cluster: str, adapter_sha256: str, ba
     with provider.job_pod("parity", image, gpu=gpu, env=env) as ready:
         remote = ready["remote"]
         provider.ensure_adapters(remote, [{"cluster": cluster, "sha256": adapter_sha256}])
+        provider.clear_stale_train_lock(remote)
+        slm = json.loads((paths.ROOT / "train" / "adapters" / cluster / "manifest.json").read_text())["slm"]
         spec = {"adapter_sha256": adapter_sha256, "base": base, "prompts": prompts, "template_kwargs": template_kwargs,
-                "max_new_tokens": max_new_tokens, "top_k": top_k}
+                "max_new_tokens": max_new_tokens, "top_k": top_k,
+                "serving_state": f"{VOLUME}/vllm-cache/bench-serving/{slm}.json"}  # the server compared with
         with tempfile.TemporaryDirectory() as work:
             local = Path(work) / "parity.json"
             local.write_text(json.dumps(spec))

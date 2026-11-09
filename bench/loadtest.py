@@ -383,6 +383,10 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 manifest.update({"aiperf_returncode": returncode, "ready_after_s": round(waited, 1),
                                  "served_model": {k: card.get(k) for k in ("id", "root", "parent")},
                                  "observed": observed(run_dir, server_state), "secrets_redacted_in": redacted})
+                if (server_state or {}).get("versions"):  # the serving image's vllm, torch, transformers, flashinfer
+                    manifest["server_versions"] = server_state["versions"]
+                if remote and result.get("tunnel_calibration"):  # RunPod: what the client's SSH tunnel adds
+                    manifest["tunnel_calibration"] = result["tunnel_calibration"]
             except Exception as e:
                 manifest["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
                 raise

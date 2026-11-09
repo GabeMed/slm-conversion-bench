@@ -340,6 +340,15 @@ The patch makes four changes:
 - `serving.unauthenticated: true`;
 - a new `runpod` section.
 
+**After the patch, Modal is not a fallback.** The endpoints point to `127.0.0.1` (the tunnels) and Modal's
+proxy auth is off (`unauthenticated: true`, no `headers_env`), so `modal deploy` and `--on modal` no longer
+match the configuration. To go back to Modal, restore the file and check the hash:
+
+```sh
+git checkout <the commit before the patch> -- config.yaml   # or `git checkout -- config.yaml` if not yet committed
+python -c "from bench.contracts.config import load_config, config_sha256; print(config_sha256(load_config('config.yaml')))"
+```
+
 Its header explains each change. This is a change after Stage 0 to the serving provider, the GPU price
 J8 reads, and (with `train_backend: tinker`) the training backend. Before `bench prereg` (step 12), add it
 to `prereg/DEVIATIONS.md` and commit it:
@@ -360,6 +369,10 @@ sets `modal.gpu_prices` back to Modal's values. The patch keeps them in a commen
    as `RUNPOD_API_KEY` in the shell, never in a file of this repository. No command prints it.
 2. **An SSH key** at `runpod.ssh_key` (default `~/.ssh/id_ed25519`, created with `ssh-keygen -t ed25519`).
    Each pod authorizes its `.pub` through `PUBLIC_KEY`, so it need not be registered in the account.
+   Host keys are trusted on first use: the first connection to a pod accepts its host key
+   (`StrictHostKeyChecking=accept-new`) into a file of its own, `.runpod/known_hosts/<pod id>`, and any later
+   change is refused. A pod's IP and port come from RunPod's authenticated API, which is what that first trust
+   rests on. Agent forwarding is never on (`ForwardAgent=no`).
 3. **vLLM's key as a RunPod secret:** console > Secrets, named `slm-bench-vllm-api-key`
    (`runpod.secrets.vllm_api_key`). Its value is the one exported locally as `SLM_VLLM_API_KEY` (the
    candidates' `api_key_env`). The pods receive it as `VLLM_API_KEY` through
@@ -400,9 +413,16 @@ A pod that does not come up is terminated. `.runpod/state.json` records every po
 Each pod also terminates itself after `runpod.max_pod_hours` (12 h for a server, 8 h for a job; `up --hours`
 overrides). That is a backstop, not the plan.
 
-**Cost discipline.** Run `status` before stepping away and `down` when done. `down --all` also terminates
-any pod named `slm-bench-*` that this machine did not record. At the end of the day, check the console's
-Pods page, and the network volume if it is no longer needed.
+**Cost discipline.** Run `status` before stepping away and `down` when done. `down --all` terminates the pods
+this machine recorded first, then any pod the API lists as `slm-bench-*`. It tries every pod whatever fails
+before it, prints a warning when the listing itself fails, and exits non-zero if any pod could not be
+terminated. `up` refuses to start a second server for a candidate the API already lists one for.
+
+Each pod's name ends with a token unique to its creation, which is also in its environment. When a create's
+answer is lost, the retry adopts only the pod with that token, never another of the same name nor one that
+exited. If the pods cannot even be listed, the error says a pod may exist: run `down --all`.
+
+At the end of the day, check the console's Pods page, and the network volume if it is no longer needed.
 
 - **Step 3 (smoke) and step 4 (pilot):** `up` each candidate before `bench replay ... --engine slm:<name>`.
   `bench preflight`'s `engines` check calls every candidate, so both must be up while it runs.
@@ -419,6 +439,19 @@ Pods page, and the network volume if it is no longer needed.
   pod reaches vLLM through its own SSH tunnel with a key pair made for this load test, which the server
   authorizes and then removes. The runs come back into `runs/<id>/` with `where: runpod` and `gpu: L40S`,
   the key of the price J8 reads.
+  - **The tunnel's overhead.** Before each sweep, a calibration times the same small sample twice: 8 short
+    greedy requests at concurrency 1, and one per slot at the sweep's highest concurrency. The first run is
+    on the server against vLLM's own port, the second from the client through its tunnel. Each run's
+    manifest records both in `tunnel_calibration`, with `overhead_ms` (client minus server, p50, per
+    concurrency): the report states that overhead next to J8's latencies.
+  - The tunnel runs without compression or QoS marking. OpenSSH has no `TCP_NODELAY` option; the clients
+    set it themselves.
+  - The manifests also record `server_versions`: the serving image's vllm, torch, transformers and
+    flashinfer. P-4's verdict records them too (`serving_versions`), with the reference's own
+    (`reference_versions`).
+- **The training environment's build lock.** The first job builds the environment on the volume. It holds a
+  lock there with its pod id and a heartbeat. A lock without a heartbeat for `runpod.lock_stale_minutes`
+  (20) is broken by the next job, and the local side removes at once a lock whose pod no longer runs.
 
 ## Day 2
 

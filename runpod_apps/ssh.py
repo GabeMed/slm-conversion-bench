@@ -43,11 +43,18 @@ class Shell:
         raise NotImplementedError
 
 
+# for a tunnel that carries measured requests: no compression and no QoS marking (OpenSSH has no TCP_NODELAY
+# option; it sets it itself on interactive sessions; the load test's calibration measures what is left)
+TUNNEL_OPTIONS = ["-o", "Compression=no", "-o", "IPQoS=none"]
+
+
 def ssh_options(key: str, port: int, known_hosts: Path) -> List[str]:
-    """A new host key per pod (each pod has its own known_hosts file), never a password, never a prompt."""
+    """Trust on first use: a pod's host key is accepted the first time (StrictHostKeyChecking=accept-new) into
+    its own known_hosts file, and must not change afterwards. Never a password, a prompt, or the operator's
+    agent forwarded into a pod."""
     return ["-i", key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
             "-o", f"UserKnownHostsFile={known_hosts}", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30",
-            "-o", "LogLevel=ERROR"]
+            "-o", "ForwardAgent=no", "-o", "LogLevel=ERROR"]
 
 
 class SshShell(Shell):
@@ -158,7 +165,7 @@ def open_tunnel(host: str, port: int, key: str, known_hosts: Path, local_port: i
     if port_open(local_port):
         raise RunPodError(f"local port {local_port} is already in use: close what holds it, or change runpod.local_ports")
     log.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["ssh", "-N", *ssh_options(key, port, known_hosts), "-o", "ExitOnForwardFailure=yes",
+    cmd = ["ssh", "-N", *ssh_options(key, port, known_hosts), *TUNNEL_OPTIONS, "-o", "ExitOnForwardFailure=yes",
            "-o", "ServerAliveCountMax=4", "-L", f"127.0.0.1:{local_port}:localhost:{remote_port}", "-p", str(port),
            f"root@{host}"]
     with open(log, "ab") as out:
