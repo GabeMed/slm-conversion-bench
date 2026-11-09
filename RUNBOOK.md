@@ -274,11 +274,24 @@ modal volume put slm-bench-adapters train/adapters/<c>/adapter /<adapter_sha256>
   `accept_differences` and recorded in the manifest. An adapter whose exported rank, alpha or modules differ
   from config.yaml is not installed.
 - Tinker bills per token. The manifest records the tokens, not a price.
-- The exported weights stay on Tinker for `export_ttl_s`: running the same command again collects them. A run
-  interrupted before the export starts over.
-- Not yet run against the service. Unverified: Tinker's alpha, the exact modules, its Qwen3-8B context and
-  revision, determinism, and vLLM loading the converted adapter. A one-step probe on the smallest cluster
-  settles them: a `--config` that extends config.yaml with `train.sft.max_steps: 1`.
+- Before any paid call it downloads the base at its pinned revision into the HF cache (~16 GB for
+  Qwen3-8B). The export's converter reads its safetensors.
+- The exported weights stay on Tinker for `export_ttl_s`. Running the same command again collects them. Once
+  they expire, it says so; delete the `train/adapters/.tinker/` file it names to train again.
+- A run interrupted before the export starts over: there is no mid-run checkpoint. Two processes on the same
+  cluster are not locked against each other: run one.
+
+**The probe, before the first full Tinker run (required).** This path has not yet run against the service.
+Run one step on the smallest cluster, with a `--config` that extends config.yaml and sets
+`train.sft.max_steps: 1`. A run with `max_steps` set is a probe: its adapter goes to
+`train/adapters/.probe/<c>/`, never served, never registered, never in the full run's way. Check:
+
+- it finishes: the service accepts the schedule's first step, which warm-up sends at learning rate 0;
+- the manifest's `stats.trained`: rank 16, alpha 32 and the seven modules (otherwise it stops before installing);
+- no row is over the service's context for Qwen3-8B (checked before the first step).
+
+Still unverified after it: determinism, the revision of Tinker's Qwen3-8B, and vLLM loading the converted
+adapter (P-4 checks it on the first full adapter, as for Modal).
 
 **Comparing backends.** Train a cluster on Tinker, move `train/adapters/<c>` out of `train/adapters/`
 (serving and registration read everything there), then train the same cluster on Modal. Both manifests
