@@ -288,10 +288,83 @@ def test_embedding_failures_are_harness_failures(run, monkeypatch):
     def broken(self, texts):
         raise ConnectionError("embeddings endpoint unreachable")
     monkeypatch.setattr(DeterministicFakeEmbedding, "embed_documents", broken)
+    monkeypatch.setattr(hooks, "_sleep", lambda s: None)
     with pytest.raises(hooks.HarnessError):
         hooks.embeddings("entity").embed_documents(["a"])
     (error,) = hooks.take_harness_errors()
     assert "ConnectionError" in error
+
+
+def _scripted_embeddings(monkeypatch, script):
+    """DeterministicFakeEmbedding whose calls raise the scripted exceptions first, then embed."""
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+    real_documents, real_query = DeterministicFakeEmbedding.embed_documents, DeterministicFakeEmbedding.embed_query
+    calls = []
+
+    def step(real):
+        def embed(self, arg):
+            calls.append(arg)
+            if script:
+                raise script.pop(0)
+            return real(self, arg)
+        return embed
+    monkeypatch.setattr(DeterministicFakeEmbedding, "embed_documents", step(real_documents))
+    monkeypatch.setattr(DeterministicFakeEmbedding, "embed_query", step(real_query))
+    return calls
+
+
+def test_embedding_transport_failures_are_retried_with_the_llm_backoff(run, monkeypatch, capsys):
+    import httpx
+    import openai
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+    request = httpx.Request("POST", "http://x")
+    attempts = load_config(SMOKE)["retries"]["http_max_attempts"]
+    transient = [openai.APIConnectionError(request=request), httpx.ConnectError("refused"),
+                 openai.RateLimitError("slow down", body=None, response=httpx.Response(429, request=request)),
+                 openai.InternalServerError("oops", body=None, response=httpx.Response(503, request=request)),
+                 TimeoutError("read timed out")][:attempts - 1]
+    sleeps = []
+    monkeypatch.setattr(hooks, "_sleep", sleeps.append)
+    expected = DeterministicFakeEmbedding(size=load_config(SMOKE)["embeddings"]["fake_size"]).embed_documents(["a", "b"])
+    calls = _scripted_embeddings(monkeypatch, list(transient))
+    assert hooks.embeddings("entity").embed_documents(["a", "b"]) == expected  # the same vectors as with no failure
+    assert len(calls) == len(transient) + 1
+    ceilings = [hooks.backoff_s(n) for n in range(1, len(transient) + 1)]
+    assert len(sleeps) == len(transient) and all(c / 2 <= s <= c for s, c in zip(sleeps, ceilings))
+    assert hooks.take_harness_errors() == []
+    assert capsys.readouterr().err.count("embeddings: transport failure") == len(transient)
+
+    sleeps.clear()
+    _scripted_embeddings(monkeypatch, [openai.APIConnectionError(request=request)])
+    assert hooks.embeddings("entity").embed_query("a") == expected[0] and len(sleeps) == 1
+
+
+def test_embeddings_still_unreachable_after_the_last_attempt_fail_the_harness(run, monkeypatch):
+    import httpx
+    import openai
+    attempts = load_config(SMOKE)["retries"]["http_max_attempts"]
+    sleeps = []
+    monkeypatch.setattr(hooks, "_sleep", sleeps.append)
+    calls = _scripted_embeddings(monkeypatch, [openai.APIConnectionError(request=httpx.Request("POST", "http://x"))] * 50)
+    with pytest.raises(hooks.HarnessError, match="APIConnectionError"):
+        hooks.embeddings("entity").embed_query("a")
+    assert len(calls) == attempts and len(sleeps) == attempts - 1
+    (error,) = hooks.take_harness_errors()
+    assert "embeddings" in error
+
+
+def test_embedding_errors_that_are_not_transport_fail_at_once(run, monkeypatch):
+    import httpx
+    import openai
+    sleeps = []
+    monkeypatch.setattr(hooks, "_sleep", sleeps.append)
+    refused = openai.AuthenticationError("bad key", body=None,
+                                         response=httpx.Response(401, request=httpx.Request("POST", "http://x")))
+    calls = _scripted_embeddings(monkeypatch, [refused, refused])
+    with pytest.raises(hooks.HarnessError, match="AuthenticationError"):
+        hooks.embeddings("entity").embed_documents(["a"])
+    assert len(calls) == 1 and sleeps == []
+    assert len(hooks.take_harness_errors()) == 1
 
 
 def test_openai_embeddings_without_a_key_are_refused(monkeypatch):
