@@ -5,7 +5,7 @@ type: software
 authors:
   - family-names: Medeiros
     given-names: Gabriel
-repository-code: "https://github.com/GabeMed/slm-conversion-bench"
+repository-code: "https://github.com/nest-ai-org/slm-conversion-bench"
 license: Apache-2.0
 version: 0.1.0
 keywords:
