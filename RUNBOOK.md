@@ -321,7 +321,7 @@ Modal apps run: the serving plan and the `vllm serve` command come from `modal_a
 adapters at `/adapters/<sha256>`, the weights at the pinned revision, offline.
 
 **How it differs from Modal.** A pod bills by the second from creation to termination, CPU and RAM included
-(an L40S Secure pod: $1.09/h on 2026-11-04). There is no scale-to-zero: **`down` when done.** A pod publishes
+(an A100 80GB PCIe Secure pod: $1.79/h on 2026-11-09). There is no scale-to-zero: **`down` when done.** A pod publishes
 SSH only. vLLM is reached through an SSH tunnel to `http://127.0.0.1:<port>/v1`, not through RunPod's HTTPS
 proxy: the proxy ends every request at 100 s, and an agent call may take 600. vLLM's own key is the auth
 behind SSH.
@@ -333,9 +333,11 @@ python scripts/apply_config_patch.py configs/runpod.patch.yaml           # the d
 python scripts/apply_config_patch.py configs/runpod.patch.yaml --write
 ```
 
-The patch makes four changes:
-- `modal.gpu_prices`: RunPod's L40S price, $0.000303 a second, with CPU and memory at 0 because the pod's
-  price includes them;
+The patch is applied (2026-11-09). It makes five changes:
+- `modal.gpu_prices`: RunPod's A100 80GB PCIe price, $0.000497 a second, with CPU and memory at 0 because the
+  pod's price includes them;
+- `serving.gpu` and `train.gpu`: `A100-80GB`, the reference GPU since 2026-11-09 (L40S Secure was not
+  available on RunPod where network volumes are), and the triage's footprints;
 - each candidate's `endpoint`: `base_url` at the tunnel's port, `headers_env: null`;
 - `serving.unauthenticated: true`;
 - a new `runpod` section.
@@ -355,7 +357,7 @@ to `prereg/DEVIATIONS.md` and commit it:
 
 ```
 - 2026-11-xx · provider changed after Stage 0: config.yaml (modal.gpu_prices, the candidates' endpoints,
-  serving.unauthenticated, runpod): inference on RunPod (L40S Secure, $1.09/h, CPU and RAM bundled) instead
+  serving.unauthenticated, runpod): inference on RunPod (A100 80GB PCIe Secure, $1.79/h, CPU and RAM bundled) instead
   of Modal; adapters trained on Tinker instead of Modal; J8's cost is also reported at Modal's price
   (2026-09-30), as sensitivity
 ```
@@ -383,10 +385,11 @@ sets `modal.gpu_prices` back to Modal's values. The patch keeps them in a commen
    ```sh
    bench serve --on runpod setup
    ```
-   This creates the network volume `slm-bench` (100 GB) in the data center with the most L40S available
-   now, or in `runpod.datacenter` when one is set. A network volume lives in one data center and attaches
-   only to pods created there, so every pod goes to that data center. The volume bills per GB-month while
-   it exists. It holds the weights, the adapters and the training environment.
+   This creates the network volume `slm-bench` (100 GB) in the data center with the most A100 80GB PCIe
+   available now among those that hold network volumes, or in `runpod.datacenter` when one is set. A
+   network volume lives in one data center and attaches only to pods created there, so every pod goes to
+   that data center. The volume bills per GB-month while it exists. It holds the weights, the adapters and
+   the training environment.
 6. **The weights,** once per candidate, from a CPU pod that is terminated afterwards:
    ```sh
    bench serve --on runpod download --candidate <name>
@@ -437,7 +440,7 @@ At the end of the day, check the console's Pods page, and the network volume if 
   reads the Tinker manifests (`runpod.train_backend: tinker`; `--train-backend` overrides).
 - **Step 10:** `bench loadtest ... --on runpod`. AIPerf runs in a CPU pod in the server's data center. That
   pod reaches vLLM through its own SSH tunnel with a key pair made for this load test, which the server
-  authorizes and then removes. The runs come back into `runs/<id>/` with `where: runpod` and `gpu: L40S`,
+  authorizes and then removes. The runs come back into `runs/<id>/` with `where: runpod` and `gpu: A100-80GB`,
   the key of the price J8 reads.
   - **The tunnel's overhead.** Before each sweep, a calibration times the same small sample twice: 8 short
     greedy requests at concurrency 1, and one per slot at the sweep's highest concurrency. The first run is

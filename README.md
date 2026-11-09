@@ -57,7 +57,7 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
 The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
-trained with TRL and PEFT on Modal's L40S GPUs (the registered configuration) or on
+trained with TRL and PEFT on Modal's GPUs (the registered configuration; the reference GPU is an A100 80GB) or on
 [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API (`bench train --on tinker`, Qwen3-8B
 only), and served with vLLM on Modal or on RunPod (`bench serve --on runpod up`, behind an SSH tunnel). Both backends write the same adapter and a manifest that pairs runs of the same plan, so
 a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md), step 9).

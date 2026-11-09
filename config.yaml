@@ -227,13 +227,14 @@ arms:                          # the facts each arm uses: judgments/<J>/<sha256>
 # F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
 # bench/preflight.py). Values are proposals; the author confirms them before runs.
 modal:
-  gpu_prices:                  # the serving pod's price, RunPod's (runpod.io/pricing, updated 2026-11-04): a Secure Cloud
-    as_of: "2026-11-04"        # L40S pod at $1.09/h, its 16 vCPU and 94 GB of RAM bundled; J8 prices GPU + CPU + memory
-    usd_per_s: {L40S: 0.000303}                   # 1.09 / 3600 per second, billed per second
+  gpu_prices:                  # the serving pod's price, RunPod's (GET /v2/catalog/gpus, Secure Cloud, 2026-11-09): an
+    as_of: "2026-11-09"        # A100 80GB PCIe pod at $1.79/h, its vCPU (16) and RAM (117 GB) bundled; J8 prices GPU + CPU + memory
+    usd_per_s: {A100-80GB: 0.000497}              # 1.79 / 3600 per second, billed per second
     cpu_usd_per_core_s: 0                         # bundled in the pod's price
     memory_usd_per_gib_s: 0                       # bundled in the pod's price
-    # Modal's price before this deviation (2026-09-30), J8's sensitivity: L40S 0.000542 per GPU-second,
-    # H100 0.001097, CPU 0.0000131 per core-second, memory 0.00000222 per GiB-second
+    # Modal's price for the same GPU (modal.com/pricing, fetched 2026-11-09), J8's sensitivity: A100-80GB 0.000694
+    # per GPU-second, CPU 0.0000131 per core-second, memory 0.00000222 per GiB-second (before this deviation, on
+    # 2026-09-30: L40S 0.000542, H100 0.001097)
   volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
   secrets:
     vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
@@ -245,7 +246,7 @@ modal:
 serving:                       # vLLM, one candidate per server, its adapters beside it (modal_apps/serve_vllm.py)
   vllm_version: 0.30.0
   base_image: nvidia/cuda:13.0.3-devel-ubuntu24.04   # CUDA 13, as vLLM 0.30's wheels
-  gpu: L40S
+  gpu: A100-80GB
   cpu: 8
   memory_gib: 32               # the memory J8 prices the container at (Modal bills the higher of request and usage)
   max_model_len: 32768
@@ -265,9 +266,11 @@ runpod:                        # the inference provider (runpod_apps/; bench ser
                                # only by runpod_apps/ and preflight's training_time (train_backend), never by a judgment
   api_key_env: RUNPOD_API_KEY  # a RunPod API key: pods, network volumes, secrets (names), catalog, billing
   cloud: SECURE                # RunPod-owned data centers: the price in modal.gpu_prices is Secure Cloud's
-  datacenter: null             # null: `bench serve --on runpod setup` takes the data center with the most L40S available
-                               # then, and the volume fixes it (.runpod/state.json); an id (e.g. EU-RO-1) is used as is
-  gpu_ids: {L40S: NVIDIA L40S} # RunPod's GPU type id of serving.gpu and train.gpu (GET /v2/catalog/gpus)
+  datacenter: null             # null: `bench serve --on runpod setup` takes the data center with the most A100 80GB PCIe
+                               # available then among those that hold network volumes (2026-11-09: CA-MTL-3, EU-RO-1), and
+                               # the volume fixes it (.runpod/state.json); an id (e.g. EU-RO-1) is used as is
+  gpu_ids: {A100-80GB: NVIDIA A100 80GB PCIe}   # RunPod's GPU type id of serving.gpu and train.gpu (GET /v2/catalog/gpus);
+                                                # the SXM variant is only where network volumes are not
   min_cuda_version: "13.0"     # the host driver vLLM 0.30's CUDA 13 wheels need
   volume: {name: slm-bench, size_gb: 100}   # weights (~16 GB per candidate), adapters, the train lock's venv (~10 GB)
   images:
@@ -287,7 +290,7 @@ runpod:                        # the inference provider (runpod_apps/; bench ser
   train_backend: tinker        # where the adapters are trained (bench train --on tinker): preflight's training_time
 
 train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
-  gpu: L40S
+  gpu: A100-80GB
   timeout_s: 39600             # 11 h: one adapter, alone in its container
   seed: 20260930
   precision: bf16              # on a GPU; a CPU run trains in float32
@@ -360,27 +363,27 @@ selection:                     # S4 (J6): higher per-call-site score on calib; t
   # the pinned weights' size on the Hugging Face Hub (bf16 safetensors, GB = 1e9 bytes), fetched 2026-10-21
   footprint_gb: {qwen3-8b: 16.38, granite-4.2-8b: 17.58}
   triage:                      # the desk triage (SPEC §4 S4a): the four criteria from the model cards at the
-                               # pinned revisions, fetched 2026-10-21; the reference GPU is serving.gpu (L40S, 48 GB);
+                               # pinned revisions, fetched 2026-10-21; the reference GPU is serving.gpu (A100 80GB PCIe, 80 GB);
                                # the largest teacher prompt in the pre-Stage-0 probes was 15,457 tokens
     - candidate: qwen3-8b
       capabilities: "instruction following and tool calling claimed by the card; thinking switchable (off here); context 32,768 native (131,072 with YaRN) >= serving.max_model_len 32,768"
       benchmarks: "the card publishes no SQL or tool-calling score at this revision; independent evidence is J6's zero-shot on calib"
       license: "Apache-2.0: commercial use and fine-tuning allowed"
-      footprint: "16.38 GB of bf16 weights, 8.19B parameters: fits one L40S with room for the KV cache"
+      footprint: "16.38 GB of bf16 weights, 8.19B parameters: fits one A100 80GB with room for the KV cache"
       serving: "vLLM supported (the card names vllm >= 0.8.5)"
       result: candidate
     - candidate: granite-4.2-8b
       capabilities: "reasoning, tool calling and agentic workflows claimed by the card; context 131,072 native >= serving.max_model_len 32,768"
       benchmarks: "the card publishes no SQL or tool-calling score at this revision; independent evidence is J6's zero-shot on calib"
       license: "Apache-2.0: commercial use and fine-tuning allowed"
-      footprint: "17.58 GB of bf16 weights, 8.79B parameters: fits one L40S with room for the KV cache"
+      footprint: "17.58 GB of bf16 weights, 8.79B parameters: fits one A100 80GB with room for the KV cache"
       serving: "vLLM supported (GraniteForCausalLM)"
       result: candidate
     - candidate: Nemotron-3-Nano-4B
       capabilities: "hybrid Mamba-Transformer; context 262,144 >= serving.max_model_len 32,768"
       benchmarks: "not screened further: the reserve, promoted only if a candidate fails P-4"
       license: "NVIDIA Nemotron Open Model License: not Apache; its terms for commercial use and fine-tuning are checked before promoting it"
-      footprint: "7.95 GB of bf16 weights: fits one L40S"
+      footprint: "7.95 GB of bf16 weights: fits one A100 80GB"
       serving: "vLLM supported (NemotronHForCausalLM); no gate_proj, so LoRA needs its own target_modules"
       result: reserve
 allocation:                    # S6 (J7)
