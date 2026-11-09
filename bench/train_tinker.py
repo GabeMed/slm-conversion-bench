@@ -396,7 +396,7 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
     probe = bool(plan["hyperparameters"]["sft"].get("max_steps"))
     target = (adapters_dir() / PROBES if probe else adapters_dir()) / cluster
     where = rel(target)
-    result = {"probe": probe, "volume": config["modal"]["volumes"]["adapters"]}
+    result = {"probe": probe, "volume": config["modal"]["volumes"]["adapters"], "runpod": "runpod" in config}
     if (target / "manifest.json").is_file():
         manifest = json.loads((target / "manifest.json").read_text())
         if manifest.get("tinker_key") != key or sha256_dir(target / "adapter") != manifest.get("adapter_sha256"):
@@ -492,8 +492,10 @@ def cli(args) -> int:
         return 0
     print(f"plan {manifest['plan_sha256']} (bench.train_tinker.plan_sha256 gives the same from the manifest of a "
           f"Modal run of this plan; the registered configuration trains on Modal: using this adapter in the "
-          f"registered run goes in prereg/DEVIATIONS.md). The server loads it from the adapters volume: modal volume "
-          f"put {result['volume']} train/adapters/{args.cluster}/adapter /{manifest['adapter_sha256']}")
+          f"registered run goes in prereg/DEVIATIONS.md). " + (
+              f"bench serve --on runpod up --candidate {manifest['slm']} uploads it to the RunPod volume" if result.get("runpod")
+              else f"The server loads it from the adapters volume: modal volume put {result['volume']} "
+                   f"train/adapters/{args.cluster}/adapter /{manifest['adapter_sha256']}"))
     if result["fact"]:
         print(f"adapters fact: {result['fact'].relative_to(paths.ROOT)} (point arms.B4.adapters and arms.B5.adapters at it)")
     else:

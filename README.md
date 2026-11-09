@@ -59,7 +59,7 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
 trained with TRL and PEFT on Modal's L40S GPUs (the registered configuration) or on
 [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API (`bench train --on tinker`, Qwen3-8B
-only), and served with vLLM. Both backends write the same adapter and a manifest that pairs runs of the same plan, so
+only), and served with vLLM on Modal or on RunPod (`bench serve --on runpod up`, behind an SSH tunnel). Both backends write the same adapter and a manifest that pairs runs of the same plan, so
 a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 ## Results
@@ -116,6 +116,7 @@ committed and pushed.
 | `bench/` | the harness: `data`, `run` and `replay` (agent executions), `curate` and `embed` (training examples and their clusters), `train`, `loadtest`, `eval` (execution accuracy), `prereg`, `verify`, `report`, the test barrier |
 | `bench/judge/` | the judgments (J1–J8 and the choice of B1's few-shot k): pure functions over what the executions wrote |
 | `modal_apps/` | training and vLLM serving on Modal |
+| `runpod_apps/` | inference on RunPod: the vLLM server behind an SSH tunnel (`bench serve --on runpod up`), the load test's client and P-4's reference; `configs/runpod.patch.yaml` switches the configuration to it |
 | `vendor/chess/` | CHESS @ `3d6e835`, patched; every change is in [`vendor/chess/PATCHES.md`](vendor/chess/PATCHES.md) |
 | `data/MANIFEST.json`, `data/splits.json` | hashes of every input and the train / calibration / test splits |
 | `env/` | the three environments: `agent` (Python 3.11, CHESS's pinned LangChain 0.2), `analysis` (the judgments), `train` (training and serving) |
