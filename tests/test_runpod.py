@@ -213,6 +213,13 @@ def test_the_bodies_sent_and_the_fields_read_are_the_openapi_specs():
     assert {"uptime", "ports"} <= set(schemas["PodRuntime"]["properties"])
     assert {"private", "public", "ip"} <= set(schemas["PodRuntimePort"]["properties"])
     assert {"nextCursor", "hasNextPage"} <= set(schemas["Pagination"]["properties"])
+    from fixtures.fake_runpod import FakeRunPod as Fake
+    fake = Fake()
+    try:  # the data center catalog the fake answers, and the field setup reads to skip a data center
+        assert list(openapi_validator("ListDataCentersResponse").iter_errors({"dataCenters": fake.datacenters})) == []
+    finally:
+        fake.close()
+    assert "networkVolumeTypes" in schemas["DataCenter"]["required"]
     assert {"id", "name", "size", "dataCenter"} <= set(schemas["NetworkVolume"]["properties"])
     assert "networkVolumes" in schemas["ListNetworkVolumesResponse"]["properties"]
     assert {"id", "dataCenters"} <= set(schemas["GpuType"]["properties"])
@@ -331,6 +338,34 @@ def test_setup_creates_the_volume_where_the_gpu_is_and_keeps_it(runpod_repo):
     assert State().read()["volume"]["id"] == volume["id"] and len(world.fake.volumes) == 1
     again = rserve.setup(world.provider())
     assert again["existing"] is True and again["id"] == volume["id"] and len(world.fake.volumes) == 1
+
+
+def test_setup_passes_over_a_data_center_without_network_volumes_for_the_next_one_with_the_gpu(runpod_repo):
+    """CA-MTL-1 has the most L40S but holds no volumes: EU-RO-1, as available, is next."""
+    world = runpod_repo
+    world.fake.datacenters[0]["networkVolumeTypes"] = []
+    volume = rserve.setup(world.provider())
+    assert volume["datacenter"] == "EU-RO-1" and list(world.fake.volumes.values())[0]["dataCenter"] == "EU-RO-1"
+    assert State().read()["volume"]["skipped_without_volumes"] == ["CA-MTL-1"]
+
+
+def test_setup_fails_naming_the_way_out_when_no_data_center_with_the_gpu_holds_volumes(runpod_repo):
+    world = runpod_repo
+    for d in world.fake.datacenters:
+        if d["id"] != "US-KS-2":
+            d["networkVolumeTypes"] = []
+    with pytest.raises(RunPodError, match=r"without network volumes \(CA-MTL-1, EU-RO-1, US-TX-3\): try later, or "
+                                          r"set runpod.datacenter.*volumes: US-KS-2"):
+        rserve.setup(world.provider())
+    assert not world.fake.volumes and State().read()["volume"] is None
+
+
+def test_a_pinned_data_center_is_used_as_is_without_asking_the_data_center_catalog(runpod_repo):
+    world = runpod_repo
+    world.config["runpod"]["datacenter"] = "US-TX-3"
+    volume = rserve.setup(world.provider())
+    assert volume["datacenter"] == "US-TX-3" and State().read()["volume"]["skipped_without_volumes"] == []
+    assert not [r for r in world.fake.requests if r["path"] == "/v2/catalog/datacenters"]
 
 
 def test_setup_adopts_a_volume_of_the_same_name_and_honours_a_pinned_data_center(runpod_repo):
