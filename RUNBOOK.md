@@ -255,6 +255,38 @@ BENCH_CANDIDATE=<the chosen candidate> modal deploy -m modal_apps.serve_vllm
 The last `bench train` prints the adapters fact. Write its path into `arms.B4.adapters` and
 `arms.B5.adapters` **before** that deploy: the server serves the adapters the fact names.
 
+#### Training on Tinker (alternative backend)
+
+`--on tinker` trains the same plan on Thinking Machines' Tinker, usually sooner than a Modal GPU. It writes
+the same outputs (adapter and manifest, `where: tinker`). The registered configuration trains on Modal, so
+using a Tinker adapter in the registered run is recorded in `prereg/DEVIATIONS.md` (SPEC §6).
+
+```sh
+uv venv .venv-tinker --python 3.12
+uv pip install --python .venv-tinker/bin/python -r env/tinker/requirements.lock -e ".[test]"
+TINKER_API_KEY=... bench train --cluster <c> --on tinker
+modal volume put slm-bench-adapters train/adapters/<c>/adapter /<adapter_sha256>   # the command it prints
+```
+
+- Settings besides config.yaml's `train` section: `configs/train-tinker.yaml`.
+- Qwen3-8B only (Tinker's lineup, 2026-11-09). Granite-4.2-8B and Nemotron-3-Nano-4B are refused.
+- Tinker sets no alpha, dropout, target modules or revision. Each difference is listed in
+  `accept_differences` and recorded in the manifest. An adapter whose exported rank, alpha or modules differ
+  from config.yaml is not installed.
+- Tinker bills per token. The manifest records the tokens, not a price.
+- The exported weights stay on Tinker for `export_ttl_s`: running the same command again collects them. A run
+  interrupted before the export starts over.
+- Not yet run against the service. Unverified: Tinker's alpha, the exact modules, its Qwen3-8B context and
+  revision, determinism, and vLLM loading the converted adapter. A one-step probe on the smallest cluster
+  settles them: a `--config` that extends config.yaml with `train.sft.max_steps: 1`.
+
+**Comparing backends.** Train a cluster on Tinker, move `train/adapters/<c>` out of `train/adapters/`
+(serving and registration read everything there), then train the same cluster on Modal. Both manifests
+give the same plan hash (`plan_sha256` in Tinker's; `bench.train_tinker.plan_sha256` computes it from
+Modal's) and differ in `where`. To compare the adapters, serve each in turn and replay the calib split on
+it (`bench replay <B0 calib> --engine slm:<candidate>+lora:<served name>`, then `bench eval --per-call`).
+`--on tinker` never replaces an adapter; `--on modal` does.
+
 ## Day 2
 
 ### 10. The load test and the SLM's cost

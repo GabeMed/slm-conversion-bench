@@ -57,7 +57,8 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
 The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). LoRA (r 16) is trained with TRL and
-PEFT on Modal's L40S GPUs, and the adapters are served with vLLM.
+PEFT on Modal's L40S GPUs (the registered configuration) or on Thinking Machines' Tinker (`bench train --on tinker`,
+Qwen3-8B only), and the adapters are served with vLLM.
 
 ## Results
 
