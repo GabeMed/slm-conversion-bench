@@ -438,6 +438,12 @@ def trained(cluster, config, where="modal", started_at="2026-10-01T20:00:00+00:0
                                 "gpu": gpu or config["train"]["gpu"], "stats": stats}))
 
 
+def on_modal(config):
+    """The configuration training on Modal: no runpod section, so no train_backend (the shipped one trains on Tinker)."""
+    config.pop("runpod", None)
+    return config
+
+
 def count_tokens(monkeypatch, tokens):
     """Stand in for the tokenizer: `bench.train.precheck` answers `tokens[cluster]` for each dataset."""
     from bench import train
@@ -447,6 +453,7 @@ def count_tokens(monkeypatch, tokens):
 
 def test_training_time_projects_the_largest_dataset_from_the_first_adapters_throughput(tmp_path, monkeypatch):
     _, _, config = make_s5_repo(tmp_path, monkeypatch, clusters=("c0", "c1", "c2"))
+    on_modal(config)
     write_dataset("c2", rows("c2", 9))  # the most rows, but not the most tokens
     count_tokens(monkeypatch, {"c0": 4_000, "c1": 90_000, "c2": 9_000})
     pending = check_training_time(config)
@@ -470,6 +477,7 @@ def test_training_time_projects_the_largest_dataset_from_the_first_adapters_thro
 @pytest.mark.parametrize("budget_h, status", [(1.0, PASS), (1.001, PASS), (0.999, FAIL)])
 def test_training_time_fails_above_the_schedule_and_says_to_lower_the_cap(tmp_path, monkeypatch, budget_h, status):
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    on_modal(config)
     count_tokens(monkeypatch, {"c0": 90_000, "c1": 100})
     trained("c1", config, tokens_per_second=50.0)  # projects 1 h for c0
     config["preflight"]["schedule"]["train_hours_max"] = budget_h
@@ -483,6 +491,7 @@ def test_training_time_is_pending_without_a_rate_measured_for_this_training(tmp_
     """A manifest from before the rate was recorded, from another GPU or from another base does not say how
     fast this training runs; and without datasets there is nothing to project."""
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    on_modal(config)  # on Modal the GPU counts too
     count_tokens(monkeypatch, {"c0": 90_000, "c1": 100})
     trained("c0", config, tokens_per_second=50.0)
     assert check_training_time(config)["status"] == PASS
@@ -502,6 +511,7 @@ def test_training_time_is_pending_without_a_rate_measured_for_this_training(tmp_
 
 def test_training_time_fails_with_the_reason_on_a_dataset_training_would_refuse(tmp_path, monkeypatch):
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    on_modal(config)
     count_tokens(monkeypatch, {"c0": 1, "c1": 1})
     trained("c0", config, tokens_per_second=50.0)
     write_dataset("c1", [])
@@ -619,7 +629,12 @@ class FakeEngine:
         self.server.shutdown()
 
 
-def engines_config(base_url, monkeypatch, slm_base_url="same", **production_params):
+MODAL_HEADERS = {"Modal-Key": "SLM_MODAL_KEY", "Modal-Secret": "SLM_MODAL_SECRET"}
+
+
+def engines_config(base_url, monkeypatch, slm_base_url="same", modal_proxy=False, **production_params):
+    """The shipped configuration with every engine on `base_url`; `modal_proxy`: the candidates behind Modal's
+    proxy auth (headers_env), as on Modal, where the shipped (RunPod) configuration sends no headers."""
     from bench.contracts.config import load_config
     config = json.loads(json.dumps(load_config(paths.ROOT / "config.yaml")))
     monkeypatch.setenv("PROBE_KEY", "probe-key-0001")
@@ -635,6 +650,8 @@ def engines_config(base_url, monkeypatch, slm_base_url="same", **production_para
     production["reasoning"] = {"enabled": True, "forced_temperature": None}
     for candidate in config["roles"]["slm_candidates"]:
         candidate["endpoint"]["base_url"] = base_url if slm_base_url == "same" else slm_base_url
+        if modal_proxy:
+            candidate["endpoint"]["headers_env"] = dict(MODAL_HEADERS)
     return config
 
 
@@ -646,7 +663,7 @@ def test_every_engine_answers_through_the_agents_own_client(monkeypatch):
     pytest.importorskip("langchain_openai")
     from bench.preflight import check_engines
     with FakeEngine() as server:
-        config = engines_config(server.base_url, monkeypatch, top_p=0.9)
+        config = engines_config(server.base_url, monkeypatch, modal_proxy=True, top_p=0.9)
         check = check_engines(config)
     temperatures = temperatures_of(config)
     assert check["status"] == PASS and len(check["evidence"]) == 4 * len(temperatures)  # 2 LLMs and 2 candidates
@@ -814,8 +831,8 @@ def test_missing_credentials_are_pending_and_a_failure_outranks_pending(monkeypa
     pytest.importorskip("langchain_openai")
     from bench.preflight import check_engines
     with FakeEngine() as server:
-        config = engines_config(server.base_url, monkeypatch)
-        monkeypatch.delenv("SLM_MODAL_SECRET")  # a header credential of the candidates
+        config = engines_config(server.base_url, monkeypatch, modal_proxy=True)
+        monkeypatch.delenv("SLM_MODAL_SECRET")  # a header credential of the candidates, on Modal
         pending = check_engines(config)
     assert pending["status"] == PENDING
     assert {p["engine"] for p in pending["evidence"] if p["status"] == PENDING} == \
