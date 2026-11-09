@@ -38,7 +38,7 @@ The protocol is [`SPEC.md`](SPEC.md) (in Portuguese), fixed before any result.
 
 [`RUNBOOK.md`](RUNBOOK.md) is the order of the two days, command by command.
 
-<a id="how-it-works"></a>
+## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/how-dark.svg">
@@ -56,8 +56,10 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B4** | the SLM fine-tuned with LoRA, one adapter per cluster, in every call site | the paper's V1 in its strongest form |
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
-The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). LoRA (r 16) is trained with TRL and
-PEFT on Modal's L40S GPUs, and the adapters are served with vLLM.
+The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
+trained on [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API, and served with vLLM.
+The training code in this repository (`bench train`, `modal_apps/train.py`) still runs TRL and PEFT on Modal and is
+moving to Tinker.
 
 ## Results
 

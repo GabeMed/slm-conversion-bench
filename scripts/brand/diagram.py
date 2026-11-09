@@ -20,7 +20,7 @@ import nest  # noqa: E402
 
 W = 680  # narrow, so GitHub draws it larger: the cards read at about 1.3×
 CARD_W, CARD_H, GAP = 420, 458, 20
-HEAD = 150
+HEAD = 8  # no head of its own: the README's "## How it works" is the title
 H = HEAD + CARD_H + 6
 DRIFT_S = 110  # seconds for the row to move by one set of six cards: slow enough to read
 
@@ -43,7 +43,7 @@ STEPS = (
     ("S2", "Keep what worked:", " the teacher's answers, masked, filtered and de-duplicated.", False, "curate"),
     ("S3", "Find the tasks", " the calls share, by clustering them.", False, "cluster"),
     ("S4", "Pick the small model", " by a desk triage, then zero-shot on calibration.", False, "select"),
-    ("S5", "Fine-tune with LoRA:", " one adapter per task on the chosen SLM.", True, "train"),
+    ("S5", "Fine-tune with LoRA", " on Tinker: one adapter per task on the chosen SLM.", True, "train"),
     ("S6", "Route each task", " to the cheapest engine not worse than the LLM.", True, "route"),
 )
 # CHESS's call sites, in words and as calls.jsonl names them
@@ -209,8 +209,8 @@ class Draw:
         self.text(x + 17, y + 23, "config.yaml", 11.5, self.H["soft"], 500, mono=True)
         self.text(x + w - 14, y + 23, "bench train", 11.5, self.P["faint"], 500, mono=True, anchor="end")
         self.add(f'<rect x="{x:.1f}" y="{y + 38:.1f}" width="{w:.1f}" height="1" fill="{self.H["ring"]}"/>')
-        lines = (("train:", 0, False), ("gpu: L40S", 1, False), ("precision: bf16", 1, False),
-                 ("lora: {r: 16, alpha: 32}", 1, True), ("seed: 20260930", 1, False))
+        lines = (("train:", 0, False), ("precision: bf16", 1, False), ("lora: {r: 16, alpha: 32}", 1, True),
+                 ("seed: 20260930", 1, False))
         for i, (s, ind, hl) in enumerate(lines):
             ly = y + 64 + i * 25
             if hl:
@@ -221,7 +221,7 @@ class Draw:
             self.text(tx, ly, key + ":", 11.5, self.H["soft"], 500, mono=True)
             if val:
                 self.text(tx + nest.width(key + ": ", 11.5, 500, mono=True), ly, val.strip(), 11.5, self.P["ink"], 500, mono=True)
-        self.pill(x, y + h + 14, "TRL + PEFT on Modal, served by vLLM")
+        self.pill(x, y + h + 14, "Trained on Tinker, served by vLLM")
 
     def win_route(self, x, y):
         w, h = 318, 192
@@ -290,11 +290,6 @@ def draw(theme: str) -> str:
             f'<rect width="{W}" height="{CARD_H + 6}" fill="url(#fade-{theme})"/></mask>']
     d.add("<defs>" + "".join(defs) + "</defs>")
     # the section's head, as the site's: the pill, the title in two tones, one line under it
-    pw = nest.width("How it works", 13, 400, tracking=0.26) + 30
-    d.add(nest.rrect(0.5, 0.5, pw, 34, 17, f'fill="{P["tile"]}" stroke="{P["line"]}" stroke-width="1"'))
-    d.text(15.5, 22.5, "How it works", 13, P["muted"], 400, tracking=0.26)
-    d.text(0, 78, "The paper proposes six steps.", 27, P["ink"], 450, tracking=-1.0)
-    d.text(0, 110, "This harness runs every one.", 27, Hw["grey"], 450, tracking=-1.0)
     d.add(f'<g transform="translate(0 {HEAD})" mask="url(#ends-{theme})"><g class="row">')
     for k in range(12):  # two sets, so the loop has no seam
         d.card(k % 6, 24 + k * step, f"{k}")
