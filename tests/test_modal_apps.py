@@ -454,7 +454,8 @@ def test_start_serving_launches_warms_up_and_records_what_it_got(serving, tmp_pa
     assert launched == [common.vllm_command(plan)] and commits == [1]
     assert [body["model"] for _, body in server.posts] == [TINY_NAME, served("c0")]  # warmed up, base and adapter
     state = json.loads(common.state_path(str(tmp_path / "cache"), TINY_NAME).read_text())
-    assert state["gpus"] == ["NVIDIA H200"] and state["auth"] == "proxy+vllm-key"
+    auth = "vllm-key" if config["serving"]["unauthenticated"] else "proxy+vllm-key"  # RunPod's patch: no proxy
+    assert state["gpus"] == ["NVIDIA H200"] and state["auth"] == auth
 
 
 def test_serving_refuses_a_served_name_its_bytes_do_not_give(serving):
