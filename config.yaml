@@ -61,21 +61,21 @@ roles:
     # served under `name` (--served-model-name); adapters under their own served names
     # `hf`: the weights, pinned (F3: served, trained and used as P-4's reference at this revision);
     # `chat_template_kwargs`: how the template renders, the same when serving and training (thinking off);
-    # `endpoint.headers_env`: each header sent with the value of its environment variable (Modal proxy auth);
-    # `endpoint.api_key_env`: vLLM's own key, the second layer (the value stored as VLLM_API_KEY in the Modal secret)
+    # `endpoint.base_url`: the local end of the candidate's SSH tunnel to its RunPod pod (runpod.local_ports);
+    # `endpoint.api_key_env`: vLLM's own key, the auth behind SSH (its value is the RunPod secret runpod.secrets.vllm_api_key)
     - name: qwen3-8b
       base: Qwen3-8B
       hf: {repo: Qwen/Qwen3-8B, revision: b968826d9c46dd6066d109eabc6255188de91218}
       chat_template_kwargs: {enable_thinking: false}
-      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
-                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
+      endpoint: {kind: vllm, base_url: "http://127.0.0.1:18001/v1", api_key_env: SLM_VLLM_API_KEY,
+                 headers_env: null}
       params: {max_tokens: 4096, timeout_s: 600}
     - name: granite-4.2-8b
       base: Granite-4.2-8B
       hf: {repo: ibm-granite/granite-4.2-8b, revision: f8de16cdcdbc6c779ca517604e050d82cc119e44}
       chat_template_kwargs: {enable_thinking: false}
-      endpoint: {kind: vllm, base_url: null, api_key_env: SLM_VLLM_API_KEY,
-                 headers_env: {Modal-Key: SLM_MODAL_KEY, Modal-Secret: SLM_MODAL_SECRET}}
+      endpoint: {kind: vllm, base_url: "http://127.0.0.1:18002/v1", api_key_env: SLM_VLLM_API_KEY,
+                 headers_env: null}
       params: {max_tokens: 4096, timeout_s: 600}
   slm_reserve: [Nemotron-3-Nano-4B]
   slm_reserve_hf:              # F3: its weights, pinned; a hybrid (Mamba) model with no gate_proj, so
@@ -227,11 +227,13 @@ arms:                          # the facts each arm uses: judgments/<J>/<sha256>
 # F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
 # bench/preflight.py). Values are proposals; the author confirms them before runs.
 modal:
-  gpu_prices:                  # modal.com/pricing, per second. Modal bills a container's GPU, CPU and memory:
-    as_of: "2026-09-30"        # J8 prices the serving container all-in, GPU + serving.cpu x CPU + serving.memory_gib x memory
-    usd_per_s: {L40S: 0.000542, H100: 0.001097}   # per GPU-second; the training manifests' cost = seconds x this
-    cpu_usd_per_core_s: 0.0000131                 # per core-second (fetched 2026-10-01)
-    memory_usd_per_gib_s: 0.00000222              # per GiB-second (fetched 2026-10-01)
+  gpu_prices:                  # the serving pod's price, RunPod's (runpod.io/pricing, updated 2026-11-04): a Secure Cloud
+    as_of: "2026-11-04"        # L40S pod at $1.09/h, its 16 vCPU and 94 GB of RAM bundled; J8 prices GPU + CPU + memory
+    usd_per_s: {L40S: 0.000303}                   # 1.09 / 3600 per second, billed per second
+    cpu_usd_per_core_s: 0                         # bundled in the pod's price
+    memory_usd_per_gib_s: 0                       # bundled in the pod's price
+    # Modal's price before this deviation (2026-09-30), J8's sensitivity: L40S 0.000542 per GPU-second,
+    # H100 0.001097, CPU 0.0000131 per core-second, memory 0.00000222 per GiB-second
   volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
   secrets:
     vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
@@ -256,8 +258,33 @@ serving:                       # vLLM, one candidate per server, its adapters be
   startup_timeout_s: 1800
   download_timeout_s: 3600
   warmup_timeout_s: 600
-  unauthenticated: false       # Modal proxy auth (the candidates' headers_env); the server refuses to start with neither
-                               # proxy auth nor a VLLM_API_KEY
+  unauthenticated: true        # RunPod has no proxy auth: the pod publishes SSH only, and vLLM's own key (VLLM_API_KEY,
+                               # the RunPod secret runpod.secrets.vllm_api_key) is required: the server refuses to start without it
+
+runpod:                        # the inference provider (runpod_apps/; bench serve | loadtest | preflight --on runpod). Read
+                               # only by runpod_apps/ and preflight's training_time (train_backend), never by a judgment
+  api_key_env: RUNPOD_API_KEY  # a RunPod API key: pods, network volumes, secrets (names), catalog, billing
+  cloud: SECURE                # RunPod-owned data centers: the price in modal.gpu_prices is Secure Cloud's
+  datacenter: null             # null: `bench serve --on runpod setup` takes the data center with the most L40S available
+                               # then, and the volume fixes it (.runpod/state.json); an id (e.g. EU-RO-1) is used as is
+  gpu_ids: {L40S: NVIDIA L40S} # RunPod's GPU type id of serving.gpu and train.gpu (GET /v2/catalog/gpus)
+  min_cuda_version: "13.0"     # the host driver vLLM 0.30's CUDA 13 wheels need
+  volume: {name: slm-bench, size_gb: 100}   # weights (~16 GB per candidate), adapters, the train lock's venv (~10 GB)
+  images:
+    serve: vllm/vllm-openai:v0.30.0                 # vLLM = serving.vllm_version, checked in the pod before it serves
+    gpu_job: nvidia/cuda:13.0.3-devel-ubuntu24.04   # P-4's reference (serving.base_image), the train lock installed on the volume
+    cpu_job: python:3.12-slim-bookworm              # the weights' download and the AIPerf client
+    train: null                                     # or an image built from env/runpod/Dockerfile.train (the lock baked in)
+  cpu_flavor: cpu5c            # the CPU pods' flavor (GET /v2/catalog/cpus); their vCPUs: loadtest.client.cpu
+  disk_gb: 50                  # each pod's container disk (GB)
+  secrets: {vllm_api_key: slm-bench-vllm-api-key, hf_token: null}   # RunPod secrets, by name (the pinned weights are ungated)
+  ssh_key: ~/.ssh/id_ed25519   # the operator's private key; its .pub is authorized in every pod (PUBLIC_KEY)
+  local_ports: {qwen3-8b: 18001, granite-4.2-8b: 18002}   # each candidate's tunnel, as its endpoint.base_url says
+  name_prefix: slm-bench       # every pod's name starts with it: `bench serve --on runpod down --all` terminates them all
+  max_pod_hours: {serve: 12, job: 8}   # past it a pod terminates itself (a backstop; `up --hours` overrides serve's)
+  uv_version: 0.9.5            # installs the train lock (Python 3.12, uv-managed) onto the volume
+  lock_stale_minutes: 20       # a build lock on the volume with no heartbeat for this long is a dead builder's
+  train_backend: tinker        # where the adapters are trained (bench train --on tinker): preflight's training_time
 
 train:                         # S5: one LoRA adapter per cluster on the chosen base (bench/train.py)
   gpu: L40S
