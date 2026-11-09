@@ -116,14 +116,14 @@ def draw(theme: str, status: str = STATUS, title: str = TITLE, sub: str = SUB, u
     out.append(nest.text(X + 22, y + 32.5, EYEBROW, 22, "rgba(255,255,255,.9)", 500, mono=True, tracking=1.2))
     size = 104
     while True:
-        lines = nest.wrap(title, WALL - X, size, 4, weight=500, tracking=-size * 0.045)
+        lines = nest.wrap(title, WALL - X, size, 4, weight=400, tracking=-size * 0.04)
         if len(lines) <= 3 or size <= 72:
             break
         size -= 4
     ty = y + 50 + 34 + size * 0.86
     lh = round(size * 1.0)
     for i, line in enumerate(lines):
-        out.append(nest.text(X - 4, ty + i * lh, line, size, WHITE, 500, tracking=round(-size * 0.045, 2)))
+        out.append(nest.text(X - 4, ty + i * lh, line, size, WHITE, 400, tracking=round(-size * 0.04, 2)))
     sy = ty + (len(lines) - 1) * lh + 62
     for i, line in enumerate(nest.wrap(sub, WALL - X - 60, 30, 3, tracking=-0.4)):
         out.append(nest.text(X, sy + i * 42, line, 30, "rgba(255,255,255,.86)", 400, tracking=-0.4))
