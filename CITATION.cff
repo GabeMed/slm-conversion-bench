@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "If you use this harness or its results, please cite it and the paper it runs."
+title: "LLM → SLM conversion: a pre-registered run of arXiv 2506.02153 on the CHESS agent over BIRD"
+type: software
+authors:
+  - family-names: Medeiros
+    given-names: Gabriel
+repository-code: "https://github.com/GabeMed/slm-conversion-bench"
+license: Apache-2.0
+version: 0.1.0
+keywords:
+  - small language models
+  - agents
+  - text-to-SQL
+  - BIRD
+  - LoRA
+  - pre-registration
+references:
+  - type: article
+    title: "Small Language Models are the Future of Agentic AI"
+    authors:
+      - family-names: Belcak
+        given-names: Peter
+      - family-names: Heinrich
+        given-names: Greg
+      - family-names: Diao
+        given-names: Shizhe
+      - family-names: Fu
+        given-names: Yonggan
+      - family-names: Dong
+        given-names: Xin
+      - family-names: Muralidharan
+        given-names: Saurav
+      - family-names: Lin
+        given-names: Yingyan Celine
+      - family-names: Molchanov
+        given-names: Pavlo
+    year: 2025
+    identifiers:
+      - type: other
+        value: "arXiv:2506.02153"
+    url: "https://arxiv.org/abs/2506.02153"
