@@ -1,0 +1,47 @@
+{
+  "call_sites": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "sources": {
+    "agent-B0-calib-20261109T151141.039667Z": {
+      "type": "agent",
+      "arm": "B0",
+      "split": "calib",
+      "call_sites_seen": [
+        "agent_cg",
+        "agent_ir",
+        "agent_ss",
+        "extract_keywords",
+        "filter_column",
+        "generate_candidate",
+        "revise",
+        "select_columns",
+        "select_tables"
+      ]
+    },
+    "agent-B0-train-20261109T214533.609401Z": {
+      "type": "agent",
+      "arm": "B0",
+      "split": "train",
+      "call_sites_seen": [
+        "agent_cg",
+        "agent_ir",
+        "agent_ss",
+        "extract_keywords",
+        "filter_column",
+        "generate_candidate",
+        "revise",
+        "select_columns",
+        "select_tables"
+      ]
+    }
+  }
+}
