@@ -21,6 +21,7 @@ def _load(name):
 
 card = _load("results_card")
 diagram = _load("diagram")
+hero = _load("hero")
 nest = _load("nest")
 
 CONFIG = {
@@ -82,6 +83,14 @@ def test_cli_writes_both_themes(tmp_path):
 def test_diagram_and_lockup_are_svg(theme):
     _svg(diagram.draw(theme))
     _svg(nest.lockup_svg(theme))
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_hero_is_svg_with_its_words(theme):
+    root = _svg(hero.draw(theme, status="A finding", uri="data:image/png;base64,"))
+    assert "A finding" in root.get("aria-label")
+    words = " ".join(t.text or "" for t in root.iter() if t.tag.endswith("text"))
+    assert "A finding" in words and "fine-tuned SLM" in words
 
 
 def test_text_fits():

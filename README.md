@@ -1,19 +1,7 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/nest-dark.svg">
-    <img src=".github/assets/nest-light.svg" alt="Nest" height="28">
-  </picture>
-</p>
-
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-night.png">
-  <img src=".github/assets/banner-day.png" width="100%" alt="Pixel art of the archive room in a lab of the Nest city: a small white robot pulls an index card from a wall of card catalogs while a large machine sleeps behind it; through the arched window, white towers, a river with a bridge, and mountains.">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/hero-dark.svg">
+  <img src=".github/assets/hero-light.svg" width="100%" alt="Nest. Which LLM calls of a real agent can a fine-tuned SLM take over? NVIDIA's LLM-to-SLM conversion, run end to end on a real agent: CHESS answering BIRD text-to-SQL, with the protocol fixed before any result. Stage 0 registered, results pending. The picture: the archive room of a lab in the Nest city, where a small white robot pulls an index card from a wall of card catalogs while a large machine sleeps behind it.">
 </picture>
-
-<h1 align="center">LLM → SLM conversion</h1>
-
-<p align="center"><b>Which LLM calls of a real agent can a fine-tuned SLM take over?</b><br>
-A pre-registered run of the conversion algorithm of <a href="https://arxiv.org/abs/2506.02153">arXiv 2506.02153</a>, on the CHESS text-to-SQL agent over BIRD.</p>
 
 <p align="center">
   <a href="https://github.com/GabeMed/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/GabeMed/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
@@ -47,7 +35,7 @@ The protocol is [`SPEC.md`](SPEC.md) (in Portuguese), fixed before any result.
 
 [`RUNBOOK.md`](RUNBOOK.md) is the order of the two days, command by command.
 
-## How it works
+<a id="how-it-works"></a>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/how-dark.svg">
@@ -125,7 +113,7 @@ committed and pushed.
 | `vendor/chess/` | CHESS @ `3d6e835`, patched; every change is in [`vendor/chess/PATCHES.md`](vendor/chess/PATCHES.md) |
 | `data/MANIFEST.json`, `data/splits.json` | hashes of every input and the train / calibration / test splits |
 | `env/` | the three environments: `agent` (Python 3.11, CHESS's pinned LangChain 0.2), `analysis` (the judgments), `train` (training and serving) |
-| `scripts/brand/` | the README's images: the results card, the diagram and the brand, in Nest's look (standard library only) |
+| `scripts/brand/` | the README's images in Nest's look: the hero, "How it works", the results card and the brand (standard library only) |
 </details>
 
 ## Using a closed model as the teacher
