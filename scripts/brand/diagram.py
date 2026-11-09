@@ -18,11 +18,11 @@ from xml.sax.saxutils import escape
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nest  # noqa: E402
 
-W = 960
+W = 680  # narrow, so GitHub draws it larger: the cards read at about 1.3×
 CARD_W, CARD_H, GAP = 420, 458, 20
-HEAD = 168
+HEAD = 150
 H = HEAD + CARD_H + 6
-DRIFT_S = 72  # seconds for the row to move by one set of six cards
+DRIFT_S = 110  # seconds for the row to move by one set of six cards: slow enough to read
 
 # the site's .hw-* tokens (index.html), light and dark
 HW = {
@@ -157,21 +157,24 @@ class Draw:
         self.pill(x, y + h + 14, "A production signal, never the gold", "shield")
 
     def win_cluster(self, x, y):
-        w, h = 318, 192
-        top = self.window(x, y, w, h, "Calls", "Clusters", "embedded with the answer")
-        rng = random.Random(5)
-        groups = (("keywords", 0.2, 0.3), ("tables", 0.52, 0.22), ("columns", 0.82, 0.34), ("SQL", 0.33, 0.76),
-                  ("repair", 0.72, 0.78))
-        px, py, pw, ph = x + 16, top + 14, w - 32, h - 33 - 22
-        for name, gx, gy in groups:
-            hx, hy = px + gx * pw, py + gy * ph
-            rw, rh = 78, 34
-            self.add(nest.rrect(hx - rw / 2, hy - rh / 2, rw, rh, rh / 2,
-                                f'fill="{self.H["chip"]}" stroke="{self.P["line"]}" stroke-dasharray="3 3"'))
-            for _ in range(10):
-                dx, dy = max(-30, min(30, rng.gauss(0, 13))), max(-11, min(11, rng.gauss(0, 5)))
-                self.add(f'<circle cx="{hx + dx:.1f}" cy="{hy + dy:.1f}" r="2.6" fill="{self.P["muted"]}"/>')
-            self.text(hx, hy + rh / 2 + 13, name, 10.5, self.H["soft"], 500, mono=True, anchor="middle")
+        """Each call becomes a vector (its prompt with the teacher's answer); calls with near vectors are one task."""
+        w, h = 318, 202
+        top = self.window(x, y, w, h, "Calls", "Tasks", "prompt + answer → vector")
+        rng = random.Random(4)
+        base = {t: [rng.random() for _ in range(12)] for t in (1, 2, 3)}
+        rows = (("Pick the tables", 1), ("Pick the columns", 1), ("Write the SQL", 2), ("Write the SQL", 2),
+                ("Fix the SQL", 3))
+        prev = None
+        for i, (say, task) in enumerate(rows):
+            cy = top + 23 + i * 31
+            if prev is not None and task != prev:
+                self.add(f'<rect x="{x + 12:.1f}" y="{cy - 16:.1f}" width="{w - 24:.1f}" height="1" fill="{self.P["line"]}"/>')
+            prev = task
+            self.text(x + 14, cy + 4.3, say, 12.5, self.P["ink"], 450, tracking=-0.1)
+            for j, v in enumerate(base[task]):  # the call's vector: near its task's, never equal
+                o = max(0.06, min(0.85, 0.08 + 0.75 * v + rng.uniform(-0.12, 0.12)))
+                self.add(nest.rrect(x + 126 + j * 9, cy - 6.5, 7.5, 13, 2, f'fill="{self.P["ink"]}" fill-opacity="{o:.2f}"'))
+            self.mono_chip(x + w - 12, cy, f"task {task}")
         self.pill(x, y + h + 14, "The router sees only the prompt")
 
     def win_select(self, x, y):
@@ -290,10 +293,8 @@ def draw(theme: str) -> str:
     pw = nest.width("How it works", 13, 400, tracking=0.26) + 30
     d.add(nest.rrect(0.5, 0.5, pw, 34, 17, f'fill="{P["tile"]}" stroke="{P["line"]}" stroke-width="1"'))
     d.text(15.5, 22.5, "How it works", 13, P["muted"], 400, tracking=0.26)
-    d.text(0, 84, "The paper proposes six steps.", 34, P["ink"], 450, tracking=-1.36)
-    d.text(0, 122, "This harness runs every one of them.", 34, Hw["grey"], 450, tracking=-1.36)
-    d.text(0, 152, "From the agent's own calls to a small model that takes them over, each step one command.", 15,
-           P["muted"], 400, tracking=-0.2)
+    d.text(0, 78, "The paper proposes six steps.", 27, P["ink"], 450, tracking=-1.0)
+    d.text(0, 110, "This harness runs every one.", 27, Hw["grey"], 450, tracking=-1.0)
     d.add(f'<g transform="translate(0 {HEAD})" mask="url(#ends-{theme})"><g class="row">')
     for k in range(12):  # two sets, so the loop has no seam
         d.card(k % 6, 24 + k * step, f"{k}")
@@ -301,7 +302,7 @@ def draw(theme: str) -> str:
     css = (f".row{{animation:drift {DRIFT_S}s linear infinite}}"
            f"@keyframes drift{{from{{transform:translateX(0)}}to{{transform:translateX(-{span}px)}}}}"
            "@media (prefers-reduced-motion:reduce){.row{animation:none}}")
-    label = ("How it works: the paper proposes six steps and this harness runs every one. " +
+    label = ("How it works: the paper proposes six steps; this harness runs every one. " +
              " ".join(f"{s}: {lead}{rest}" for s, lead, rest, _, _ in STEPS) +
              " S5 and S6 are the steps whose contribution is measured.")
     return nest.svg(W, H, d.out, label, css=css)
