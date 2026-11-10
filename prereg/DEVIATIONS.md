@@ -25,3 +25,23 @@ Changes after Stage 0 that can change a result or its interpretation.
   6 to 8 questions and 3 to 4 of the 11 databases per level, 4 databases in all, a different mix at each level;
   shuffled, each level draws 165 to 176 questions from 10 to 11 databases. J8's rule is unchanged.
   config.yaml: seeds.loadtest_shuffle
+- 2026-11-10 · B1's few-shot examples at the agent call sites (agent_ir, agent_ss, agent_cg) were sampled from
+  any step of the teacher's invocations, and these prompts carry no state, so at its first step cheap_alt was
+  shown the teacher's later steps: with k = 3 the agent never called extract_keywords and skipped the steps
+  before SQL. Corrected (PR #19, bench/agent/few_shot.py): each agent step takes examples of the same step
+  (invocation key), sampled with seeds.few_shot, a shortfall filled from the nearest steps; the tool call sites
+  keep their examples and digests, and k = 0 is unchanged. B1's k = 3 pilot execution before the correction
+  (agent-B1-calib-20261110T030824.551966Z, EX 7/50) is superseded; an execution's manifest records the sampling
+  rule
+- 2026-11-10 · analysis code changed after Stage 0: bench/judge/b1k.py. D23's rule for B1's few-shot k keeps its
+  form (k = 3 only if the one-sided 95% lower bound of EX_k3 − EX_k0, paired bootstrap, seeds.bootstrap,
+  stats.n_boot, is above 0; else k = 0) but its unit changes from EX per call on the gold call sites of two
+  replays of the teacher's execution to EX end to end on the pilot questions, from B1's own agent executions
+  with k = 0 and k = 3 (on cheap_alt). The change was decided after reading the pilot: with k = 0, 31 of the 50
+  pilot questions ended without SQL and EX was 12/50; with the corrected k = 3, 0 without SQL and EX 25/50 (B0:
+  28/50). The per-call rule had chosen k = 0 (EX per call 0.519 with k = 0 against 0.500 with k = 3, lower bound
+  −0.077): a replay gives every call the teacher's context, so it cannot see the agent stopping before SQL. End
+  to end, diff = +0.26 (k = 3 alone right on 14 questions, k = 0 alone on 1), lower bound +0.14 over n = 50:
+  k = 3 (config.yaml: arms.B1.few_shot.k). The change strengthens B1, the untrained comparator arm, which makes
+  the SLM's cost and quality verdicts against it harder, not easier. The cheap_alt replay of the calibration that J7 reads
+  (RUNBOOK step 11) uses the same corrected k = 3; B1 with k = 0 is not run on test (the pilot is its record)
