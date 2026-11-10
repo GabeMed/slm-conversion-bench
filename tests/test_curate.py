@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("datasketch")
 
 from bench import paths  # noqa: E402
-from bench.curate import (CurationError, Masker, cap, coverage, curate, near_duplicates, run_curate,  # noqa: E402
+from bench.curate import (CurationError, Masker, agent_answer, cap, coverage, curate, near_duplicates, run_curate,  # noqa: E402
                           write_datasets)
 from bench.contracts.config import config_sha256, load_config  # noqa: E402
 from bench.judge.base import JudgmentError, read_jsonl, reference, write_result  # noqa: E402
@@ -387,3 +387,105 @@ def test_sources_run_under_different_fixed_dates_are_refused(tmp_path, monkeypat
     b = b0_train_run(other, "agent-2", two, question_ids=["2"])
     with pytest.raises(CurationError, match="different fixed dates"):
         run_curate([a, b], str(config_path))
+
+
+# ---------------------------------------------------------------- the agent sites' rule
+
+AGENT_PROMPT = [{"role": "user", "content": "You are the agent. Pick the next tool."}]  # the same for every question
+PROSE = {"1": "alpha bravo charlie delta echo", "2": "foxtrot golf hotel india juliet", "3": "kilo lima mike november oscar"}
+
+
+def agent_calls(run):
+    """Per question: ir:0 calls extract_keywords (one bare text), ir:1 says DONE (one bare text), ss:0 calls
+    filter_column after prose that differs per question; question 3's ss:1 never parses."""
+    calls = []
+    for q in ("1", "2", "3"):
+        calls += [call(run, q, "agent_ir", "ir:0", messages=AGENT_PROMPT, response="<tool_call>extract_keywords</tool_call>",
+                       parsed={"tool": "extract_keywords"}),
+                  call(run, q, "agent_ir", "ir:1", messages=AGENT_PROMPT, response="DONE", parsed={"done": True}),
+                  call(run, q, "agent_ss", "ss:0", messages=AGENT_PROMPT,
+                       response=f"{PROSE[q]}\n<tool_call>filter_column</tool_call>", parsed={"tool": "filter_column"})]
+    calls.append(call(run, "3", "agent_ss", "ss:1", messages=AGENT_PROMPT, response="garbled", parsed_ok=False))
+    calls.append(call(run, "3", "select_tables", response='{"table_names": ["gas_t"]}', parsed={"table_names": ["gas_t"]}))
+    return calls
+
+
+def agent_datasets(tmp_path, monkeypatch, assign):
+    """Curate the agent calls, cluster them by `assign(example)`, and write the datasets."""
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    curated = run_curate([b0_train_run(teacher_config(config), calls=agent_calls("agent-B0-train-1"))], str(config_path)).name
+    examples = read_jsonl(paths.RUNS / curated / "examples.jsonl")
+    members = {e["call_id"]: assign(e) for e in examples}
+    result = write_result("J5", {"curate": reference(curated)},
+                          {"members": members, "clusters": sorted(set(members.values())), "centroids": {"sha256": "ab" * 32}})
+    return examples, lambda: write_datasets(curated, str(result), str(config_path), out=tmp_path / "datasets")
+
+
+def test_the_agent_cluster_keeps_the_teachers_frequency_of_step_and_answer(tmp_path, monkeypatch):
+    examples, write = agent_datasets(tmp_path, monkeypatch, lambda e: "c1" if e["call_site"].startswith("agent_") else "c0")
+    clustered = [e for e in examples if e["call_site"].startswith("agent_")]
+    assert len(clustered) == 5  # exact dedup: one ir:0, one ir:1 (DONE), three prose ss:0
+    out = write()
+    rows = read_jsonl(out / "c1.jsonl")
+    # 5 rows over 3 cells of 3 teacher invocations each: 1 each, and the two ties of remainder go in step order
+    assert [r["completion"][0]["content"] for r in rows].count("DONE") == 2
+    assert [r["completion"][0]["content"] for r in rows].count("<tool_call>extract_keywords</tool_call>") == 2
+    assert sum("filter_column" in r["completion"][0]["content"] for r in rows) == 1
+    assert len(rows) == len(clustered)  # the same total the cluster has under exact dedup
+    pairs = {json.dumps([e["prompt"], e["completion"]]) for e in clustered}
+    assert all(json.dumps([r["prompt"], r["completion"]]) in pairs for r in rows)  # rows J5 clustered there, repeated
+    assert read_jsonl(out / "c0.jsonl") == [{"prompt": e["prompt"], "completion": e["completion"]}
+                                            for e in examples if e["call_site"] == "select_tables"]
+    manifest = json.loads((out / "manifest.json").read_text())
+    rule = manifest["agent_sites"]
+    assert manifest["clusters"]["c1"]["n"] == 5 and list(rule["clusters"]) == ["c1"]
+    assert (rule["teacher_invocations"], rule["unparsed"], rule["seed"]) == (10, 1, 20260934)
+    c1 = rule["clusters"]["c1"]
+    assert (c1["agent_rows"], c1["other_rows"], c1["teacher"], c1["distinct_rows"]) == (5, 0, 9, 3)
+    assert [(c["step"], c["answer"], c["teacher"], c["curated"], c["rows"]) for c in c1["cells"]] == [
+        ("ir:0", "extract_keywords", 3, 1, 2), ("ir:1", "DONE", 3, 1, 2), ("ss:0", "filter_column", 3, 3, 1)]
+    prose = [r for r in rows if "filter_column" in r["completion"][0]["content"]]  # the cap's seeded rank picks it
+    first = min(("1", "2", "3"), key=lambda q: hashlib.sha256(f"20260934:{q}:agent_ss:ss:0".encode()).hexdigest())
+    assert prose[0]["completion"][0]["content"].startswith(PROSE[first])
+    assert read_jsonl(write() / "c1.jsonl") == rows  # deterministic
+
+
+def test_without_agent_examples_the_rule_is_not_applied(tmp_path, monkeypatch):
+    _, config_path, config = make_repo(tmp_path, monkeypatch)
+    curated = run_curate([b0_train_run(teacher_config(config))], str(config_path)).name
+    members = {e["call_id"]: "c0" for e in read_jsonl(paths.RUNS / curated / "examples.jsonl")}
+    result = write_result("J5", {"curate": reference(curated)}, {"members": members, "clusters": ["c0"], "centroids": {"sha256": "ab" * 32}})
+    out = write_datasets(curated, str(result), str(config_path), out=tmp_path / "datasets")
+    assert json.loads((out / "manifest.json").read_text())["agent_sites"] is None
+
+
+def test_the_agent_rule_keeps_every_row_in_the_cluster_j5_gave_it(tmp_path, monkeypatch):
+    """Agent rows split over clusters, or sharing one with another call site: each cluster keeps its other
+    rows as they are and draws as many agent rows as it had, from the invocations of its own examples."""
+    examples, write = agent_datasets(tmp_path / "split", monkeypatch,
+                                     lambda e: "c1" if e["call_site"] == "agent_ss" else "c0")
+    out = write()
+    c0, c1 = read_jsonl(out / "c0.jsonl"), read_jsonl(out / "c1.jsonl")
+    assert c0[0] == next({"prompt": e["prompt"], "completion": e["completion"]} for e in examples
+                         if e["call_site"] == "select_tables")
+    assert [r["completion"][0]["content"] for r in c0[1:]].count("DONE") == 1 and len(c0) == 3
+    assert len(c1) == 3 and all("filter_column" in r["completion"][0]["content"] for r in c1)
+    rule = json.loads((out / "manifest.json").read_text())["agent_sites"]["clusters"]
+    assert {c: (r["agent_rows"], r["other_rows"], r["teacher"]) for c, r in rule.items()} == {"c0": (2, 1, 6), "c1": (3, 0, 3)}
+    _, write = agent_datasets(tmp_path / "mixed", monkeypatch, lambda e: "c0")
+    rows = read_jsonl(write() / "c0.jsonl")
+    assert len(rows) == 6 and "table_names" in rows[0]["completion"][0]["content"]
+
+
+def test_the_agent_rule_refuses_a_source_changed_after_curation(tmp_path, monkeypatch):
+    _, write = agent_datasets(tmp_path, monkeypatch, lambda e: "c1" if e["call_site"].startswith("agent_") else "c0")
+    manifest = paths.RUNS / "agent-B0-train-1" / "manifest.json"
+    manifest.write_text(manifest.read_text() + "\n")
+    with pytest.raises(CurationError, match="changed after it was curated"):
+        write()
+
+
+def test_agent_answers_are_a_tool_or_done():
+    assert agent_answer({"done": True}) == "DONE" and agent_answer({"tool": "revise"}) == "revise"
+    with pytest.raises(CurationError, match="neither"):
+        agent_answer({"thought": "x"})

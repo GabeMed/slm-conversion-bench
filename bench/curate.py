@@ -40,6 +40,20 @@ training on its outputs (SPEC §3, the do-not-train rule). The output is `runs/c
 `examples.jsonl` and a manifest with the counts. `bench datasets` then splits the examples by the
 S3 clusters (J5) into `train/datasets/<cluster>.jsonl`, in TRL's conversational prompt/completion
 shape (design §5.1, "Dados de treino").
+
+**The agent sites' rule** (`bench datasets`, decided before any training): the CHESS agent's own
+calls (`agent_ir`, `agent_ss`, `agent_cg`) repeat a handful of prompts thousands of times, so exact
+deduplication leaves one row per distinct (prompt, completion) and trains on the rare outputs: under
+it the agent cluster had DONE at 0.7% of rows against 27.3% in the teacher, and prose answers at
+96.6% against 4.6%. So the agent-site rows of a cluster's file are not the deduplicated examples but a
+sample that keeps the teacher's frequency of (step, answer), where the step is the invocation key
+(`ir:0`, `ss:1`, `cg:2`, ...) and the answer the tool the agent called or `DONE`: of the teacher's
+final attempts that parsed, with no exact or near deduplication, as many rows as the cluster holds,
+quotas proportional to each cell's share by largest remainder (ties in step order), and in each cell
+the invocations first by the cap's seeded rank (`sample_rank`), masked by the curation's own mask.
+It only selects rows: curate's examples, and so the embed execution and J5's clusters and
+centroids, are unchanged; an invocation belongs to the cluster of the curated example with its exact
+(prompt, completion), and every other call site's rows are written as before.
 """
 import hashlib
 import json
@@ -50,7 +64,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from bench import barrier, data, paths
-from bench.contracts.calls import CALL_SITES
+from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES
 from bench.contracts.clusters import prompt_text
 from bench.contracts.concordance import agree
 from bench.contracts.config import config_sha256, load_config
@@ -228,13 +242,18 @@ def keeps_column(parsed_output: Any) -> bool:
         return False
 
 
+def sample_rank(seed: int, item: dict) -> str:
+    """The seeded draw of the cap and of the agent-site rule: sha256("<seed>:<question>:<call site>:<invocation>")."""
+    identity = f"{seed}:{item['question_id']}:{item['call_site']}:{item['invocation_key']}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
 def cap(examples: List[dict], limit: int, seed: int) -> List[dict]:
     """At most `limit` invocations of each (question, call site): the ones with the smallest
     sha256("<seed>:<question>:<call site>:<invocation>"), a seeded uniform draw that does not depend on
     the Python version (as `data.calib_sample`). The examples keep their order."""
     def rank(example: dict) -> str:
-        identity = f"{seed}:{example['question_id']}:{example['call_site']}:{example['invocation_key']}"
-        return hashlib.sha256(identity.encode()).hexdigest()
+        return sample_rank(seed, example)
     groups: Dict[Tuple[str, str], List[dict]] = {}
     for example in examples:
         groups.setdefault((example["question_id"], example["call_site"]), []).append(example)
@@ -332,15 +351,124 @@ def run_curate(source_run_ids: List[str], config_path: str = "config.yaml") -> P
     return out
 
 
+# ---------------------------------------------------------------- the agent sites' rule
+
+def agent_answer(parsed_output: Any) -> str:
+    """What the CHESS agent decided at a step: the tool it called, or `DONE`."""
+    if isinstance(parsed_output, dict) and parsed_output.get("done"):
+        return "DONE"
+    if isinstance(parsed_output, dict) and isinstance(parsed_output.get("tool"), str):
+        return parsed_output["tool"]
+    raise CurationError(f"an agent output that is neither a tool call nor DONE: {parsed_output!r}")
+
+
+def _step_order(call_site: str, invocation_key: str) -> Tuple[int, int]:
+    number = invocation_key.rpartition(":")[2]
+    if not number.isdigit():
+        raise CurationError(f"{call_site} invocation key {invocation_key!r} is not `<stage>:<step>`")
+    return AGENT_CALL_SITES.index(call_site), int(number)
+
+
+def agent_population(calls: List[dict], masker: Masker) -> Tuple[List[Tuple[dict, dict]], int]:
+    """The teacher's agent-site invocations the rule draws from, each with its masked TRL row: the final
+    attempt of each, if it parsed (curate's filter for these sites), with no deduplication; and how many
+    did not parse."""
+    population, unparsed = [], 0
+    for _, attempts in invocations(c for c in calls if c["call_site"] in AGENT_CALL_SITES).items():
+        chosen = final(attempts)
+        if not chosen["parsed_ok"]:
+            unparsed += 1
+            continue
+        population.append((chosen, {
+            "prompt": [{"role": m["role"], "content": masker(m["content"])} for m in chosen["prompt_messages"]],
+            "completion": [{"role": "assistant", "content": masker(chosen["response_text"])}]}))
+    return population, unparsed
+
+
+def frequency_sample(population: List[Tuple[dict, dict]], n: int, seed: int) -> Tuple[List[dict], List[Dict[str, Any]]]:
+    """`n` rows of `population` with its frequency of (step, answer), and the cells' counts. Quotas: `n` ×
+    the cell's share, largest remainder, ties in step order. In a cell: the smallest `sample_rank(seed)`.
+    Rows are in question order, then step order."""
+    cells_of: Dict[Tuple[str, str, str], List[Tuple[dict, dict]]] = {}
+    for chosen, row in population:
+        cells_of.setdefault((chosen["call_site"], chosen["invocation_key"], agent_answer(chosen["parsed_output"])),
+                            []).append((chosen, row))
+    cells = sorted(cells_of, key=lambda c: (*_step_order(c[0], c[1]), c[2]))
+    total = len(population)
+    if not 0 < n <= total:
+        raise CurationError(f"cannot draw {n} agent-site rows from {total} teacher invocations")
+    quota = {c: n * len(cells_of[c]) // total for c in cells}
+    by_remainder = sorted(cells, key=lambda c: (-(n * len(cells_of[c]) % total), cells.index(c)))
+    for c in by_remainder[:n - sum(quota.values())]:
+        quota[c] += 1
+    picked = [x for c in cells for x in sorted(cells_of[c], key=lambda x: sample_rank(seed, x[0]))[:quota[c]]]
+    picked.sort(key=lambda x: (int(x[0]["question_id"]) if x[0]["question_id"].isdigit() else 0,
+                               *_step_order(x[0]["call_site"], x[0]["invocation_key"])))
+    return [row for _, row in picked], [{"call_site": c[0], "step": c[1], "answer": c[2], "teacher": len(cells_of[c]),
+                                         "rows": quota[c]} for c in cells]
+
+
+def _agent_cluster_rule(curated: Dict[str, Any], examples: List[dict], members: Dict[str, str],
+                        by_cluster: Dict[str, List[dict]]) -> Optional[Dict[str, Any]]:
+    """Apply the agent sites' rule to `by_cluster` in place; what the datasets manifest records of it
+    (None when no curated example is of an agent site). Each teacher invocation belongs to the cluster
+    J5 gave the curated example with its exact (prompt, completion), so the rule moves no row between
+    clusters; in each cluster the agent-site rows are replaced by a frequency sample of as many rows,
+    after the cluster's other rows, which are left as they are."""
+    agent = [e for e in examples if e["call_site"] in AGENT_CALL_SITES]
+    if not agent:
+        return None
+    cluster_of: Dict[bytes, str] = {}
+    for e in agent:
+        key = canonical([e["prompt"], e["completion"]])
+        if cluster_of.setdefault(key, members[e["call_id"]]) != members[e["call_id"]]:
+            raise CurationError("one agent-site prompt and completion is in two clusters")
+    calls: List[dict] = []
+    for source in curated["sources"]:
+        if reference(source["run_id"]) != source:
+            raise CurationError(f"{source['run_id']} changed after it was curated")
+        calls += calls_of(source["run_id"])
+    seed = curated["counts"]["cap"]["seed"]
+    population, unparsed = agent_population(calls, Masker(curated["settings"]["mask"]))
+    invoked = sum(curated["counts"]["per_call_site"].get(site, {}).get("invocations", 0) for site in AGENT_CALL_SITES)
+    if len(population) + unparsed != invoked:
+        raise CurationError(f"the sources hold {len(population) + unparsed} agent invocations, curate counted {invoked}")
+    unclustered = [x for x in population if canonical([x[1]["prompt"], x[1]["completion"]]) not in cluster_of]
+    if unclustered:  # a near duplicate curate dropped: its cluster is unknown, so the frequency would be wrong
+        raise CurationError(f"{len(unclustered)} agent invocations have no curated example with their prompt and completion")
+    by_call = {c["call_id"]: c for c in calls}
+    report: Dict[str, Any] = {}
+    for cluster in sorted({members[e["call_id"]] for e in agent}):
+        mine = [x for x in population if cluster_of[canonical([x[1]["prompt"], x[1]["completion"]])] == cluster]
+        curated_here = [e for e in agent if members[e["call_id"]] == cluster]
+        rows, cells = frequency_sample(mine, len(curated_here), seed)
+        curated_cells = Counter((e["call_site"], e["invocation_key"], agent_answer(by_call[e["call_id"]]["parsed_output"]))
+                                for e in curated_here)
+        for cell in cells:
+            cell["curated"] = curated_cells[(cell["call_site"], cell["step"], cell["answer"])]
+        others = [r for r, e in zip(by_cluster[cluster], [e for e in examples if members[e["call_id"]] == cluster])
+                  if e["call_site"] not in AGENT_CALL_SITES]
+        by_cluster[cluster] = others + rows
+        report[cluster] = {"agent_rows": len(rows), "other_rows": len(others), "teacher": len(mine),
+                           "distinct_rows": len({canonical([r["prompt"], r["completion"]]) for r in rows}), "cells": cells}
+    return {"call_sites": list(AGENT_CALL_SITES), "seed": seed,
+            "rule": "no exact or near deduplication; per cluster, as many agent-site rows as it holds, with the "
+                    "teacher's frequency of (step, answer): largest-remainder quotas, the cap's seeded rank within a "
+                    "cell, the curation's mask",
+            "teacher_invocations": len(population) + unparsed, "unparsed": unparsed, "clusters": report}
+
+
 # ---------------------------------------------------------------- datasets per cluster
 
 def write_datasets(curate_run_id: str, j5_result: str, config_path: str = "config.yaml",
                    out: Optional[Path] = None) -> Path:
     """`train/datasets/<cluster>.jsonl` from the curated examples and the S3 clusters (J5), one
     TRL conversational line `{"prompt": [...], "completion": [{"role": "assistant", ...}]}` each,
-    plus a manifest with the volume of each cluster against the paper's 10k–100k rule of thumb."""
+    plus a manifest with the volume of each cluster against the paper's 10k–100k rule of thumb. The
+    cluster of the agent sites is written by their rule (module docstring), recorded under `agent_sites`
+    with its (step, answer) counts: the teacher's, the curated examples' and the rows'."""
     config = load_config(config_path)
-    require_done(curate_run_id, type="curate")
+    curated = require_done(curate_run_id, type="curate")
     j5 = read_result(j5_result, "J5")
     if j5["reads"]["curate"]["run_id"] != curate_run_id:
         raise CurationError(f"{j5_result} clustered {j5['reads']['curate']['run_id']}, not {curate_run_id}")
@@ -353,6 +481,7 @@ def write_datasets(curate_run_id: str, j5_result: str, config_path: str = "confi
     by_cluster: Dict[str, List[dict]] = {c: [] for c in j5["result"]["clusters"]}
     for example in examples:
         by_cluster[members[example["call_id"]]].append({"prompt": example["prompt"], "completion": example["completion"]})
+    agent_rule = _agent_cluster_rule(curated, examples, members, by_cluster)
     low, high = config["curation"]["rule_of_thumb"]
     for stale in out.glob("*.jsonl"):  # the files of earlier clusters: never left for S5 to train on
         stale.unlink()
@@ -364,6 +493,7 @@ def write_datasets(curate_run_id: str, j5_result: str, config_path: str = "confi
         "clusters": {c: {"n": len(rows), "rule_of_thumb": "below" if len(rows) < low else "above" if len(rows) > high else "within"}
                      for c, rows in by_cluster.items()},
         "rule_of_thumb": [low, high],
+        "agent_sites": agent_rule,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return out
