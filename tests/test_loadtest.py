@@ -384,6 +384,7 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     assert (manifest["source_calls"], manifest["source_calls_all"], manifest["n_questions"]) == (12, 17, 1)
     assert (manifest["traffic"], manifest["traffic_kind"], manifest["cluster"]) == ("c0", "adapter", "c0")
     assert manifest["models"] is None and manifest["short_pool"] is False and manifest["strata"] == {"c0": 5}
+    assert manifest["stratified_by"] == "cluster"
     assert (manifest["request_count"], manifest["request_count_configured"]) == (5, 5)
     assert manifest["cold_prefix_cache"] is False and manifest["prefix_cache_reset"] is None and not server.resets
     assert manifest["composition"]["source"]["clusters"] == {"c0": 12}
@@ -637,3 +638,20 @@ def test_a_server_without_the_reset_route_stops_the_cold_sweep(served, monkeypat
         loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", _source_run(calls=SOURCE), "local")
     manifest = json.loads(next(paths.RUNS.glob("loadtest-*/manifest.json")).read_text())
     assert manifest["status"] == "failed" and "VLLM_SERVER_DEV_MODE" in manifest["stopped_by"]
+
+
+def test_the_base_is_stratified_by_call_site_since_b3_does_not_route(served, monkeypatch):
+    config_path, config, server = served
+    config["loadtest"].update({"concurrency": [1], "request_count": 6})
+    save(config, config_path)
+    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf())
+    # 12 calls of B3: 9 agent_ss and 3 select_tables (no cluster); a level of 6 holds them in proportion, 4.5 and 1.5
+    sites = ["agent_ss"] * 9 + ["select_tables"] * 3
+    calls = [dict(c, call_site=site, **({"parsed_output": {"tool": "x"}} if site == "agent_ss" else {}))
+             for c, site in zip(BASE, sites)]
+    run_dir, = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-B3-calib-src", calls=calls,
+                                                                                  arm="B3"), "local")
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["stratified_by"] == "call_site" and manifest["traffic_kind"] == "base"
+    assert manifest["strata"] == {"agent_ss": 5, "select_tables": 1}  # largest remainder, ties to the smaller name
+    assert manifest["composition"]["level"]["call_sites"] == {"agent_ss": 5, "select_tables": 1}

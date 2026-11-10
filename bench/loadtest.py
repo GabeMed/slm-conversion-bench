@@ -21,7 +21,8 @@ engine (the local smoke server) replays every call of its source.
 **Each level draws its own calls from the engine's whole pool**, seeded (`seeds.loadtest_shuffle` and the level's
 index): `request_count` calls, or `request_count_by_level[<concurrency>]` where the configuration gives one, none
 twice within the level, **stratified by cluster** (proportional allocation, largest remainder: every level holds
-each cluster in the pool's proportion; B3's calls carry no cluster and are one stratum). Levels draw
+each cluster in the pool's proportion), **or by call site for the base**: B3 does not route, so its calls carry
+no cluster, and the call site is the cluster's analogue (`stratified_by`). Levels draw
 independently, so a small pool's calls come back in later levels; that is why **every level starts from an
 empty prefix cache** (`cold_prefix_cache: always`, the same for every sweep): no level meets a cache that a
 previous one filled with its own prompts. A pool smaller than a level's count is replayed whole, once, and the
@@ -169,7 +170,7 @@ def largest_remainder(sizes: Dict[str, int], count: int) -> Dict[str, int]:
 
 def draw_level(strata: List[str], count: int, seed: int, index: int) -> Dict[str, Any]:
     """The pool positions one level replays: `count` of them (all, if the pool holds fewer: `short_pool`), none
-    twice, stratified by cluster (`strata[i]` is position i's) with proportional allocation by largest
+    twice, stratified (`strata[i]` is position i's stratum: its cluster, or its call site for the base) with proportional allocation by largest
     remainder, each stratum's drawn at random with the level's own seed (`seed` and the level's index). Levels
     draw independently: a call can come back in a later level, which starts from an empty prefix cache."""
     rng = random.Random(f"{seed}:{index}")
@@ -470,7 +471,9 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     pool = selected["calls"]
     payloads = build_payloads(pool, spec["model"], spec.get("params") or {}, settings["stream"], config["call_sites"],
                               models)
-    strata = [c.get("cluster") or "none" for c in pool]  # B3 does not route: its calls are one stratum
+    # the router's clusters; B3 does not route (no cluster), so the base is stratified by call site, their analogue
+    stratified_by = "cluster" if selected["kind"] in ("adapter", "as_deployed") else "call_site"
+    strata = [c.get("cluster") or "none" if stratified_by == "cluster" else c["call_site"] for c in pool]
     warmup = shuffle_pool(payloads, shuffle_seed)[:min(settings["warmup_request_count"], len(payloads))]
     tok = _tokenizer(config, engine, tokenizer)
     vllm = endpoint["kind"] == "vllm"
@@ -528,7 +531,8 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 "n_questions": len({c["question_id"] for c in pool}),
                 "composition": {"source": composition(pool),
                                 "level": composition([pool[i] for i in drawn["positions"]])},
-                "strata": drawn["strata"],  # the level's calls per cluster (proportional, largest remainder)
+                "stratified_by": stratified_by,
+                "strata": drawn["strata"],  # the level's calls per stratum (proportional, largest remainder)
                 "payload_shuffle_seed": shuffle_seed, "level_seed": f"{shuffle_seed}:{index}",
                 "short_pool": drawn["short_pool"],  # the pool holds fewer calls than the level: all of them, once
                 "payloads_sha256": hashlib.sha256(raw).hexdigest(), "concurrency": level,

@@ -67,11 +67,14 @@ def test_credentials_reach_the_server_by_reference_and_leave_no_trace(tmp_path, 
         save(config, config_path)
         for name, value in SECRETS.items():
             monkeypatch.setenv(name, value)
-        source = paths.RUNS / "agent-B0-train-fixture"
+        # the base's own traffic: B3's end-to-end execution on calib, every call sent to it (bench.loadtest refuses
+        # another arm's run or another split for an SLM engine)
+        source = paths.RUNS / "agent-B3-calib-fixture"
         source.mkdir(parents=True)
-        (source / "manifest.json").write_text(json.dumps({"run_id": source.name, "arm": "B0", "split": "train",
+        (source / "manifest.json").write_text(json.dumps({"run_id": source.name, "arm": "B3", "split": "calib",
                                                           "status": "done"}))
-        (source / "calls.jsonl").write_text("".join(json.dumps(c) + "\n" for c in CALLS))
+        (source / "calls.jsonl").write_text("".join(json.dumps({**c, "engine": "slm:tiny-qwen3", "model_role": "slm"}) + "\n"
+                                                    for c in CALLS))
         assert cli.main(["loadtest", "--config", str(config_path), "--engine", "slm:tiny-qwen3", "--source",
                          source.name, "--on", "local", "--tokenizer", TINY["repo"],
                          "--tokenizer-revision", TINY["revision"]]) == 0
