@@ -10,9 +10,9 @@ import yaml
 pytest.importorskip("langchain_core")
 
 from bench import paths  # noqa: E402
-from bench.agent import hooks, runner  # noqa: E402
+from bench.agent import few_shot, hooks, runner  # noqa: E402
 from bench.contracts import clusters  # noqa: E402
-from bench.contracts.calls import CALL_SITES, read_calls, validate_calls  # noqa: E402
+from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES, TOOL_CALL_SITES, read_calls, validate_calls  # noqa: E402
 from bench.contracts.config import load_config  # noqa: E402
 from bench.contracts.facts import write_fact  # noqa: E402
 from bench.evaluate import evaluate  # noqa: E402
@@ -88,19 +88,25 @@ def test_b1_prefixes_each_call_site_with_the_teachers_examples(monkeypatch, repo
         assert (call["engine"], call["model_role"]) == ("cheap_alt", "cheap_alt")
         prefix, prompt = call["prompt_messages"][:4], call["prompt_messages"][4:]
         assert [m["role"] for m in prefix] == ["user", "assistant", "user", "assistant"] and len(prompt) == 1
-        examples = manifest["few_shot"]["examples"][call["call_site"]]
+        steps = manifest["few_shot"]["examples"][call["call_site"]]
+        examples = few_shot.resolve(steps, call["call_site"], call["invocation_key"])
+        if call["call_site"] in AGENT_CALL_SITES:  # the teacher's own step, which it reached for every one here
+            assert {key for _, key in examples} == {call["invocation_key"].split("@")[0]}
         for (question_id, key), (user, assistant) in zip(examples, zip(prefix[::2], prefix[1::2])):
             example = teacher[(call["call_site"], question_id, key)]
             assert [user] == example["prompt_messages"] and assistant["content"] == example["response_text"]
-    per_site = {}
-    for call in calls:  # one fixed prefix per call site, so a provider can cache it
-        per_site.setdefault(call["call_site"], set()).add(json.dumps(call["prompt_messages"][:4]))
-    assert all(len(prefixes) == 1 for prefixes in per_site.values())
+    per_step = {}
+    for call in calls:  # one fixed prefix per call site and step, so a provider can cache it
+        step = few_shot.step_of(call["call_site"], call["invocation_key"])
+        per_step.setdefault((call["call_site"], step), set()).add(json.dumps(call["prompt_messages"][:4]))
+    assert all(len(prefixes) == 1 for prefixes in per_step.values())
+    agent_steps = {key for key in per_step if key[0] in AGENT_CALL_SITES}
+    assert len(agent_steps) > len(AGENT_CALL_SITES)  # several steps, several prefixes
+    assert len({next(iter(per_step[key])) for key in agent_steps if key[0] == "agent_ir"}) > 1
 
 
 def test_the_examples_are_seeded(monkeypatch, repo):
     source = teacher_run(monkeypatch, repo)
-    from bench.agent import few_shot
     config = yaml.safe_load(repo.read_text())
     config["arms"]["B1"]["few_shot"] = {"k": 1, "source_run": source}
     first = few_shot.build(config)
@@ -108,6 +114,52 @@ def test_the_examples_are_seeded(monkeypatch, repo):
     seeds = {json.dumps(few_shot.build({**config, "seeds": {**config["seeds"], "few_shot": s}})[1]["examples"])
              for s in range(8)}
     assert len(seeds) > 1
+
+
+def test_agent_examples_come_from_the_same_step(monkeypatch, repo):
+    source = teacher_run(monkeypatch, repo)
+    config = yaml.safe_load(repo.read_text())
+    config["arms"]["B1"]["few_shot"] = {"k": 2, "source_run": source}
+    prefix, provenance = few_shot.build(config)
+    assert provenance["sampling"] == few_shot.SAMPLING
+    teacher = [c for c in read_calls(paths.RUNS / source / "calls.jsonl") if c["parsed_ok"]]
+    for site in AGENT_CALL_SITES:
+        steps = {c["invocation_key"] for c in teacher if c["call_site"] == site}
+        assert set(prefix[site]) == set(provenance["examples"][site]) == steps and len(steps) > 1
+        for step, chosen in provenance["examples"][site].items():
+            assert len(chosen) == 2 and {key for _, key in chosen} == {step}  # two questions reached every step
+    for site in TOOL_CALL_SITES:  # a tool's prompt carries its state: one prefix for the call site, as before
+        assert set(prefix[site]) == {few_shot.ANY_STEP} and len(provenance["examples"][site]["*"]) == 2
+    digests = few_shot.digests(prefix)
+    assert set(digests) == set(CALL_SITES)
+    import hashlib
+    from bench.contracts.facts import canonical
+    assert digests["agent_ir"] == hashlib.sha256(canonical(prefix["agent_ir"])).hexdigest()  # every step at once
+    assert digests["revise"] == hashlib.sha256(canonical(prefix["revise"]["*"])).hexdigest()
+
+
+def test_a_short_step_is_filled_from_the_nearest_steps():
+    def call(key, question):
+        return {"call_site": "agent_ir", "invocation_key": key, "question_id": question}
+    candidates = [call("ir:0", "1"), call("ir:0", "2"), call("ir:1", "1"), call("ir:2", "1"), call("ir:2", "2"),
+                  call("ir:5", "1")]
+    import random
+    for seed in range(20):
+        chosen = few_shot._sample(random.Random(seed), candidates, "ir:1", 3)
+        keys = [c["invocation_key"] for c in chosen]
+        assert keys[0] == "ir:1" and len(keys) == 3 and set(keys[1:]) <= {"ir:0", "ir:2"}  # distance 1, both sides
+        assert few_shot._sample(random.Random(seed), candidates, "ir:1", 3) == chosen  # seeded
+    assert [c["invocation_key"] for c in few_shot._sample(random.Random(0), candidates, "ir:5", 2)] == ["ir:5", "ir:2"]
+    assert len(few_shot._sample(random.Random(0), candidates, "ir:9", 6)) == 6  # every step, the farthest last
+    steps = {"ir:0": "a", "ir:2": "b", "ir:6": "c"}
+    assert few_shot.resolve(steps, "agent_ir", "ir:2@3") == "b"  # a repeat is its step
+    assert few_shot.resolve(steps, "agent_ir", "ir:1") == "a"  # never reached: the nearest, the lower on a tie
+    assert few_shot.resolve(steps, "agent_ir", "ir:4") == "b" and few_shot.resolve(steps, "agent_ir", "ir:40") == "c"
+    assert few_shot.resolve({"*": "x"}, "filter_column", "Laboratory.ALB") == "x"
+    assert few_shot.resolve({}, "agent_cg", "cg:0") == []  # a run with no prefix (a fixed engine)
+    assert few_shot.resolve({"*": []}, "agent_cg", "cg:4") == []  # k = 0
+    with pytest.raises(hooks.HarnessError, match="not <step name>:<index>"):
+        few_shot.step_of("agent_ss", "single")
 
 
 def test_cheap_alt_never_runs_without_its_few_shot(monkeypatch, repo):
@@ -138,6 +190,9 @@ def test_k_zero_is_an_explicit_empty_prefix(monkeypatch, repo):
     _, manifest, calls = run(monkeypatch, repo, "B1", ("1",))
     assert manifest["status"] == "done" and manifest["few_shot"] == {"k": 0, "source_run": None}
     assert manifest["few_shot_k"] == 0 and set(manifest["few_shot_sha256"]) == set(CALL_SITES)
+    import hashlib
+    empty = hashlib.sha256(b"[]").hexdigest()  # the digest k = 0 had before prefixes by step
+    assert set(manifest["few_shot_sha256"].values()) == {empty}
     assert all(len(c["prompt_messages"]) == 1 for c in calls)
 
 
@@ -311,7 +366,7 @@ def test_examples_are_only_the_teachers_successful_answers(monkeypatch, repo):
         config["arms"]["B1"]["few_shot"] = {"k": 2, "source_run": source}
         prefix, _ = few_shot.build(config)
         # 2 of the 4 select_tables answers did not parse: over 8 seeds, a draw from all 4 would pick one
-        assert all(m["content"] != "the tables are gas_t" for m in prefix["select_tables"])
+        assert all(m["content"] != "the tables are gas_t" for m in prefix["select_tables"]["*"])
 
 
 @pytest.mark.parametrize("field,value", [("arm", "B1"), ("split", "calib"), ("status", "failed"), ("type", "replay")])
@@ -344,9 +399,16 @@ def test_the_manifest_records_k_and_the_sha256_of_each_prefix_as_sent(monkeypatc
     set_config(repo, B1={"few_shot": {"k": 2, "source_run": source}})
     _, manifest, calls = run(monkeypatch, repo, "B1", ("3",))
     assert manifest["few_shot_k"] == 2 and set(manifest["few_shot_sha256"]) == set(CALL_SITES)
+    config = yaml.safe_load(repo.read_text())
+    prefix, _ = few_shot.build(config)
+    assert few_shot.digests(prefix) == manifest["few_shot_sha256"]
     for call in calls:
-        sent = hashlib.sha256(canonical(call["prompt_messages"][:4])).hexdigest()
-        assert manifest["few_shot_sha256"][call["call_site"]] == sent
+        sent = call["prompt_messages"][:4]
+        assert sent == few_shot.resolve(prefix[call["call_site"]], call["call_site"], call["invocation_key"])
+        if call["call_site"] in TOOL_CALL_SITES:  # one prefix: its digest is that of the messages as sent
+            assert manifest["few_shot_sha256"][call["call_site"]] == hashlib.sha256(canonical(sent)).hexdigest()
+        else:  # one prefix per step: the digest is that of all of them, {step: messages}
+            assert manifest["few_shot_sha256"][call["call_site"]] == hashlib.sha256(canonical(prefix[call["call_site"]])).hexdigest()
 
 
 def test_the_examples_are_questions_of_todays_train_split(monkeypatch, repo):
