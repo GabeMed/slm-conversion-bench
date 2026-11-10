@@ -11,3 +11,11 @@ Changes after Stage 0 that can change a result or its interpretation.
   volumes; accuracy is unaffected, J8's cost and the SLM's p95 are measured on the A100; J8's sensitivity is
   Modal's price for the same GPU (A100-80GB, $0.000694 a second, 2026-11-09). config.yaml: serving.gpu,
   train.gpu, modal.gpu_prices, runpod.gpu_ids, the triage's footprints
+- 2026-11-10 · patch 16: CHESS's agent tool-call parser accepts the tool name inside JSON ({"name": ...} or
+  {"tool": ...}), followed by arguments, or closed by </think> (vendor/chess/src/workflow/agents/agent.py); the
+  prompt and every other rule are unchanged, for every arm. Upstream accepted only <tool_call>name</tool_call>,
+  which non-Claude models (Qwen3-8B, gpt-oss-120b) answered with the right tool in another format and the agent
+  then stopped without SQL; plain text, empty tags and unknown tools still fail. B0's calibration pilot and K1 ran
+  under the strict parser: 1 of the pilot's 2,198 answered agent calls (agent_cg) and 3 of K1's 9,167 (2 agent_cg, 1
+  agent_ss), each a JSON {"name": ...}, would parse under patch 16; no call the strict parser accepted changes
+  its tool
