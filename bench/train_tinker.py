@@ -576,7 +576,8 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
              "versions": {"tinker": sdk.__version__, "tinker_cookbook": _cookbook_version()}}
     # Tinker bills tokens, not GPU-seconds: no GPU, no cost here (the tokens are in stats; no price in the repo)
     billing = {"gpu": None, "gpu_seconds": None, "cost_usd": None, "price_usd_per_s": None, "price_as_of": None}
-    code = {"commit": record["commit"], "dirty": record["dirty"], "tinker_key": key, "plan_sha256": plan_id(plan)}
+    code = {"commit": record["commit"], "dirty": record["dirty"], "tinker_key": key, "plan_sha256": plan_id(plan),
+            **{k: record[k] for k in ("dirty_paths", "dirty_paths_total") if k in record}}  # an older record has none
     path = write_manifest(config, plan, stats, adapter, "tinker", billing, code,
                           {"started_at": record["started_at"], "finished_at": record["finished_at"]})
     pending.unlink()
