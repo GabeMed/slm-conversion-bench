@@ -650,7 +650,11 @@ def aiperf_job(world, monkeypatch):
         (run_dir / loadtest.EXPORT).write_text(json.dumps({
             "request_latency": {"unit": "ms", "avg": 400.0, "p95": 900.0},
             "request_throughput": {"unit": "requests/sec", "avg": 2.5},
-            "overall_usage_prompt_cache_read_pct": {"unit": "%", "avg": 61.0}}))
+            "overall_usage_prompt_cache_read_pct": {"unit": "%", "avg": 61.0},
+            "error_summary": [], "was_cancelled": False, "is_complete": True}))
+        from fixtures.fake import aiperf_records  # the per-request records J8 reads its steady state from
+        concurrency = yaml.safe_load((run_dir / "aiperf.yaml").read_text())["benchmark"]["phases"]["concurrency"]
+        (run_dir / "profile_export.jsonl").write_text("".join(json.dumps(r) + "\n" for r in aiperf_records(concurrency, 900.0, 2.5)))
         return 0
 
     def run(shell, name, command):
@@ -733,7 +737,7 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     # the teacher on both of the sweep's call sites (its limit is the teacher reweighted to the sweep's mix)
     write_run(pilot, {"type": "agent", "arm": "B0", "split": "calib"},
               [call(pilot, str(q), site, latency_ms=3000, parsed={"tool": "x"} if site == "agent_ss" else None)
-               for q in (1, 2, 3) for site in ("select_tables", "agent_ss")])
+               for q in (1, 2, 3) for site in ("select_tables", "agent_ss")], config={})  # no cache break: no gate
     result = read_result(j8.run([d.name for d in run_dirs], patched, slo_from=pilot), "J8")["result"]
     assert result["gpu"] == "A100-80GB" and result["gpu_prices_as_of"] == "2026-11-09"
     assert result["price_per_hour"] == pytest.approx(0.000497 * 3600)

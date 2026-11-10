@@ -35,11 +35,14 @@ def j4_results(ok4=True, ok5=True, diff=-0.01, pilot=0.1):
     return {"B0|B4": j4(ok4, diff, pilot), "B0|B5": j4(ok5, diff, pilot)}
 
 
-def data_with(tests, costs, formats=None, repair=None, per_call=None, ratios=None, j7=None):
-    arms = {arm: {"cost_per_correct": c, "replaceable_fraction": None} for arm, c in costs.items()}
+def data_with(tests, costs, formats=None, repair=None, per_call=None, ratios=None, j7=None, modal=True):
+    """`modal`: the sensitivity price (Modal's) equal to the provider's, unless a test sets it or leaves it out."""
+    arms = {arm: {"cost_per_correct": c, "replaceable_fraction": None,
+                  **({"cost_per_correct_sensitivity": c} if modal else {})} for arm, c in costs.items()}
     return {"arms": arms, "tests": tests, "formats": formats or {}, "repair_test": repair,
             "judgments": {"j5": None, "per_call": per_call, "j7": j7}, "v3_min_ratio": 3,
-            "utilizations": ["20%", "50%", "100%"], "min_calls": 100, "format_tolerance_pp": 1, "cost_ratios": ratios or {}}
+            "utilizations": ["20%", "50%", "100%"], "min_calls": 100, "format_tolerance_pp": 1, "cost_ratios": ratios or {},
+            **({"cost_ratios_sensitivity": dict(ratios or {})} if modal else {})}
 
 
 def ratio(point, low, high, base="B0", slm="B4", not_worse=None):
@@ -1053,7 +1056,7 @@ def build_pipeline(tmp_path, monkeypatch):
     from bench.curate import run_curate, write_datasets
     from bench.embed import run_embed
     from bench.judge import j2, j3, j5, j6, j7, j8
-    from fixtures.fake import call, fake_embed, fake_tokens, few_shot, write_run
+    from fixtures.fake import aiperf_level, call, fake_embed, fake_tokens, few_shot, write_run
     from fixtures.world import gold_correct, per_call_eval, replay, teacher, trained_on
     from synthetic import make_repo
     from test_curate import teacher_config
@@ -1123,12 +1126,11 @@ def build_pipeline(tmp_path, monkeypatch):
             run_id = f"loadtest-{slug}-{concurrency}"
             write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": "L4", "concurrency": concurrency,
                                "prefix_cache": True, "sweep_id": f"sweep-{slug}", "composition": {"source": {"call_sites": {"select_tables": 1}}}},
-                      files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
-                                                             "request_throughput": {"unit": "requests/sec", "avg": rps}}})
+                      files=aiperf_level(concurrency, p95, rps))
             loadtests.append(run_id)
     # the SLO rule's pilot: a production LLM slower than the cap, so the cap is the SLO
-    run("agent-B0-slo", {"type": "agent", "arm": "B0", "split": "calib"},
-        [call("agent-B0-slo", "1", "select_tables", latency_ms=5000)])
+    write_run("agent-B0-slo", {"config_sha256": "", "type": "agent", "arm": "B0", "split": "calib"},
+              [call("agent-B0-slo", "1", "select_tables", latency_ms=5000)], config={})  # no cache break: no gate
     j8_path = j8.run(loadtests, config, slo_from="agent-B0-slo")
     b4_calib = replay(calib, "replay-B4-calib", "slm:qwen3-8b+lora:c", 0.99, cluster_of=assigned)
     run("replay-B4-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "arm": "B4", "split": "calib",
@@ -1765,9 +1767,10 @@ def test_a_cost_confirmation_must_also_hold_at_modals_price():
         "cheaper even at 20% utilization, below the 3× bar there (the bar is met at the provider's price, not at Modal's)"
     assert v3(ratio(4, 3.2, 5), ratio(1, 0.8, 1.3)) == \
         "inconclusive (at 20% utilization: meets the 3× bar at the provider's price, the interval holds 1 at Modal's)"
-    # without a sensitivity price the verdict is the provider's
-    assert row(report.claims_map(data_with(j4_results(), costs, ratios={"20%": ratio(4, 3.2, 5), "100%": ratio(20, 16, 24)})),
-               "V3")["verdict"] == "meets the paper's 3× bar (even at 20% utilization)"
+    # without a sensitivity price there is no confirmation
+    assert row(report.claims_map(data_with(j4_results(), costs, ratios={"20%": ratio(4, 3.2, 5), "100%": ratio(20, 16, 24)},
+                                           modal=False)), "V3")["verdict"] == \
+        "inconclusive (at 20% utilization: meets the 3× bar at the provider's price, no data at Modal's)"
 
     tests = {**j4_results(), "B0|B1": j4(False, diff=-0.2)}
 
@@ -1776,6 +1779,7 @@ def test_a_cost_confirmation_must_also_hold_at_modals_price():
         data["arms"]["B5"]["cost_per_correct_sensitivity"] = modal
         return row(report.claims_map(data), "A6")["verdict"]
     assert a6({"20%": 0.7, "100%": 0.1}).startswith("confirms")
+    assert a6(None).startswith("inconclusive")  # no Modal price, no confirmation
     assert a6({"20%": 1.2, "100%": 0.2}) == \
         "inconclusive (B5 is cheaper at 20% utilization at the provider's price, not at Modal's: $1.2)"
 

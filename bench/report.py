@@ -106,6 +106,10 @@ Every verdict holds for this workload only: the map opens with a scope line, and
   (J8's `modal.gpu_prices_sensitivity`, `standard@<u>@sensitivity`), a V3 or A6 confirmation must also hold
   at that price: a V3 that meets the bar at the provider's price and is only cheaper at Modal's reads
   "cheaper"; one that does not hold at Modal's at all, and an A6 not cheaper there, is inconclusive, saying so.
+  Without the sensitivity price there is no confirmation: the V3 or A6 is inconclusive ("no data at Modal's").
+- **V3's interval is conditional on J8**: the paired bootstrap resamples the questions; the SLM's cost per
+  request (J8's sustained throughput, from one load test per engine) enters as a fixed number, so the interval
+  carries the questions' uncertainty and not the load test's.
 - **An SLM engine outside its latency limit** (J8's `outside_slo`) has no cost: the arms whose calls ran on
   it have none, and their cost rows carry the label "no cost within the latency limit"; a cost claim with no
   SLM arm priced for that reason is "not testable at the API's latency", naming the engines.
@@ -944,7 +948,7 @@ def _a6(data, t5) -> Dict[str, str]:
         verdict = f"utilization-dependent ({tipping_point(data, ['B5'], base_cost)})"
     elif _passes_v1(data, "B5"):
         at_low_modal = _cost(data, "B5", low, sensitivity=True)
-        if data["arms"]["B5"].get("cost_per_correct_sensitivity") and (at_low_modal is None or at_low_modal >= base_cost):
+        if at_low_modal is None or at_low_modal >= base_cost:  # no Modal price is no confirmation (SPEC §6.6)
             verdict = (f"inconclusive (B5 is cheaper at {low} utilization at the provider's price, not at Modal's: "
                        f"{_usd(at_low_modal)})")
         else:
@@ -1005,7 +1009,8 @@ def _v3(data, t4, t5) -> Dict[str, str]:
     pure = [a for a in slm_arms(data) if a == PURE_SLM]
     passing = [a for a in pure if _passes_v1(data, a)]
     result = (f"cost per correct query, the best arm without training ÷ B4 (the all-SLM arm), per utilization"
-              f"{'' if passing or not result else ', descriptive (B4 is not non-inferior to B0)'}: {result or '—'}")
+              f"{'' if passing or not result else ', descriptive (B4 is not non-inferior to B0)'}: {result or '—'}"
+              f" (the interval is over the questions, conditional on J8's measured throughput)")
     modal = {u: both_readings(found, bar) for u, found in (data.get("cost_ratios_sensitivity") or {}).items()}
     latency = outside_slo(data, pure)
     if latency and base is not None:
@@ -1018,11 +1023,11 @@ def _v3(data, t4, t5) -> Dict[str, str]:
         verdict = "no data"
     elif low not in ratios or high not in ratios:
         verdict = "no data"
-    elif readings[low] in ("meets", "cheaper") and modal and modal.get(low) not in ("meets", "cheaper"):
-        # a confirmation holds at Modal's price too, or it is none (SPEC §6.6)
+    elif readings[low] in ("meets", "cheaper") and modal.get(low) not in ("meets", "cheaper"):
+        # a confirmation holds at Modal's price too, or it is none (SPEC §6.6): without that price, none
         verdict = (f"inconclusive (at {low} utilization: {end[readings[low]]} at the provider's price, "
                    f"{end.get(modal.get(low), 'no data')} at Modal's)")
-    elif readings[low] == "meets" and (not modal or modal[low] == "meets"):
+    elif readings[low] == "meets" and modal[low] == "meets":
         verdict = f"meets the paper's {bar:g}× bar (even at {low} utilization)"
     elif readings[low] in ("meets", "cheaper"):
         verdict = f"cheaper even at {low} utilization, below the {bar:g}× bar there" + (
