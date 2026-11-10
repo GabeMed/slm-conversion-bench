@@ -22,7 +22,7 @@ class Recording:
     """/v1/models lists the model; /v1/chat/completions answers and records the headers it got."""
 
     def __init__(self, model):
-        self.headers = []
+        self.headers, self.resets = [], 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -42,7 +42,10 @@ class Recording:
                 self._answer({"object": "list", "data": [{"id": model, "object": "model", "root": "r"}]})
 
             def do_POST(self):
-                self.rfile.read(int(self.headers["Content-Length"]))
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if self.path == "/reset_prefix_cache":  # vLLM's dev route: the cache emptied before each level
+                    fake.resets += 1
+                    return self._answer({"success": True})
                 fake.headers.append(("POST", dict(self.headers)))
                 self._answer({"id": "x", "object": "chat.completion", "created": 0, "model": model,
                               "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
@@ -83,6 +86,7 @@ def test_credentials_reach_the_server_by_reference_and_leave_no_trace(tmp_path, 
     run_dir = next(paths.RUNS.glob("loadtest-*"))
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done"
+    assert manifest["cold_prefix_cache"] is True and server.resets == 1  # the shipped setting: a cold cache per level
     posts = [h for method, h in server.headers if method == "POST"]
     assert len(posts) == 2 and all((h["Authorization"], h["Modal-Key"], h["Modal-Secret"]) ==
                                    ("Bearer sk-aiperf-live-key", "mk-aiperf-live", "ms-aiperf-live") for h in posts)
