@@ -39,14 +39,26 @@ registers the `adapters` fact the same way. It never replaces an existing adapte
 manifest records the tokens trained, and no price (none is kept in the repository). The moment the export
 answers, its Tinker path and expiry are kept in train/adapters/.tinker/<key>.json, so running the same command
 again downloads them instead of training twice (until they expire, which it says); with an adapter installed
-from the same plan it only registers. Not covered: a run interrupted before the export starts over (no mid-run
-checkpoint), and two processes on the same cluster are not locked against each other.
+from the same plan it only registers. Two processes on the same cluster are not locked against each other.
+
+Resume. Every `--save-every` optimizer steps (SAVE_EVERY by default; 0: never) the run saves its state on Tinker
+(`save_state`: the LoRA weights and the optimizer's state, kept STATE_TTL_S) and records it in
+train/adapters/.tinker/<key>.resume.json, with what the run had reached (losses, tokens, seconds); the previous
+state is then deleted (only the latest is kept). `--resume` continues an interrupted run from its latest state
+(`create_training_client_from_state_with_optimizer`) at the next step, with the same step order (`step_rows`,
+recomputed and checked by its sha256) and the learning rate of that global step; it refuses when the plan, the
+Tinker settings, the dataset, config.yaml, the tokenized rows or the step order differ from the interrupted
+run's, or when the state expired. Without `--resume` a run that left a state refuses to start over (it would pay
+again for the steps saved). The steps between the latest state and the interruption are trained again (billed
+twice; stats.resume.steps_replayed). The manifest records each segment, its training run and the states
+(stats.resume). A resumed run is not bit-identical to an uninterrupted one (RESUME_CAVEATS, in the manifest).
 
 A plan with train.sft.max_steps set (the one-step probe of RUNBOOK step 9) is a probe: its adapter goes to
 train/adapters/.probe/<cluster>/, never served nor registered, and never in the way of the full run.
 
 `tinker` and `tinker-cookbook` are imported only here (env/tinker); `bench train --on modal|local` never needs them.
 """
+import hashlib
 import json
 import math
 import os
@@ -76,6 +88,24 @@ SFT = {"learning_rate", "num_train_epochs", "max_steps", "per_device_train_batch
        "max_length", "lr_scheduler_type", "warmup_steps", "gradient_checkpointing", "logging_steps"}
 OPTIMIZER = {"beta1", "beta2", "eps", "weight_decay", "grad_clip_norm"}
 SWITCHES = ("train_attn", "train_mlp")  # create_lora_training_client's module groups; train_unembed is always off
+# Resume: a state every SAVE_EVERY optimizer steps. A full c0 run is ~1,500 steps in ~8.9 h (~21 s a step), so 100
+# steps is ~36 min: an interruption loses at most that (re-trained, billed twice), for ~15 checkpoint operations a
+# run (Tinker bills checkpoints per checkpoint, and their storage per GB-month; only the latest state is kept).
+# Steps, not minutes: where the states fall is then the same on every run and in the tests.
+SAVE_EVERY = 100
+STATE_TTL_S = 7 * 24 * 3600  # a state outlives a deletion that failed by at most this; resume within it
+RESUME_RECORD = 1  # the resume record's format
+# What a resumed run does not reproduce exactly, recorded in its manifest (stats.resume.caveats)
+RESUME_CAVEATS = {
+    "service_numerics": "the steps after the resume run on a new Tinker training run (a new model id, possibly "
+                        "other hardware); the run is not bit-identical to an uninterrupted one",
+    "optimizer_state": "Adam's moments are restored by create_training_client_from_state_with_optimizer (the SDK: "
+                       "'restores optimizer state (e.g., Adam momentum) ... resuming training exactly where it left "
+                       "off'); whether the server also restores Adam's step count (bias correction) is not stated by "
+                       "the SDK and cannot be checked from the client",
+    "steps_replayed": "the steps between the latest state and the interruption were trained twice (billed twice); "
+                      "only the second pass is in the adapter and in the losses",
+}
 
 
 class TinkerMissing(TrainError):
@@ -256,16 +286,50 @@ def _tokenizer(plan: Dict[str, Any]) -> Any:
     return AutoTokenizer.from_pretrained(plan["base"]["repo"], revision=plan["base"]["revision"])
 
 
+def order_sha256(steps: List[List[int]]) -> str:
+    """The step order's identity (`step_rows`): a resumed run must take the steps the interrupted one took."""
+    return hashlib.sha256(json.dumps(steps, separators=(",", ":")).encode()).hexdigest()
+
+
+def encoded_sha256(encoded: List[Dict[str, List]]) -> str:
+    """The tokenized rows' identity: a resumed run must train on the tokens the interrupted one trained on."""
+    return hashlib.sha256(json.dumps(encoded, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _best_effort(what: str, call: Callable[[], Any], log: Callable[[str], None]) -> bool:
+    try:
+        call()
+        return True
+    except Exception as e:  # noqa: BLE001 (any SDK or transport error: the state's TTL removes it anyway)
+        log(f"{what} failed: {type(e).__name__}: {e}")
+        return False
+
+
 def train_on_tinker(sdk: Any, run: Dict[str, Any], encoded: List[Dict[str, List]], sched: Dict[str, int],
                     sft: Dict[str, Any], name: str, ttl_s: Optional[int], log: Callable[[str], None],
-                    exported: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+                    exported: Callable[[Dict[str, Any]], None], resume: Optional[Dict[str, Any]] = None,
+                    keep_resume: Callable[[Dict[str, Any]], None] = lambda record: None,
+                    segment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The optimizer loop, client side; returns the exported weights' Tinker path and the run's numbers, which it
     hands to `exported` as soon as the export answers (before the session closes: what was paid for is recorded
-    whatever happens next)."""
+    whatever happens next).
+
+    `resume` is the resume record (`resume_record`): its `save_every` sets the cadence of the states, and when it
+    holds a state the loop continues from the latest one, at the step after it. `keep_resume` is handed the record
+    each time it changes once a state exists (the caller writes it to disk). `segment` is added to this run's
+    entry in record["segments"] (the code it ran)."""
+    record = resume if resume is not None else {"save_every": 0, "states": [], "segments": [], "losses": []}
+    save_every = record["save_every"]
     service = sdk.ServiceClient(user_metadata={"created_by": "bench train", "adapter": name})
     status = "errored"
+
+    def persist() -> None:
+        if record["states"]:  # nothing to resume from before the first state
+            keep_resume(record)
+
     try:
-        offered = {m.model_name: m for m in service.create_rest_client().get_server_capabilities().result().supported_models}
+        rest = service.create_rest_client()
+        offered = {m.model_name: m for m in rest.get_server_capabilities().result().supported_models}
         model = offered.get(run["base_model"])
         if model is None or model.trainable is False:
             raise TrainError(f"the Tinker service does not train {run['base_model']} today (it offers "
@@ -274,17 +338,37 @@ def train_on_tinker(sdk: Any, run: Dict[str, Any], encoded: List[Dict[str, List]
         if model.max_context_length and longest > model.max_context_length:
             raise TrainError(f"a row has {longest} input tokens, over the service's context for "
                              f"{run['base_model']} ({model.max_context_length})")
-        client = service.create_lora_training_client(base_model=run["base_model"], **run["lora"]).result()
+        state = record["states"][-1] if record["states"] else None
+        if state is None:
+            client = service.create_lora_training_client(base_model=run["base_model"], **run["lora"]).result()
+            first, losses, tokens, completion_tokens, examples, before = 0, [], 0, 0, 0, 0.0
+        else:  # the weights and the optimizer's state, as the interrupted run saved them at step state["step"]
+            client = service.create_training_client_from_state_with_optimizer(
+                state["path"], user_metadata={"created_by": "bench train", "adapter": name,
+                                              "resumed_from": state["path"]}).result()
+            first, counters = state["step"], state["counters"]
+            losses = list(record["losses"][:first])
+            tokens, completion_tokens = counters["tokens"], counters["completion_tokens"]
+            examples, before = counters["examples"], counters["train_seconds"]
         info = client.get_info()
         if info.lora_rank is not None and info.lora_rank != run["lora"]["rank"]:
             raise TrainError(f"Tinker created a LoRA of rank {info.lora_rank}, not {run['lora']['rank']}")
-        losses, tokens, completion_tokens, examples = [], 0, 0, 0
+        replayed = record.get("reached_step", first) - first
+        record["segments"].append({"from_step": first, "training_run": str(info.model_id),
+                                   "state": state["path"] if state else None, "steps_replayed": replayed,
+                                   "started_at": datetime.now(timezone.utc).isoformat(), **(segment or {})})
+        if state:
+            log(f"resuming at step {first + 1}/{sched['total_steps']} from {state['path']}"
+                + (f" ({replayed} steps after it are trained again)" if replayed else ""))
+        persist()
         started = time.perf_counter()
         for step, indices in enumerate(step_rows(len(encoded), sched, run["lora"]["seed"])):
+            if step < first:
+                continue  # trained before the state this run resumed from
             data = step_data(encoded, indices)
             datums = [sdk.Datum(model_input=sdk.ModelInput.from_ints(d["inputs"]),
                                 loss_fn_inputs={"target_tokens": d["targets"], "weights": d["weights"]}) for d in data]
-            lr = learning_rate(step, sched, sft["learning_rate"])
+            lr = learning_rate(step, sched, sft["learning_rate"])  # the global step: a resumed run continues the schedule
             backward = client.forward_backward(datums, run["loss_fn"])  # both submitted, then awaited, in order
             optim = client.optim_step(sdk.AdamParams(learning_rate=lr, **run["optimizer"]))
             # the step's token-mean loss (its weights sum to 1); a missing metric must not cost the run
@@ -293,18 +377,48 @@ def train_on_tinker(sdk: Any, run: Dict[str, Any], encoded: List[Dict[str, List]
             tokens += sum(len(d["inputs"]) for d in data)
             completion_tokens += sum(sum(encoded[i]["mask"]) for i in indices)
             examples += len(indices)
-            if (step + 1) % sft["logging_steps"] == 0 or step + 1 == sched["total_steps"]:
-                log(f"step {step + 1}/{sched['total_steps']}: loss {losses[-1]:.4f}, lr {lr:.3g}")
-        train_seconds = time.perf_counter() - started
+            done = step + 1
+            record["reached_step"], record["losses"] = done, losses
+            if save_every and done % save_every == 0 and done < sched["total_steps"]:
+                saved = client.save_state(f"{name}-step{done:06d}", ttl_seconds=STATE_TTL_S).result()
+                now = datetime.now(timezone.utc)
+                previous = record["states"][-1] if record["states"] else None
+                record["states"].append({
+                    "step": done, "path": saved.path, "training_run": str(info.model_id), "saved_at": now.isoformat(),
+                    "expires_at": (now + timedelta(seconds=STATE_TTL_S)).isoformat(), "deleted": False,
+                    "counters": {"tokens": tokens, "completion_tokens": completion_tokens, "examples": examples,
+                                 "train_seconds": round(before + time.perf_counter() - started, 3)}})
+                persist()  # the new state is on disk before the previous one is deleted
+                if previous and not previous["deleted"]:
+                    previous["deleted"] = _best_effort(
+                        f"deleting the state {previous['path']}",
+                        lambda: rest.delete_checkpoint_from_tinker_path(previous["path"]).result(), log)
+                log(f"state saved at step {done}: {saved.path}")
+            persist()
+            if done % sft["logging_steps"] == 0 or done == sched["total_steps"]:
+                log(f"step {done}/{sched['total_steps']}: loss {losses[-1]:.4f}, lr {lr:.3g}")
+        train_seconds = before + time.perf_counter() - started
+        segments = record["segments"]
         stats = {"external_weights": client.save_weights_external(name, ttl_seconds=ttl_s).result().path,
                  "training_run": str(info.model_id), "global_step": len(losses), "examples_seen": examples,
                  "train_loss": sum(losses) / len(losses) if all(map(math.isfinite, losses)) else None,
                  "train_seconds": round(train_seconds, 3),
                  # what was run through the model (Tinker bills per token) and what the loss fell on
                  "tokens_seen": tokens, "completion_tokens_seen": completion_tokens,
-                 "tokens_per_second": round(tokens / train_seconds, 3) if train_seconds else None}
+                 "tokens_per_second": round(tokens / train_seconds, 3) if train_seconds else None,
+                 "resume": {"save_every": save_every, "state_ttl_s": STATE_TTL_S if save_every else None,
+                            "resumed": len(segments) > 1,
+                            "resumed_from_steps": [s["from_step"] for s in segments[1:]],
+                            "steps_replayed": sum(s["steps_replayed"] for s in segments),
+                            "segments": segments, "states": [{k: v for k, v in st.items() if k not in ("counters", "deleted")}
+                                                             for st in record["states"]],  # deleted after export
+                            "caveats": dict(RESUME_CAVEATS) if len(segments) > 1 else {}}}
         exported(stats)
         status = "success"
+        for st in record["states"]:  # the adapter is exported: no state is needed any more
+            if not st["deleted"]:
+                st["deleted"] = _best_effort(f"deleting the state {st['path']}",
+                                             lambda: rest.delete_checkpoint_from_tinker_path(st["path"]).result(), log)
     finally:
         # best effort: a failed close must neither lose a recorded export nor hide the error that ended the run
         try:
@@ -497,11 +611,99 @@ def _pending(key: str) -> Path:
     return adapters_dir() / ".tinker" / f"{key}.json"
 
 
+def _resume_path(key: str) -> Path:
+    return adapters_dir() / ".tinker" / f"{key}.resume.json"
+
+
+# What a resumed run must share with the interrupted one, beyond the key (the plan and the Tinker run): config.yaml
+# whole, and the tokens and step order it trains on (the code and tokenizer that produce them may have changed)
+RESUME_IDENTITY = ("tinker_key", "cluster", "plan_sha256", "dataset_sha256", "config_sha256", "run", "order_sha256",
+                   "encoded_sha256")
+
+
+def resume_identity(key: str, plan: Dict[str, Any], run: Dict[str, Any], config: Dict[str, Any],
+                    encoded: List[Dict[str, List]], sched: Dict[str, int]) -> Dict[str, Any]:
+    from bench.contracts.config import config_sha256
+
+    return {"format": RESUME_RECORD, "tinker_key": key, "cluster": plan["cluster"], "plan_sha256": plan_id(plan),
+            "dataset_sha256": plan["dataset"]["sha256"], "config_sha256": config_sha256(config), "run": run,
+            "order_sha256": order_sha256(step_rows(len(encoded), sched, run["lora"]["seed"])),
+            "encoded_sha256": encoded_sha256(encoded)}
+
+
+def resume_mismatches(record: Dict[str, Any], identity: Dict[str, Any]) -> List[str]:
+    """What differs between an interrupted run's record and this run, by name (empty: it can be resumed)."""
+    found = [] if record.get("format") == RESUME_RECORD else [f"the record's format ({record.get('format')!r})"]
+    for k in RESUME_IDENTITY:
+        if record.get(k) == identity[k]:
+            continue
+        if k == "run" and isinstance(record.get("run"), dict):
+            keys = sorted(n for n in set(record["run"]) | set(identity["run"])
+                          if record["run"].get(n) != identity["run"].get(n))
+            found.append(f"the Tinker run ({', '.join(keys)})")
+        elif k != "tinker_key":  # the key differs when another field does: those name it
+            found.append(k)
+    if not found and record.get("tinker_key") != identity["tinker_key"]:
+        found.append("tinker_key")
+    return found
+
+
+def resume_record(key: str, identity: Dict[str, Any], resume: bool, save_every: int,
+                  log: Callable[[str], None]) -> Dict[str, Any]:
+    """The record a run starts from: a fresh one, or (`resume`) the interrupted run's, checked. Refuses to resume
+    anything that differs, a state that expired or was deleted, and to start over a run that left a state."""
+    path = _resume_path(key)
+    others = []
+    for other in sorted(path.parent.glob("*.resume.json")) if path.parent.is_dir() else []:
+        if other != path:
+            try:
+                theirs = json.loads(other.read_text())
+            except (OSError, ValueError):
+                continue
+            if theirs.get("cluster") == identity["cluster"]:
+                others.append((other, theirs))
+    if not resume:
+        if path.is_file():
+            state = (json.loads(path.read_text()).get("states") or [{}])[-1]
+            raise TrainError(f"an interrupted run of this plan saved its state at step {state.get('step')} "
+                             f"({state.get('path')}, expires {state.get('expires_at')}), recorded in {rel(path)}: "
+                             "pass --resume to continue from it, or delete that file to train from step 0")
+        for other, _ in others:
+            log(f"note: {rel(other)} records an interrupted run of {identity['cluster']} with another plan, "
+                "config or data; it is not resumed")
+        return {**identity, "save_every": save_every, "started_at": datetime.now(timezone.utc).isoformat(),
+                "states": [], "segments": [], "losses": []}
+    if not path.is_file():
+        if others:
+            raise TrainError("--resume: " + "; ".join(
+                f"the interrupted run of {identity['cluster']} in {rel(other)} differs from this one in "
+                f"{', '.join(resume_mismatches(theirs, identity))}" for other, theirs in others)
+                + ": nothing is resumed (restore what changed, or delete that record to train from step 0)")
+        raise TrainError(f"--resume: no interrupted run of {identity['cluster']} is recorded "
+                         f"(train/adapters/.tinker/*.resume.json): nothing to resume")
+    record = json.loads(path.read_text())
+    problems = resume_mismatches(record, identity)
+    if problems:
+        raise TrainError(f"--resume: {rel(path)} records a run that differs from this one in {', '.join(problems)}: "
+                         "nothing is resumed (restore what changed, or delete that record to train from step 0)")
+    state = record["states"][-1] if record.get("states") else None
+    if state is None or state.get("deleted"):
+        raise TrainError(f"--resume: {rel(path)} holds no state to resume from: delete it to train from step 0")
+    if datetime.now(timezone.utc) >= datetime.fromisoformat(state["expires_at"]):
+        raise TrainError(f"--resume: the state {state['path']} expired on Tinker at {state['expires_at']}: delete "
+                         f"{rel(path)} to train from step 0")
+    record["save_every"] = save_every  # the cadence may change; where each state fell is in record["states"]
+    return record
+
+
 def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
-                  log: Callable[[str], None] = lambda line: print(line, file=sys.stderr)) -> Dict[str, Any]:
+                  log: Callable[[str], None] = lambda line: print(line, file=sys.stderr), resume: bool = False,
+                  save_every: int = SAVE_EVERY) -> Dict[str, Any]:
     from bench.contracts.config import load_config
     from bench.provenance import git_state
 
+    if not isinstance(save_every, int) or save_every < 0:
+        raise TrainError(f"--save-every must be a whole number of steps (0: never), not {save_every!r}")
     config = load_config(config_path)
     plan, raw = training_plan(config, cluster)
     settings = load_settings(settings_path)
@@ -531,7 +733,7 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
         raise TrainError(f"tinker {sdk.__version__} is installed, configs/train-tinker.yaml pins {settings['sdk_version']}")
     token_stats, encoded = encode_rows(_tokenizer(plan), rows, plan["chat_template_kwargs"],
                                        plan["hyperparameters"]["sft"]["max_length"], run["max_context"])
-    pending = _pending(key)
+    pending, resume_path = _pending(key), _resume_path(key)
     collected = pending.is_file()
     if collected:  # trained and exported by an earlier run of the same plan: download it again
         record = json.loads(pending.read_text())
@@ -542,9 +744,14 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
         base_dir = base_snapshot(plan)
         log(f"collecting {record['stats']['external_weights']} (trained {record['started_at']})")
     else:
+        progress = resume_record(key, resume_identity(key, plan, run, config, encoded, sched), resume, save_every, log)
         base_dir = base_snapshot(plan)  # before anything is paid for
-        started = datetime.now(timezone.utc).isoformat()
+        started = progress["started_at"]  # the interrupted run's, when this one resumes it
         ttl = settings.get("export_ttl_s")
+
+        def keep_resume(progress: Dict[str, Any]) -> None:  # each state, the moment it is saved
+            resume_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(resume_path, progress)
 
         def keep(stats: Dict[str, Any]) -> None:  # the moment the export answers: a re-run collects, never retrains
             now = datetime.now(timezone.utc)
@@ -554,8 +761,9 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
             _write_json(pending, record)
 
         record: Dict[str, Any] = {}
+        code = git_state()
         train_on_tinker(sdk, run, encoded, sched, plan["hyperparameters"]["sft"], f"{cluster}-{key[:12]}", ttl, log,
-                        keep)
+                        keep, progress, keep_resume, {"commit": code.get("commit"), "dirty": code.get("dirty")})
     external = record["stats"]["external_weights"]
     with tempfile.TemporaryDirectory(dir=adapters_dir()) as work:
         converted = Path(work) / "adapter"
@@ -581,6 +789,7 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
     path = write_manifest(config, plan, stats, adapter, "tinker", billing, code,
                           {"started_at": record["started_at"], "finished_at": record["finished_at"]})
     pending.unlink()
+    resume_path.unlink(missing_ok=True)  # the run is installed: nothing left to resume
     fact, missing = (None, []) if probe else register_adapters(config)
     return {**result, "manifest": path, "fact": fact, "missing": missing, "collected": False}
 
@@ -600,7 +809,8 @@ def _cookbook_version() -> Optional[str]:
 
 def cli(args) -> int:
     try:
-        result = train_cluster(args.config, args.cluster, args.tinker_config)
+        result = train_cluster(args.config, args.cluster, args.tinker_config, resume=args.resume,
+                               save_every=SAVE_EVERY if args.save_every is None else args.save_every)
     except TrainError as e:
         print(f"bench train: {e}", file=sys.stderr)
         return 2
@@ -608,6 +818,10 @@ def cli(args) -> int:
     print(result["manifest"].relative_to(paths.ROOT))
     if result["collected"]:
         print("already trained on Tinker from this plan: nothing was trained")
+    resumed = manifest["stats"].get("resume") or {}
+    if resumed.get("resumed"):
+        print(f"resumed at steps {resumed['resumed_from_steps']} ({resumed['steps_replayed']} steps trained twice): "
+              "not bit-identical to an uninterrupted run (stats.resume.caveats); declare it where the adapter is used")
     if result["probe"]:
         print(f"a probe (train.sft.max_steps): kept apart, neither served nor registered; check its manifest's "
               f"stats.trained (rank, alpha, modules) before a full run")
