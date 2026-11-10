@@ -5,7 +5,9 @@ what to do when it does not. Nothing here is paid until step 2.
 
 **The days need not be consecutive (SPEC D26).** The project may pause between phases while the next
 phase's funding is not in place: after step 5 (before K1) and after step 12 (before the test). The order
-does not change, and nothing on the test split runs before step 12.
+does not change, and no model sees the test split before step 12. `bench data` (item 4 before Day 1) executes
+the test's gold SQL to check it (`data/MANIFEST.json`: `gold_check`, `gold_observed`), and the preflight
+reads the test's ids; neither sends a test question to any engine.
 
 - `<...>` is a value a previous step printed (a run id, a result path).
 - **Run the blocks in `bash`**, from the repository root, in the agent environment unless a step
@@ -13,7 +15,9 @@ does not change, and nothing on the test split runs before step 12.
 - **`bench judge`, `bench verify` and `bench report` run in the analysis environment**
   (`.venv-analysis`, Python 3.12, `env/analysis`), whatever the step: its `sum()` of floats is
   compensated, so a sum over a set does not move with `PYTHONHASHSEED` and a judgment recomputes to
-  the same bytes (under the agent environment's 3.11, J6's score moves in the last digit), and its
+  the same bytes (checked on 2026-11-10 for J3, J5, J6 and b1k; under the agent environment's 3.11,
+  J6's score and J5's silhouettes move in the last digits, while J6's choice and J5's centroids stay
+  byte-identical), and its
   numpy is the pinned one J5's floats were tested with.
 - **`bench eval` always runs in the agent environment** (`.venv-agent`), whatever the step, never in
   the analysis one. An eval records the SQLite version it executed with (3.53.1 in `.venv-agent`,
@@ -699,7 +703,9 @@ done
   SLM and with the cheap alternative, each once, under the registered configuration, then `bench eval <replay>
   --per-call`: `bench replay <B0 test> --engine slm:<candidate> --workers 8` (the serving pod) and
   `bench replay <B0 test> --engine cheap_alt --workers 2`. They are registered like any execution and feed only the
-  per-call-site table beside B4's replay.
+  per-call-site table beside B4's replay, which a script outside the registered code computes after the test
+  (`bench report` does not print it), as it does the projection-tolerant EX and the reading without test
+  question 875 (SPEC 6.1 and section 2).
 - A defect that needs a new registration: `bench prereg --replace --reason "<the defect>"`. It
   becomes a line of `prereg/DEVIATIONS.md`, which the report prints.
 
