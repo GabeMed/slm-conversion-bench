@@ -296,3 +296,29 @@ Changes after Stage 0 that can change a result or its interpretation.
   gold; an 87.6% always-"No" floor at the column filter; 1,534 questions on the 11 databases). Together they bound
   the reading in both directions: a loss outside the claim's antecedent does not refute it, and agreement at the
   column filter does not support it without an end-to-end measure
+- 2026-11-10 · J8's analysis rules fixed before any load-test sweep was read (informed only by the two discarded
+  smoke levels of sweep-slm_qwen3-8b-20261110T200213.069576Z, c4 and c128; PR #59). (1) Each level is read in
+  its steady state from AIPerf's per-request records (`profile_export.jsonl`): the window runs from the first
+  moment the requests in flight reach 0.9 x the concurrency to the last moment they are there; throughput is the
+  completions in the window over its length, the p95 is over the requests that start and end in it; a level
+  is measured only with at least 100 whole requests in the window (`cost.steady_min_requests`: below that the
+  p95 is nearly the maximum) and a window of at least half the level (`cost.steady_min_share`). J8 chooses
+  among measured levels only; an unmeasured level counts neither for nor against and is listed with its reason;
+  AIPerf's whole-level aggregates are kept as a sensitivity. Before, J8 read AIPerf's aggregates, ramp-up and
+  drain included. (2) A level with any failed or cancelled request, or an incomplete or cancelled AIPerf run,
+  is not measured, its counts recorded; before, failures were not checked. (3) The teacher's latency behind
+  each sweep's limit leaves out the calls the harness's cache warm-up gate held (per process and cache prefix,
+  the calls that started before the group's first call ended): 496 filter_column first attempts of
+  `cost.slo_from` out of 16,140, all at 3.5-7.2 s against a 2.0 s median, each 1.8-2.8 s of its own after its
+  wait; the reweighted limits move from 4,056 to 3,135 ms (B3), 3,566 to 2,801 ms (c0) and 3,870 to 2,933 ms
+  (B4 as deployed), c1-c3 unchanged; the limit with them is a sensitivity. (4) Per level, the p95 of each group
+  of call sites (`cost.latency_groups`) beside the teacher's in the same group, a sensitivity with no verdict;
+  SPEC §6.6 now says the limit applies to the sweep's call-site mix as a whole. (5) With the review triage:
+  V3's interval is stated as conditional on J8 (the load test's throughput enters as a fixed number); a V3 or
+  A6 confirmation with no Modal-price sensitivity is no confirmation (before, a missing sensitivity let it
+  pass); Modal's sensitivity prices the CPU at the higher of `serving.cpu` and the serving process's measured
+  cores, as Modal bills (before, `serving.cpu` alone; the memory stays the declared `serving.memory_gib`, not
+  measured). Direction: (1) neutral, or against the SLM in small pools (a level that cannot show 100 whole
+  requests in steady state is not counted); (2) against the SLM; (3) against the SLM: it corrects a bias in its
+  favour (the limit was inflated by a harness wait); (4) none; (5) against the SLM (a confirmation needs more,
+  and Modal's price can only rise)
