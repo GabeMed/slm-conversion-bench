@@ -8,6 +8,14 @@ share the instrument (fixed date, timeout, SQLite version, pre-registration), or
 comparable. The SQLite version is part of it because the SQL a prediction may use differs across
 versions and builds (`unixepoch()` and `->>` exist from 3.38, the math functions only when compiled
 in): the same prediction can be scored under one and be an execution error under another.
+
+The golds are part of it too: the executions of one split must find the same golds failing
+(`gold_error`, a timeout included) on the questions they share, or `ex_table` refuses them. A gold that
+fails is wrong for the arm (never dropped from n), so the rule makes such a question wrong for every arm
+of the split. The evaluator's timeout is wall clock, so a gold near it (test question 701, 60 s on the
+machine that built the data: data/MANIFEST.json, `gold_observed.timeouts`) could otherwise time out in
+one arm's eval and not in another's, and the arms would be scored on different questions; evaluate the
+test runs on an idle machine, one after the other, and evaluate them again when this refuses.
 """
 import json
 from pathlib import Path
@@ -26,6 +34,7 @@ def ex_table(eval_run_dirs: Iterable[Path]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     seen: Dict[tuple, str] = {}
     instruments: Dict[str, tuple] = {}
+    golds: Dict[tuple, tuple] = {}  # (split, question_id): (whether its gold failed, the execution that saw it first)
     for run_dir in map(Path, eval_run_dirs):
         manifest = json.loads((run_dir / "manifest.json").read_text())
         if manifest.get("type") != "eval" or manifest.get("per_call"):
@@ -46,6 +55,13 @@ def ex_table(eval_run_dirs: Iterable[Path]) -> List[Dict[str, Any]]:
             if key in seen:
                 raise JudgeError(f"{key} is scored by both {seen[key]} and {run_dir.name}")
             seen[key] = run_dir.name
+            failed = result["gold_error"] is not None
+            first = golds.setdefault((manifest["split"], result["question_id"]), (failed, run_dir.name))
+            if first[0] != failed:
+                broke, ran = (first[1], run_dir.name) if first[0] else (run_dir.name, first[1])
+                raise JudgeError(f"the gold of {manifest['split']} question {result['question_id']} failed in {broke} "
+                                 f"and ran in {ran}: the arms would be scored on different questions. Evaluate the "
+                                 f"runs again on an idle machine, one after the other")
             rows.append({"arm": manifest["arm"], "engine": manifest.get("engine"), "split": manifest["split"],
                          "question_id": result["question_id"],
                          "difficulty": result["difficulty"], "correct": bool(result["correct"]),

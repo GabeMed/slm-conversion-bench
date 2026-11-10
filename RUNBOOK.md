@@ -559,7 +559,7 @@ J7 prints the allocation fact. Write its path into `arms.B5.allocation`.
 
 - what steps 2 and 3 corrected so that every engine answers (endpoints, `params`, `reasoning`);
 - the arms' facts (`choice`, `centroids`, `adapters`, `allocation`);
-- `arms.B1.few_shot` (`k`, `source_run`) and `cost.slo_from`;
+- `arms.B1.few_shot` (`k`, `source_run`, `sha256`) and `cost.slo_from`;
 - `curation.max_per_question_call_site`, if step 9 lowered it;
 - `configs/runpod.patch.yaml`, if inference moved to RunPod (its line in `prereg/DEVIATIONS.md`, the
   section after step 9).
@@ -596,6 +596,11 @@ git push origin main
   file. `judgments/` holds numbers and ids only, no prompt and no model output.
 - `bench prereg` refuses a configuration with no `cost.slo_from`, and a `arms.B1.few_shot.k` that
   is not the stored choice of step 7.
+- `arms.B1.few_shot.sha256` pins the bytes of B1's prefix, which every execution rebuilds from the source run
+  in `runs/` (not published): an execution whose rebuilt prefix hashes otherwise is refused, and on the test
+  split an unpinned prefix (k > 0) is refused too. It is the sha256 of the canonical JSON of a manifest's
+  `few_shot_sha256` (`bench.agent.few_shot.prefix_sha256`), so any B1 or cheap_alt execution on that source
+  shows it; set it again whenever `k` or `source_run` changes.
 - The registration hashes the whole configuration. Registering earlier would force
   `bench prereg --replace` here, and every test run already made would be superseded.
 
@@ -608,10 +613,25 @@ keys' length and the registry):
   B5 with every cluster on the LLM (step 5's table). OpenRouter (the cheap alternative): B1 and
   B2-cheap. OpenAI: the embeddings of retrieval (every agent arm). A balance that runs out mid-run fails that run.
 - **Free disk:** the test adds about 5 GB under `runs/`. Leave more than that free.
-- **A fresh serving pod with enough `--hours`.** A server terminates itself after `runpod.max_pod_hours`
-  (12 h), counted from its creation, not from the test's start. Run `down` and `up --hours <h>` just
-  before, with `<h>` covering B3, B4, B5 and the B4 replay with a margin (step 5's time projection), and
-  check that it serves every adapter (the RunPod section after step 9).
+- **A fresh serving pod, brought up after `bench prereg`, with enough `--hours`.** A server terminates itself
+  after `runpod.max_pod_hours` (12 h), counted from its creation, not from the test's start. Just before the
+  loop, from this checkout at the registered commit:
+
+  ```sh
+  bench serve --on runpod down --candidate <slm>
+  bench serve --on runpod up --candidate <slm> --hours <h>
+  ```
+
+  with `<h>` covering B3, B4, B5 and the B4 replay with a margin (step 5's time projection). A pod brought up
+  before the registration runs the code of then (its plan, and its environment: dev mode reaches vLLM only
+  from a pod brought up by the code that passes it to the jobs, #52), so it is replaced, never reused. Every
+  `bench run` and `bench replay` that can reach the SLM then reads the server before it opens the run (no
+  intent, no call): the pod this machine recorded, its `plan.json`, the state its server wrote on the volume,
+  `/v1/models` and vLLM's `/version` through the tunnel. It records them in the manifest (`served`) and
+  refuses a server whose plan is not `serve_plan(config)` (the Modal-only deploy knobs aside), whose state
+  another pod wrote, whose vLLM is not `serving.vllm_version`, or whose `/v1/models` lacks a model the
+  execution can route to; on test it also refuses an SLM endpoint that is not a RunPod tunnel. A refusal
+  names the difference: `down`, then `up` again.
 - **The serving pod runs vLLM in dev mode**, as in the load test (`VLLM_SERVER_DEV_MODE=1`, set by `bench serve up`):
   the test's SLM arms and the sweeps are served by the same kind of server.
 - **The machine stays awake** for the whole loop: `caffeinate -dims` in another terminal (macOS). A
@@ -632,9 +652,10 @@ for step in "${STEPS[@]}"; do
   [ "$step" = "$START" ] && go=1
   [ -n "$go" ] || continue
   run=$(case "$step" in
-    (B2-production) bench run --arm B2 --split test --engine production_llm ;;
-    (B2-cheap)      bench run --arm B2 --split test --engine cheap_alt ;;
-    (B4-replay)     bench replay <B0 test> --arm B4 ;;
+    (B1)            bench run --arm B1 --split test --workers 2 ;;
+    (B2-production) bench run --arm B2 --split test --engine production_llm --workers 8 ;;
+    (B2-cheap)      bench run --arm B2 --split test --engine cheap_alt --workers 8 ;;
+    (B4-replay)     bench replay <B0 test> --arm B4 --workers 8 ;;
     (*)             bench run --arm "$step" --split test --workers 8 ;;
   esac | tail -n 1) || { echo "stopped at $step: no run ended (see the error)"; break; }
   git push origin main || { echo "stopped at $step: the push failed"; break; }
@@ -643,6 +664,14 @@ for step in "${STEPS[@]}"; do
 done
 ```
 
+- **Workers.** B1 runs with `--workers 2`: its engine, the cheap alternative on OpenRouter, answered 429 to the
+  calibration replay with 8 workers until the 6 tries ran out, and the replay only finished with 2. Every
+  other configuration says `--workers 8` explicitly. Workers change no output, only the pace and the rate of
+  429s; the manifest records them.
+- `--ids` and `--limit` are refused on the test split: a configuration has one run there, and a run of part
+  of the split that ended `done` would be it.
+- `BENCH_ANTHROPIC_BATCH` and `BENCH_VIA_CLAUDE_CODE` left in the shell are cleared at the start of every
+  execution: only `--batch` and `--via-claude-code` (K1 only) set them.
 - `set -o pipefail` first, or the `| tail` hides a refusal. A run that ends `failed` or `interrupted`
   still exits 0 and prints its directory: the loop reads its manifest's `status`, pushes its manifest
   either way, and stops unless it is `done`.
@@ -705,7 +734,13 @@ done
 
 ### 14. Evaluation, cost, verification, report
 
-In `.venv-agent` (the SQLite every eval has used):
+In `.venv-agent` (the SQLite every eval has used), **on an idle machine, one eval after the other** (no test
+suite, no sweep, no other eval running): the evaluator's 60 s timeout is wall clock, and the gold of test
+question 701 takes about that long (`gold_observed.timeouts` in data/MANIFEST.json). Each result records the
+seconds of its gold and of its prediction (`gold_seconds`, `pred_seconds`). A gold that fails is wrong for
+the arm, never dropped from n; J1 refuses executions of one split whose golds failed on different questions
+(701 timing out in one arm's eval and not in another's), so 701 is wrong for every arm or scored for every
+arm. If J1 refuses, evaluate the arms again, idle and in sequence, and use those evals.
 
 ```sh
 bench eval <each test run>

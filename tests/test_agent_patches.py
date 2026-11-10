@@ -521,6 +521,23 @@ def test_plain_text_empty_tags_and_unknown_tools_still_fail(agent, response, err
         agent.get_next_tool_name(response)
 
 
+@pytest.mark.parametrize("response", [
+    # gpt-oss-120b on the B1 pilot (questions 874 and 1181): the tag inside a sentence, then the call
+    'We need to output a <tool_call> with the tool name and parameters.\n<tool_call>\n{\n  "name": '
+    '"extract_keywords",\n  "arguments": {\n    "text": "q"\n  }\n}\n</tool_call>',
+    "<tool_call>await_state</tool_call>\n<tool_call>extract_keywords</tool_call>",  # an unknown tool first
+    "<tool_call></tool_call><tool_call>extract_keywords</tool_call><tool_call>retrieve_entity</tool_call>",
+])
+def test_the_first_block_naming_one_of_the_agents_tools_is_the_tool(agent, response):
+    assert agent.get_next_tool_name(response) == "extract_keywords"
+    assert agent.parse_action(response) == {"tool": "extract_keywords"}
+
+
+def test_with_no_block_naming_a_tool_the_error_names_the_first_block(agent):
+    with pytest.raises(ValueError, match="^Tool with not found$"):
+        agent.get_next_tool_name("output a <tool_call> with the name.\n<tool_call>await_state</tool_call>")
+
+
 def test_done_still_wins(agent):
     assert agent.parse_action("DONE") == {"done": True}
     assert agent.parse_action("<tool_call>extract_keywords</tool_call>\nDONE") == {"done": True}

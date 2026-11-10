@@ -20,6 +20,11 @@ The prefix is built once per execution and recorded in its manifest: `few_shot_k
 each call site's prefixes (`few_shot_sha256`), and under `few_shot` the source run, the sha256 of its
 calls.jsonl and of the splits it ran on (which must be today's), the sampling rule, and the examples
 chosen per call site and step, every one a question of the current train split.
+
+The source run lives in runs/, which is not published, so the bytes are pinned in the configuration:
+`arms.B1.few_shot.sha256` is the sha256 of the canonical JSON of the per-call-site digests
+(`prefix_sha256`, computable from any manifest's `few_shot_sha256`), and a prefix built with k > 0 that
+does not hash to it is refused before anything runs. On the test split the pin is required.
 """
 import hashlib
 import json
@@ -96,8 +101,32 @@ def digests(prefix: Prefix) -> Dict[str, str]:
             for site, steps in prefix.items()}
 
 
+def prefix_sha256(per_site: Dict[str, str]) -> str:
+    """The one sha256 the configuration pins (`arms.B1.few_shot.sha256`): of the canonical JSON of the
+    per-call-site digests (`digests`, recorded in every manifest as `few_shot_sha256`)."""
+    return hashlib.sha256(canonical(per_site)).hexdigest()
+
+
+def check_pinned(config: Dict[str, Any], prefix: Prefix, require: bool = False) -> None:
+    """A prefix built with k > 0 hashes to `arms.B1.few_shot.sha256` when it is set (and `require`
+    asks for it to be set); k = 0 has no bytes from runs/ and is not pinned."""
+    settings = config["arms"]["B1"]["few_shot"]
+    if settings["k"] == 0:
+        return
+    pinned, found = settings.get("sha256"), prefix_sha256(digests(prefix))
+    if pinned is None:
+        if require:
+            raise HarnessError(f"arms.B1.few_shot.sha256 is not set: the few-shot prefix is rebuilt from runs/, which "
+                               f"is not published, so the test split needs its bytes pinned (this build: {found})")
+        return
+    if pinned != found:
+        raise HarnessError(f"the few-shot prefix rebuilt from {settings['source_run']} hashes to {found}, not to "
+                           f"arms.B1.few_shot.sha256 ({pinned}): its source run or the sampling changed")
+
+
 def build(config: Dict[str, Any]) -> Tuple[Prefix, Dict[str, Any]]:
-    """({call site: {step: messages}}, provenance)."""
+    """({call site: {step: messages}}, provenance); with k > 0, refused when it does not hash to
+    `arms.B1.few_shot.sha256` (if set)."""
     settings = config["arms"]["B1"]["few_shot"]
     k, seed, source = settings["k"], config["seeds"]["few_shot"], settings["source_run"]
     if k == 0:
@@ -144,6 +173,7 @@ def build(config: Dict[str, Any]) -> Tuple[Prefix, Dict[str, Any]]:
                 messages += example["prompt_messages"] + [{"role": "assistant", "content": example["response_text"]}]
             prefix[site][step] = messages
             examples[site][step] = [[c["question_id"], c["invocation_key"]] for c in chosen]
+    check_pinned(config, prefix)
     provenance = {"k": k, "seed": seed, "source_run": source, "source_calls_sha256": hashlib.sha256(raw).hexdigest(),
                   "source_splits_sha256": splits_sha256, "sampling": SAMPLING, "examples": examples}
     return prefix, provenance

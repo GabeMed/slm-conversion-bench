@@ -466,13 +466,16 @@ def _check_arm(config: Dict[str, Any], arm: str) -> Dict[str, str]:
     return {name: sha for name, (_, sha) in arm_facts(arm, config).items()}
 
 
-def few_shot_for(config: Dict[str, Any], engines: List[str]) -> Tuple[Optional[Dict], Dict[str, Any]]:
+def few_shot_for(config: Dict[str, Any], engines: List[str],
+                 split: Optional[str] = None) -> Tuple[Optional[Dict], Dict[str, Any]]:
     """B1's prefix when `cheap_alt` can be reached, else None; and the manifest fields that record
-    it (`few_shot`, `few_shot_k`, `few_shot_sha256`, all null when there is no prefix)."""
+    it (`few_shot`, `few_shot_k`, `few_shot_sha256`, all null when there is no prefix). On the test
+    split a prefix with k > 0 must be pinned (`arms.B1.few_shot.sha256`)."""
     if "cheap_alt" not in engines:
         return None, {"few_shot": None, "few_shot_k": None, "few_shot_sha256": None}
     from bench.agent import few_shot
     prefix, provenance = few_shot.build(config)
+    few_shot.check_pinned(config, prefix, require=split == "test")
     return prefix, {"few_shot": provenance, "few_shot_k": provenance["k"], "few_shot_sha256": few_shot.digests(prefix)}
 
 
@@ -686,6 +689,18 @@ def claude_code_version() -> str:
     return done.stdout.strip()
 
 
+def clear_send_modes() -> None:
+    """Remove BENCH_ANTHROPIC_BATCH and BENCH_VIA_CLAUDE_CODE from this process's environment at the start of an
+    execution: the engine reads them as the way to send the production LLM's calls, which only `--batch` and
+    `--via-claude-code` may choose (K1 only, `check_batch`), never a variable left in the operator's shell."""
+    from bench.agent.anthropic_engine import BATCH_ENV
+    from bench.agent.claude_code_engine import VIA_ENV
+    for name in (BATCH_ENV, VIA_ENV):
+        if os.environ.pop(name, None) is not None:
+            print(f"bench: {name} was set in the environment and is ignored (only --batch / --via-claude-code set it)",
+                  file=sys.stderr)
+
+
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
               batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None,
@@ -696,6 +711,11 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     config = load_config(config_path)
     from bench.agent import hooks
     hooks.configure(config)
+    clear_send_modes()
+    if split == "test" and (ids or limit):
+        barrier.ensure_split_allowed(split, config)  # a locked split says so first
+        raise data.DataError("--ids and --limit are refused on the test split: a configuration has one run there, and a "
+                             "run of part of the split that ends `done` would be it")
     source = None
     if resume_from is not None:
         from bench.agent import resume
@@ -729,15 +749,18 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     else:
         from bench.contracts.router import possible_engines
         facts = _check_arm(config, arm)
-        few_shot, recorded = few_shot_for(config, possible_engines(arm, config))
+        few_shot, recorded = few_shot_for(config, possible_engines(arm, config), split)
     for db_id in databases:
         data.check_database(config, db_id)
     if arm != "B2":
         _check_preprocessed(config, databases)
+    from bench.agent.served import check_served
+    served = check_served(config, [engine] if arm == "B2" else possible_engines(arm, config), split)
 
     fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded,
               "workers": workers, "batch": batch,  # like workers, not the configuration's identity
-              "via_claude_code": claude_code}  # the CLI's version, or null: the Messages API
+              "via_claude_code": claude_code,  # the CLI's version, or null: the Messages API
+              "served": served}  # what serves its SLM engines (bench.agent.served), or null: none
     if arm == "B2":
         fields.update({"mode": "single_call", "engine": engine})
     if arm == "B2":

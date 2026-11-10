@@ -15,11 +15,13 @@ QUESTIONS = [  # question_id, difficulty, date-dependent gold, gold with LIMIT
 INSTRUMENT = {"fixed_date": "2026-09-30", "timeout_s": 60, "sqlite_version": "3.53.1", "prereg_hash": None}
 
 
-def eval_dir(tmp_path, name, arm, split, outcomes, **manifest):
+def eval_dir(tmp_path, name, arm, split, outcomes, gold_errors=None, **manifest):
     run_dir = tmp_path / name
     run_dir.mkdir()
-    rows = [{"question_id": q, "difficulty": d, "correct": ok, "gold_date_substituted": dd, "gold_has_limit": lim,
-             "gold_error": None, "pred_error": None} for (q, d, dd, lim), ok in zip(QUESTIONS, outcomes)]
+    gold_errors = gold_errors or {}
+    rows = [{"question_id": q, "difficulty": d, "correct": ok and q not in gold_errors, "gold_date_substituted": dd,
+             "gold_has_limit": lim, "gold_error": gold_errors.get(q), "pred_error": None}
+            for (q, d, dd, lim), ok in zip(QUESTIONS, outcomes)]
     (run_dir / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     (run_dir / "manifest.json").write_text(json.dumps({
         "run_id": name, "type": "eval", "arm": arm, "engine": None, "split": split, "source_run_id": f"agent-{arm}",
@@ -76,3 +78,22 @@ def test_the_table_refuses_ambiguous_or_broken_evaluations(tmp_path, breakage):
         dirs = [eval_dir(tmp_path, "old", "B0", "calib", [True] * 4, fixed_date=None)]
     with pytest.raises(JudgeError):
         ex_table(dirs)
+
+
+def test_a_gold_that_fails_in_one_arms_eval_and_runs_in_anothers_is_refused(tmp_path):
+    """The evaluator's timeout is wall clock: a gold near it (test 701) can time out in one eval only."""
+    dirs = [eval_dir(tmp_path, "t0", "B0", "test", [True] * 4, gold_errors={"4": "timeout"}),
+            eval_dir(tmp_path, "t4", "B4", "test", [True] * 4)]
+    with pytest.raises(JudgeError, match="question 4 failed in t0 and ran in t4"):
+        ex_table(dirs)
+    with pytest.raises(JudgeError, match="question 4 failed in t0 and ran in t4"):
+        ex_table(dirs[::-1])
+
+
+def test_a_gold_that_fails_in_every_eval_is_wrong_for_every_arm_and_stays_in_n(tmp_path):
+    rows = ex_table([eval_dir(tmp_path, "t0", "B0", "test", [True] * 4, gold_errors={"4": "timeout"}),
+                     eval_dir(tmp_path, "t4", "B4", "test", [True] * 4, gold_errors={"4": "timeout"}),
+                     eval_dir(tmp_path, "c0", "B0", "calib", [True] * 4)])  # another split: its own golds
+    for summary in ex_summary(rows):
+        expected = (4, 3, 1) if summary["split"] == "test" else (4, 4, 0)
+        assert (summary["n"], summary["correct"], summary["gold_errors"]) == expected

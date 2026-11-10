@@ -10,6 +10,12 @@ alike, so arms evaluated on different days, on machines in different time zones,
 SQLite's date functions (and the functions behind CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME,
 which are also replaced in the text) are overridden on the connection, so that every value they read
 as the current moment, however it was computed, is the fixed moment.
+
+Each result records the wall-clock seconds of its gold and of its prediction (`gold_seconds`,
+`pred_seconds`): the timeout is wall clock, so a query near it can finish in one eval and time out in
+another. A question whose gold does not finish (`gold_error`, a timeout included) is wrong for the arm
+that eval scored, never dropped from n; J1 refuses to compare executions of one split whose golds failed
+on different questions, so such a question counts as wrong for every arm or for none.
 """
 import json
 import os
@@ -208,17 +214,30 @@ def run_gold(question: Dict[str, Any], path: Path, timeout_s: float, day: str) -
     return execute(path, question["SQL"], timeout_s, day)
 
 
+def _timed(run: Callable[[], Any]) -> Tuple[Any, float]:
+    """What `run` returns and the wall-clock seconds it took (rounded to the millisecond)."""
+    started = time.monotonic()
+    out = run()
+    return out, round(time.monotonic() - started, 3)
+
+
+def timed_gold(question: Dict[str, Any], path: Path, timeout_s: float, day: str) -> Tuple[Any, float]:
+    """`run_gold` and its seconds: what `score_one` takes as `gold` when the gold already ran in this eval."""
+    return _timed(lambda: run_gold(question, path, timeout_s, day))
+
+
 def score_one(question: Dict[str, Any], predicted: Optional[str], path: Path, timeout_s: float,
-              day: str, gold: Optional[Tuple[Optional[List[tuple]], Optional[str], bool]] = None) -> Dict[str, Any]:
+              day: str, gold: Optional[Tuple[Any, float]] = None) -> Dict[str, Any]:
     """One prediction against the gold of its own question, both at the fixed date; `gold` is the
-    question's `run_gold`, when already executed in this eval."""
+    question's `timed_gold`, when already executed in this eval."""
     executed_at = datetime.now(timezone.utc).isoformat()
-    gold_rows, gold_error, gold_substituted = gold if gold is not None else run_gold(question, path, timeout_s, day)
-    pred_substituted = False
+    (gold_rows, gold_error, gold_substituted), gold_seconds = \
+        gold if gold is not None else timed_gold(question, path, timeout_s, day)
+    pred_substituted, pred_seconds = False, None
     if predicted is None:
         pred_rows, pred_error = None, "no prediction"
     else:
-        pred_rows, pred_error, pred_substituted = execute(path, predicted, timeout_s, day)
+        (pred_rows, pred_error, pred_substituted), pred_seconds = _timed(lambda: execute(path, predicted, timeout_s, day))
     return {
         "question_id": question["question_id"], "db_id": question["db_id"],
         "difficulty": question.get("difficulty"),
@@ -227,6 +246,7 @@ def score_one(question: Dict[str, Any], predicted: Optional[str], path: Path, ti
         "correct": gold_error is None and pred_error is None and set(pred_rows) == set(gold_rows),
         "pred_date_substituted": pred_substituted, "gold_date_substituted": gold_substituted,
         "gold_has_limit": gold_has_limit(question["SQL"]),
+        "gold_seconds": gold_seconds, "pred_seconds": pred_seconds,
         "executed_at": executed_at,
     }
 
@@ -470,7 +490,7 @@ def evaluate_per_call(source_run_id: str) -> Path:
             question = {**gold[entry["question_id"]], "question_id": entry["question_id"]}
             path, timeout_s = paths.sqlite_path(config, question["db_id"]), config["eval"]["timeout_s"]
             if entry["question_id"] not in golds:
-                golds[entry["question_id"]] = run_gold(question, path, timeout_s, day)
+                golds[entry["question_id"]] = timed_gold(question, path, timeout_s, day)
             result = score_one(question, entry["sql"], path, timeout_s, day, gold=golds[entry["question_id"]])
             if entry["call_id"] is None:
                 result["pred_error"] = "no attempt parsed"

@@ -220,7 +220,8 @@ stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are i
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
-    few_shot: {k: 3, source_run: agent-B0-train-20261109T214533.609401Z}  # k teacher examples per call site from a done B0 run on train (run id); before runs
+    few_shot: {k: 3, source_run: agent-B0-train-20261109T214533.609401Z,  # k teacher examples per call site from a done B0 run on train (run id); before runs
+               sha256: 8f8eef91e18490e74a96c205f14b762bc4389af132128c005c90e0d69d71c806}  # the prefix's bytes (runs/ is not published): refused if rebuilt otherwise
   B3: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json}         # J6 (S4)
   B4: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: judgments/S5/437f885cf2d73b31adc233e7cf405691d480c777aa9a9389754aa57c780ebe02/adapters.json}                 # J6, J5 (S3), S5
   B5: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: judgments/S5/437f885cf2d73b31adc233e7cf405691d480c777aa9a9389754aa57c780ebe02/adapters.json, allocation: null}  # J6, J5, S5, J7 (S6)
