@@ -245,6 +245,16 @@ def test_the_merge_keeps_every_workers_lines_and_tells_a_dead_worker_from_a_stop
     assert sorted(p.name for p in tmp_path.iterdir()) == ["calls.jsonl"]
 
 
+def test_the_merge_gathers_every_workers_router_times(tmp_path):
+    (tmp_path / "routes.w0.jsonl").write_text(json.dumps({"route_ms": 1}) + "\n")
+    (tmp_path / "routes.w2.jsonl").write_text(json.dumps({"route_ms": 2}) + "\n" + '{"route_ms": 3')  # cut off
+    for k in range(3):
+        (tmp_path / f"outcome.w{k}.json").write_text(json.dumps(runner.new_outcome()))
+    runner._merge_workers(tmp_path, [SimpleNamespace(exitcode=0)] * 3, runner.new_outcome())
+    assert (tmp_path / "routes.jsonl").read_text().splitlines() == ['{"route_ms": 1}', '{"route_ms": 2}', '{"route_ms": 3']
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["calls.jsonl", "routes.jsonl"]
+
+
 def scripted_worker(outcome, part, stop, run_dir, dataset, config):
     """A worker's work, scripted by its part (run in a real spawned process): `dies` exits hard,
     `raises` fails before any question, anything else waits to be stopped and says whether it was."""

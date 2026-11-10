@@ -115,7 +115,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")
-    p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed")
+    p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed: for an SLM engine, its own "
+                                                   "arm's execution on calib (B3 for the base, B4 for an adapter)")
+    p.add_argument("--as-deployed", action="store_true",
+                   help="B4 as deployed: --engine slm:<candidate>, --source B4 on calib, every call to the adapter "
+                        "the router chose, all adapters on one server")
     p.add_argument("--on", required=True, choices=("local", "modal", "runpod"),
                    help="where the AIPerf client runs (modal, runpod: beside the server, in the same cloud)")
     p.add_argument("--concurrency", type=int, nargs="+", help="levels (default: loadtest.concurrency)")
@@ -125,6 +129,13 @@ def main(argv=None) -> int:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--parity", metavar="CLUSTER", help="run P-4 on this cluster's adapter against the served candidate")
     p.add_argument("--on", default="modal", choices=("local", "modal", "runpod"), help="where P-4's HF-PEFT reference runs")
+    p.add_argument("--base-check", metavar="CLUSTER",
+                   help="only the base-identity check (bench/basecheck.py): the pinned base + this cluster's adapter "
+                        "scored on the rows of training's last steps, against Tinker's logged losses")
+    p.add_argument("--tinker-loss", action="append", metavar="STEP=LOSS",
+                   help="with --base-check: a loss Tinker logged for a step (repeatable), e.g. 100=0.1453")
+    p.add_argument("--no-restart", action="store_true",
+                   help="with --base-check --on runpod: leave the server stopped afterwards (the pod goes down next)")
     p.add_argument("--train-backend", choices=("modal", "tinker"),
                    help="where the adapters are trained, for training_time (default: runpod.train_backend when the "
                         "configuration has a runpod section, else modal)")
@@ -191,6 +202,9 @@ def main(argv=None) -> int:
             return 2
         elif args.command in ("train", "loadtest", "preflight"):  # F3: each reports its own errors
             from bench import loadtest, preflight, train
+            if args.command == "preflight" and args.base_check:
+                from bench import basecheck
+                return basecheck.cli(args)
             return {"train": train.cli, "loadtest": loadtest.cli, "preflight": preflight.cli}[args.command](args)
     except (TestSplitLocked, ConfigError, DataError, FactError, HarnessError) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)

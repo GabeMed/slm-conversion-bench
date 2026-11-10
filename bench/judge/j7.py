@@ -25,9 +25,12 @@ C1, never recomputed: it is the one B5 will make. The cheap_alt replay is groupe
 assignment, invocation by invocation.
 
 **Cheapest**, per cluster: the mean cost per invocation on that cluster's calib calls, retries
-included: J3's `standard` price for cheap_alt; J8's cost per request for the SLM, at the lowest
-utilization of `cost.utilizations` (the most expensive SLM, so the SLM is preferred only when it is
-cheaper even there).
+included: J3's `standard` price for cheap_alt; for the SLM, J8's cost per request **of that cluster's own
+adapter** (its own sweep, the router's time included), at the lowest utilization of `cost.utilizations` (the
+most expensive SLM, so the SLM is preferred only when it is cheaper even there). **An adapter outside its
+latency limit (J8's `outside_slo`) has no cost and is never allocated its cluster**: the SLM does not keep up
+with the API it would replace there, so the cluster goes to the cheapest other engine that passes, else the
+production LLM (`outside_slo` in the cluster's verdict says so).
 """
 import hashlib
 from fractions import Fraction
@@ -113,8 +116,8 @@ def allocate(clusters: List[str], evidence: Dict[str, Dict[str, Dict[str, Any]]]
     """{cluster: {"engine", "order", "evidence", ...}}; `evidence` is {engine: J2 compare by cluster},
     `costs` is {cluster: {engine: mean cost per invocation}}, `bars` is {engine: {cluster: agreement
     bar}} (an engine's replay may cover its own call sites). When more than one engine passes, the
-    choice rests on the cost order alone (`cost_dependent`), and the SLM's cost is extrapolated from
-    per-adapter load tests: the ratio between the two says how much."""
+    choice rests on the cost order alone (`cost_dependent`): the ratio between the two says how much. An
+    engine with no cost on a cluster (an adapter outside its latency limit) is not in its order, so never chosen."""
     out = {}
     for cluster in sorted(clusters):
         order = sorted(costs.get(cluster, {}), key=lambda e: (costs[cluster][e], e))
@@ -143,7 +146,10 @@ def router_clusters(b4_calls: List[dict], clusters: List[str]) -> Dict[Identity,
 
 
 def mean_costs(calls: List[dict], cluster_of: Dict[Identity, str], prices: Dict[str, Any],
-               slm_per_request: Optional[float]) -> Dict[str, float]:
+               slm_per_request: Optional[Dict[str, Optional[float]]]) -> Dict[str, float]:
+    """{cluster: mean cost per invocation}. `slm_per_request` is {cluster: its adapter's cost per request, or
+    None when that adapter is outside its latency limit: the cluster then has no SLM cost}; None for the
+    cheap_alt replay, priced at J3's standard price."""
     by_cluster: Dict[str, List[dict]] = {}
     for identity, attempts in invocations(calls).items():
         if identity in cluster_of:
@@ -152,7 +158,9 @@ def mean_costs(calls: List[dict], cluster_of: Dict[Identity, str], prices: Dict[
     for cluster, groups in by_cluster.items():
         flat = [a for attempts in groups for a in attempts]
         if slm_per_request is not None:
-            out[cluster] = slm_per_request * len(flat) / len(groups)
+            if slm_per_request.get(cluster) is None:
+                continue
+            out[cluster] = slm_per_request[cluster] * len(flat) / len(groups)
         else:
             out[cluster] = j3.price_calls(flat, prices)["api"]["standard"] / len(groups)
     return out
@@ -228,6 +236,14 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
     if j8["engine"].split("+lora:")[0] != f"slm:{adapters['slm']}":
         raise JudgmentError(f"the load test measured {j8['engine']!r}, not the base of these adapters, slm:{adapters['slm']}")
     lowest = j3.utilization_label(min(config["cost"]["utilizations"]))
+    per_engine = j8.get("engines") or {}
+    adapter_of = {c: f"slm:{adapters['slm']}+lora:{adapters['adapters'][c]['served_name']}" for c in clusters}
+    unmeasured = sorted(e for e in adapter_of.values() if e not in per_engine)
+    if unmeasured:
+        raise JudgmentError(f"the load test did not measure the adapters {unmeasured}: each cluster's SLM cost is its own")
+    slm_costs = {c: (per_engine[e]["cost_per_request"] or {}).get(lowest) if not per_engine[e]["outside_slo"] else None
+                 for c, e in adapter_of.items()}
+    outside = sorted(c for c, e in adapter_of.items() if per_engine[e]["outside_slo"])
     evidence, costs, sites = {}, {}, {}
     reads: Dict[str, Any] = {"teacher_eval": reference(teacher_eval_run_id), "j8": result_reference(j8_path),
                              "j6": result_reference(j6_path), "config": CONFIG_KEYS}
@@ -251,7 +267,7 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
             if entry["agreement"] and entry["agreement"]["n"]:
                 sites[engine].setdefault(cluster, {})[site] = entry["agreement"]["n"]
         for cluster, cost in mean_costs(replay, cluster_of, config["prices"],
-                                        j8["cost_per_request"][lowest] if engine == "slm" else None).items():
+                                        slm_costs if engine == "slm" else None).items():
             costs.setdefault(cluster, {})[engine] = cost
         reads[engine] = run_reads
     settings = {"selection_delta_pp": config["thresholds"]["selection_delta_pp"], "seed": config["seeds"]["bootstrap"],
@@ -263,6 +279,8 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
     site_bar = site_bars(a_tt, settings)
     bars = {engine: {cluster: cluster_bar(found, site_bar) for cluster, found in sites[engine].items()} for engine in ENGINES}
     decided = allocate(clusters, evidence, costs, noninferiority, settings, bars)
+    for cluster in decided:  # an adapter outside its limit had no cost, so it could not be chosen
+        decided[cluster]["outside_slo"] = cluster in outside
     fact = write_fact(JUDGMENT, "allocation", {"centroids": centroids_sha, "adapters": adapters_sha,
                                                 "allocation": {c: d["engine"] for c, d in decided.items()}})
     result = {"allocation": {c: d["engine"] for c, d in decided.items()}, "clusters": decided,
@@ -271,6 +289,6 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
               "teacher_self_agreement": {site: {**found, "bar": float(site_bar[site]) if site in site_bar else None}
                                          for site, found in a_tt.items()},
               "prices": {"as_of": config["prices"].get("as_of"),
-                         "sha256": hashlib.sha256(canonical(config["prices"].get("table") or {})).hexdigest()}, "slm_cost_basis": "extrapolated from per-adapter load tests",
-              "slm_cost_combined": j8.get("combined"), "settings": settings}
+                         "sha256": hashlib.sha256(canonical(config["prices"].get("table") or {})).hexdigest()}, "slm_cost_basis": "each cluster's own adapter's load test",
+              "slm_engines": adapter_of, "outside_slo": outside, "settings": settings}
     return write_result(JUDGMENT, reads, result), fact

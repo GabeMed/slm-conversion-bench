@@ -6,6 +6,7 @@ An `agent` run writes, under runs/<run_id>/:
 - config.json: the merged configuration the run used (a fact: `bench eval` reads this snapshot,
   never the current config.yaml, and checks it against the manifest's hash);
 - calls.jsonl: one C1 line per LLM invocation;
+- routes.jsonl (B4, B5): the router's time per invocation (`route_ms`), which C1's `latency_ms` leaves out;
 - predictions.json: {question_id: final SQL or null}, by CHESS's final-SQL rule;
 - chess/: CHESS's own outputs, kept for inspection and without authority.
 
@@ -411,6 +412,12 @@ def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict]
                 text = calls_path.read_text()
                 merged.write(text if not text or text.endswith("\n") else text + "\n")  # a killed worker's cut-off
                 calls_path.unlink()                                 # last line never runs into the next worker's first
+            routes = run_dir / f"routes.w{k}.jsonl"  # the router's time (hooks.routes_path), B4 and B5 only
+            if routes.exists():
+                text = routes.read_text()
+                with open(run_dir / "routes.jsonl", "a") as merged_routes:
+                    merged_routes.write(text if not text or text.endswith("\n") else text + "\n")
+                routes.unlink()
             reported = None
             if outcome_path.exists():
                 try:
