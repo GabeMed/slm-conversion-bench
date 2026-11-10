@@ -31,6 +31,7 @@ CODE = ("bench", "modal_apps", "runpod_apps")
 LOCKS = ("env/train/requirements.lock", "env/train/serve-vllm.lock")
 POD_PORT = 8000  # modal_apps.common.PORT: vLLM inside the serving pod, reached only through SSH
 SSH_PORT = "22/tcp"
+SSH_WAIT_AFTER_RUNNING_S = 600  # a RUNNING pod whose sshd has not answered by then never will: given up on early
 
 BOOTSTRAP = r"""set -u
 VOL=/runpod-volume
@@ -187,6 +188,19 @@ def ssh_endpoint(pod: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def port_22_mapped(pod: Dict[str, Any]) -> bool:
+    """Whether the pod's runtime shows 22 published (a public port and an IP)."""
+    return any(p.get("private") == 22 and p.get("public") and p.get("ip")
+               for p in ((pod.get("runtime") or {}).get("ports") or []))
+
+
+def runtime_summary(pod: Dict[str, Any]) -> str:
+    """The pod's runtime as the API reports it: its uptime and port mappings (for an error to show)."""
+    runtime = pod.get("runtime") or {}
+    ports = ", ".join(f"{p.get('private')}->{p.get('ip')}:{p.get('public')}" for p in runtime.get("ports") or [])
+    return f"uptime {runtime.get('uptime')} s, ports [{ports}]" if runtime else "no runtime"
+
+
 class Provider:
     """RunPod for this configuration: the API, the local state, and a Shell per pod (SSH unless a test gives
     another)."""
@@ -227,23 +241,37 @@ class Provider:
         return pod
 
     def wait_ssh(self, pod_id: str, timeout_s: float) -> Dict[str, Any]:
-        """Until the pod runs, publishes SSH and its sshd answers (an image may first install it); the pod
-        and its Remote."""
-        started = self.clock()
+        """Until the pod runs, its runtime shows 22 published and its sshd answers (an image may first install
+        it); the pod and its Remote. A pod RUNNING for runpod.ssh_wait_after_running_s (default
+        SSH_WAIT_AFTER_RUNNING_S) without SSH answering is given up on before timeout_s; the errors carry ssh's
+        last stderr line and the pod's runtime."""
+        started, running_since = self.clock(), None
+        give_up = float(self.settings.get("ssh_wait_after_running_s", SSH_WAIT_AFTER_RUNNING_S))
         last = "not seen yet"
         while True:
             pod = self.api.get_pod(pod_id)
             if pod is None or pod.get("status") in ("ERROR", "EXITED", "TERMINATED"):
-                raise RunPodError(f"pod {pod_id} is {pod.get('status') if pod else 'gone'} before SSH answered")
+                raise RunPodError(f"pod {pod_id} is {pod.get('status') if pod else 'gone'} before SSH answered "
+                                  f"(last: {last})")
             last = pod.get("status")
-            if pod.get("status") == "RUNNING" and ssh_endpoint(pod):
-                remote = self.remote(pod)
-                answer = remote.shell.run(f"test -f {WORK}/env && echo ready", timeout_s=60)
-                if answer.returncode == 0 and "ready" in answer.stdout:
-                    self.state.set_pod(pod_id, ssh=ssh_endpoint(pod), datacenter=pod.get("dataCenterId"),
-                                       cost_per_hour=pod.get("cost"))
-                    return {"pod": pod, "remote": remote}
-                last = f"RUNNING, sshd not answering ({answer.returncode})"
+            if pod.get("status") == "RUNNING":
+                running_since = self.clock() if running_since is None else running_since
+                if not port_22_mapped(pod):
+                    last = f"RUNNING, port 22 not mapped yet ({runtime_summary(pod)})"
+                else:
+                    remote = self.remote(pod)
+                    answer = remote.shell.run(f"test -f {WORK}/env && echo ready", timeout_s=60)
+                    if answer.returncode == 0 and "ready" in answer.stdout:
+                        self.state.set_pod(pod_id, ssh=ssh_endpoint(pod), datacenter=pod.get("dataCenterId"),
+                                           cost_per_hour=pod.get("cost"))
+                        return {"pod": pod, "remote": remote}
+                    stderr = ((answer.stderr or "").strip().splitlines() or ["no stderr"])[-1].strip()[:300]
+                    endpoint = ssh_endpoint(pod)
+                    last = (f"RUNNING, sshd at {endpoint['host']}:{endpoint['port']} not answering "
+                            f"(ssh exit {answer.returncode}: {stderr}; {runtime_summary(pod)})")
+                if self.clock() - running_since > give_up:
+                    raise RunPodError(f"pod {pod_id} RUNNING for {give_up:.0f} s without SSH answering, given up "
+                                      f"before the {timeout_s:.0f} s startup timeout ({last})")
             if self.clock() - started > timeout_s:
                 raise RunPodError(f"pod {pod_id} not reachable over SSH after {timeout_s:.0f} s ({last})")
             self.sleep(self.poll_s)
