@@ -1,7 +1,7 @@
 """The CHESS patches of front F1 (vendor/chess/PATCHES.md), one behaviour per test: HTTP retry with
 backoff (5b), `literal_eval` (7), seeded schema shuffling (8), bounded concurrency (9), `local`
 embeddings (10b), no gold in the agent's state (13), no `.env` over the harness environment (14),
-and the configuration keys they read. Agent environment only; no server, no download."""
+the lenient tool-call parser (16), and the configuration keys they read. Agent environment only; no server, no download."""
 import json
 import os
 import random
@@ -474,3 +474,55 @@ def test_chromas_own_settings_never_read_a_dotenv(monkeypatch, repo, tmp_path):
     run_dir = runner.run_agent(str(repo[0]), "B0", "train", ids=["1"])  # and queries it
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["tool_errors"] == {}
+
+
+# ---------------------------------------------------------------- 16 · lenient tool-call parser
+
+@pytest.fixture
+def agent(chess):
+    from workflow.agents.agent import Agent
+    agent = Agent("Information Retriever", "task", {"tools": {}})
+    agent.tools = {"extract_keywords": None, "retrieve_entity": None, "retrieve_context": None}
+    return agent
+
+
+@pytest.mark.parametrize("response", [
+    "<tool_call>extract_keywords</tool_call>",  # the published form, unchanged
+    "<tool_call>\nextract_keywords\n</tool_call>",
+    "Keywords first.\n\n<tool_call>\nextract_keywords\n</tool_call>",
+    '<tool_call>\n{"name": "extract_keywords", "arguments": {"text": "q"}}\n</tool_call>',  # gpt-oss
+    '<tool_call>{"tool": "extract_keywords", "parameters": {}}</tool_call>',
+    '<tool_call>\nextract_keywords {"text": "{{question}}"}\n</tool_call>',  # name, then arguments
+    "<tool_call>\nextract_keywords\n</think>\n\n<tool_call>\nretrieve_entity\n</think>",  # Qwen3
+    "<tool_call>extract_keywords<tool_call>retrieve_entity</tool_call>",
+    "<tool_call>extract_keywords",  # unclosed: ends with the text
+])
+def test_the_tool_name_is_read_from_every_accepted_form(agent, response):
+    assert agent.get_next_tool_name(response) == "extract_keywords"
+    assert agent.parse_action(response) == {"tool": "extract_keywords"}
+
+
+@pytest.mark.parametrize("response, error", [
+    ("Awaiting the system state.", IndexError),  # no tag at all: as published
+    ("", IndexError),
+    ("<tool_call></tool_call>", ValueError),
+    ("<tool_call>None</tool_call>", ValueError),
+    ("<tool_call>await_state</tool_call>", ValueError),  # a tool the agent does not have
+    ('<tool_call>{"name": "await_state", "arguments": {}}</tool_call>', ValueError),
+    ('<tool_call>{"arguments": {"text": "q"}}</tool_call>', ValueError),  # JSON with no name
+    ('<tool_call>{"name": "extract_keywords", "arguments": {</tool_call>', ValueError),  # malformed JSON
+    ("<tool_call>1. extract_keywords</tool_call>", ValueError),  # the tool's number, as observed
+    ("<tool_call>Extract_Keywords</tool_call>", ValueError),
+])
+def test_plain_text_empty_tags_and_unknown_tools_still_fail(agent, response, error):
+    with pytest.raises(error):
+        agent.parse_action(response)
+    with pytest.raises(ValueError, match="^Tool .* not found$") if error is ValueError else pytest.raises(IndexError):
+        agent.get_next_tool_name(response)
+
+
+def test_done_still_wins(agent):
+    assert agent.parse_action("DONE") == {"done": True}
+    assert agent.parse_action("<tool_call>extract_keywords</tool_call>\nDONE") == {"done": True}
+    assert agent.parse_action('<tool_call>{"name": "DONE"}</tool_call>') == {"done": True}
+

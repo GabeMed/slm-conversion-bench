@@ -1,3 +1,6 @@
+import json
+import re
+
 from workflow.system_state import SystemState
 from workflow.agents.tool import Tool
 
@@ -10,6 +13,27 @@ AGENT_CALL_SITES = {
     "schema_selector": "agent_ss",
     "Candidate Generator": "agent_cg",
 }
+
+# PATCH 16: where the text of a tool call ends, and the leading identifier of a bare name
+_TOOL_CALL_END = re.compile(r"</tool_call>|</think>|<tool_call>")
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _tool_call_name(text: str) -> str:
+    """PATCH 16: the tool named by the text that follows a <tool_call> tag (see `get_next_tool_name`)."""
+    end = _TOOL_CALL_END.search(text)
+    text = (text[:end.start()] if end else text).strip()
+    try:
+        call = json.loads(text)
+    except ValueError:
+        call = None
+    if isinstance(call, dict):
+        for key in ("name", "tool"):
+            if isinstance(call.get(key), str):
+                return call[key].strip()
+    match = _IDENTIFIER.match(text)
+    return match.group(0) if match else text
+
 
 class Agent:
     """
@@ -81,8 +105,14 @@ class Agent:
     def get_next_tool_name(self, response: str) -> str:
         """
         Get the next tool to call based on the response.
+
+        PATCH 16 (slm-conversion-bench): a lenient reading of the same tag. The text after the first
+        <tool_call> ends at the first </tool_call>, </think>, next <tool_call> or the end of the text;
+        the tool is the string `name` (or `tool`) of a JSON object there, else its leading identifier
+        (a bare name, possibly followed by arguments). No <tool_call> raises IndexError, as published;
+        a name outside the agent's tools raises ValueError, as published.
         """
-        tool_name = response.split("<tool_call>")[1].split("</tool_call>")[0].strip()
+        tool_name = _tool_call_name(response.split("<tool_call>")[1])
         if tool_name not in self.tools:
             raise ValueError(f"Tool {tool_name} not found")
         return tool_name
