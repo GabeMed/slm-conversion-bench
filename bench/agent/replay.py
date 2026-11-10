@@ -140,7 +140,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
     failed = None
     if resume_from is not None:
         from bench.agent import resume
-        failed = resume.load_replay_source(resume_from)
+        failed = resume.load_replay_source(resume_from, source["split"])  # before the barrier: refused on test
     split = source["split"]
     barrier.ensure_split_allowed(split, config)  # the source run's split
     _same_policy(source_run_id, source, config)

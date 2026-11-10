@@ -198,7 +198,7 @@ the run's working time. It is refused on test.
 A replay stopped the same way (`failed` with `harness_errors`, or `interrupted`) is resumed with
 `bench replay <source> --engine <engine>|--arm <arm> [--call-sites ...] [--ids ...] --workers 8 --resume-from
 <replay run_id>`, with the same source, engine or arm, call sites, ids and configuration: it copies the
-invocations that ended (not the questions), sends the others, and records `resumed_from.copied` and `.discarded`.
+invocations that ended (not the questions), sends the others, and records `resumed_from.copied` and `.discarded`. It is refused on test.
 
 ### 6. K1: the teacher's logs on train
 

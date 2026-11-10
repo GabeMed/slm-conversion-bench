@@ -39,11 +39,15 @@ RESUMABLE = ("failed", "interrupted")
 USAGE_FIELDS = ("input", "cached_input", "output", "reasoning", "cache_write")
 
 
-def load_source(source_run_id: str, split: str) -> Dict[str, Any]:
-    """The source's manifest, after the checks that need nothing of the new run."""
+def refuse_on_test(split: str) -> None:
     if split == "test":
         raise data.DataError("--resume-from is refused on test: resuming a test run is a decision to take "
                              "before pre-registration, not after a failure")
+
+
+def load_source(source_run_id: str, split: str) -> Dict[str, Any]:
+    """The source's manifest, after the checks that need nothing of the new run."""
+    refuse_on_test(split)
     path = paths.RUNS / source_run_id / "manifest.json"
     if not path.is_file():
         raise data.DataError(f"no run {source_run_id}")
@@ -183,8 +187,8 @@ def working_seconds(manifest: Dict[str, Any]) -> Optional[float]:
 # one more call, never a wrong copy). A complete invocation's C1 lines are copied unchanged, every
 # attempt, `run_id` included, as `bench run --resume-from` copies a question's; an incomplete one's
 # are not copied and are counted under `resumed_from.discarded` (calls and usage), so its cost stays
-# visible and no judgment reads a call twice. The test split is not refused here: the barrier and the
-# registry apply to the resumed replay as to any replay on test.
+# visible and no judgment reads a call twice. It is refused on test, as `bench run --resume-from` is
+# (the replay's split is its source run's).
 
 REPLAY_IDENTITY = ("split", "source_run_id", "source_config_sha256", "source_calls_sha256", "engine", "arm",
                    "call_sites", "question_ids", "n_invocations", "facts", "few_shot", "few_shot_k", "few_shot_sha256")
@@ -194,8 +198,9 @@ _STATUS = re.compile(r"Error code: (\d{3})")
 Identity = Tuple[str, str, str]
 
 
-def load_replay_source(failed_run_id: str) -> Dict[str, Any]:
-    """The failed replay's manifest, refused unless it stopped on an infrastructure failure."""
+def load_replay_source(failed_run_id: str, split: str) -> Dict[str, Any]:
+    """The failed replay's manifest, refused on test and unless it stopped on an infrastructure failure."""
+    refuse_on_test(split)
     path = paths.RUNS / failed_run_id / "manifest.json"
     if not path.is_file():
         raise data.DataError(f"no run {failed_run_id}")
@@ -204,6 +209,7 @@ def load_replay_source(failed_run_id: str) -> Dict[str, Any]:
         raise data.DataError(f"{failed_run_id} is a {source.get('type')!r} run: `bench replay --resume-from` resumes a replay")
     if source.get("status") not in RESUMABLE:
         raise data.DataError(f"{failed_run_id} is {source.get('status')!r}: only a failed or interrupted replay is resumed")
+    refuse_on_test(source.get("split"))
     if source["status"] == "failed" and not source.get("harness_errors"):
         raise data.DataError(f"{failed_run_id} failed without a harness error (c1_errors {source.get('c1_errors')}, "
                              f"problems {source.get('problems')}): only an infrastructure failure is resumed")
