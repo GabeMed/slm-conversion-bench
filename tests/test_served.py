@@ -1,6 +1,7 @@
 """The server behind an execution's SLM engines (bench.agent.served): read from the pod and the tunnel, recorded,
 and refused when it is not what serve_plan(config) says, on fakes (no pod, no network)."""
 import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -30,14 +31,21 @@ def config(base_url=BASE, runpod=True):
     return out
 
 
-def server(plan=None, pod_id="pod1", state_pod="pod1", models=("qwen3-8b", "qwen3-8b-c0"), version="0.30.0"):
-    """observe, get and expected as a pod serving `plan` (PLAN by default) would answer them; `asked` records the GETs."""
+LOCAL = "c" * 64  # this checkout's code archive
+CODE = {"sha256": LOCAL, "commit": "1" * 40, "dirty": False}
+
+
+def server(plan=None, pod_id="pod1", state_pod="pod1", models=("qwen3-8b", "qwen3-8b-c0"), version="0.30.0",
+           pod_code=CODE, started_from=CODE):
+    """observe, get and expected as a pod serving `plan` (PLAN by default) would answer them; `asked` records the
+    GETs. `pod_code`: the code record the pod holds; `started_from`: the one its server recorded at its start."""
     plan = copy.deepcopy(PLAN) if plan is None else plan
     asked = []
 
     def observe(cfg, candidate):
-        return {"pod_id": pod_id, "usd_per_hour": 1.79, "plan": plan,
-                "server_state": None if state_pod is None else {"pod_id": state_pod, "vllm_version": version}}
+        return {"pod_id": pod_id, "usd_per_hour": 1.79, "plan": plan, "pod_code": pod_code, "local_code_sha256": LOCAL,
+                "server_state": None if state_pod is None else {"pod_id": state_pod, "vllm_version": version,
+                                                                "code": started_from}}
 
     def get(url, key):
         asked.append((url, key))
@@ -65,6 +73,37 @@ def test_the_server_is_recorded(monkeypatch):
         "models": ["qwen3-8b", "qwen3-8b-c0"], "vllm_version": "0.30.0"}
     assert len(found["qwen3-8b"]["plan_sha256"]) == 64 and found["qwen3-8b"]["server_state"]["pod_id"] == "pod1"
     assert asked == [(f"{BASE}/models", "vllm-key"), (f"http://127.0.0.1:{PORT}/version", "vllm-key")]
+    assert {k: found["qwen3-8b"][k] for k in ("pod_code_sha256", "pod_code_commit", "pod_code_dirty")} == {
+        "pod_code_sha256": LOCAL, "pod_code_commit": "1" * 40, "pod_code_dirty": False}
+    assert found["qwen3-8b"]["server_state"]["code"] == CODE
+
+
+OTHER = {"sha256": "0" * 64, "commit": "2" * 40, "dirty": True}
+
+
+@pytest.mark.parametrize("change, message, recorded", [
+    ({"pod_code": OTHER}, f"the code recorded on the pod \\(sha256 {'0' * 64}\\) is not this checkout's \\(sha256 {LOCAL}\\)", OTHER),
+    ({"pod_code": None}, "the code recorded on the pod \\(sha256 None\\) is not this checkout's", {}),  # no record
+    # the pod's files were replaced after the server started: the record is this checkout's, the server is not
+    ({"started_from": OTHER}, f"its server was started from other code \\(sha256 {'0' * 64}\\) than this checkout's", CODE),
+    ({"started_from": None}, "its server was started from other code \\(sha256 None\\)", CODE),  # a server of older code
+])
+def test_the_test_split_is_refused_when_the_pods_code_is_not_this_checkouts(change, message, recorded):
+    fakes, _ = server(**change)
+    with pytest.raises(DataError, match=f"refusing to run on the server of qwen3-8b \\(pod pod1\\): {message}"):
+        served.check_served(config(), ENGINES, "test", **fakes)
+    found = served.check_served(config(), ENGINES, "calib", **fakes)["qwen3-8b"]  # recorded, never refused, elsewhere
+    assert found["checked"] is True
+    assert {k: found[k] for k in ("pod_code_sha256", "pod_code_commit", "pod_code_dirty")} == {
+        "pod_code_sha256": recorded.get("sha256"), "pod_code_commit": recorded.get("commit"), "pod_code_dirty": recorded.get("dirty")}
+
+
+def test_the_test_split_is_refused_when_this_checkouts_code_is_unknown():
+    fakes, _ = server()
+    observe = fakes["observe"]
+    fakes["observe"] = lambda cfg, candidate: {k: v for k, v in observe(cfg, candidate).items() if k != "local_code_sha256"}
+    with pytest.raises(DataError, match="is not this checkout's \\(sha256 None\\)"):
+        served.check_served(config(), ENGINES, "test", **fakes)
 
 
 def test_the_modal_only_deploy_knobs_are_not_compared():
@@ -118,9 +157,11 @@ class FakeRemote:
 
 class FakeProvider:
     def __init__(self, record, pod, files):
+        from runpod_apps import pods as rp
         self.state = type("S", (), {"serving": lambda _, candidate: record})()
         self.api = type("A", (), {"get_pod": lambda _, pod_id: pod if pod and pod_id == pod["id"] else None})()
         self.remote_ = FakeRemote(files)
+        self.held_code = lambda remote: rp.Provider.held_code(self, remote)  # the real reading of the record
 
     def remote(self, pod):
         return self.remote_
@@ -133,9 +174,16 @@ def test_observe_reads_the_recorded_pods_plan_and_server_state(monkeypatch):
     files = {rserve.PLAN: json.dumps(PLAN), "/runpod-volume/vllm-cache/bench-serving/qwen3-8b.json": json.dumps(state)}
     provider = FakeProvider({"id": "pod1"}, {"id": "pod1", "status": "RUNNING", "cost": 1.79}, files)
     monkeypatch.setattr(rp, "make_provider", lambda cfg: provider)
+    local = hashlib.sha256(rp.code_archive()).hexdigest()
     assert served.observe_runpod(config(), "qwen3-8b") == {"pod_id": "pod1", "usd_per_hour": 1.79, "plan": PLAN,
-                                                          "server_state": state}
-    assert provider.remote_.read_paths == ["/bench/plan.json", "/runpod-volume/vllm-cache/bench-serving/qwen3-8b.json"]
+                                                          "server_state": state, "pod_code": None,
+                                                          "local_code_sha256": local}
+    assert provider.remote_.read_paths == ["/bench/plan.json", "/runpod-volume/vllm-cache/bench-serving/qwen3-8b.json",
+                                           "/bench/code.json"]
+    files[rp.CODE_RECORD] = json.dumps(CODE)  # the record `up` (or a later sync) left
+    assert served.observe_runpod(config(), "qwen3-8b")["pod_code"] == CODE
+    files[rp.CODE_RECORD] = "not json"
+    assert served.observe_runpod(config(), "qwen3-8b")["pod_code"] is None
 
 
 @pytest.mark.parametrize("record, pod, message", [

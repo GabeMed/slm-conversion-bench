@@ -474,7 +474,10 @@ At the end of the day, check the console's Pods page, and the network volume if 
   train lock's environment, which the first run installs onto the volume. Finally it starts the server again
   as `up` does and checks its health through the tunnel, even when the reference failed. The server is down
   for the reference and the warm-up after it, so run nothing else against it meanwhile. If the server does
-  not come back, the error says so and the pod is still billing: `down`, then `up`. `training_time`
+  not come back, the error says so and the pod is still billing: `down`, then `up`. Before the stop, the
+  pod's code is made this checkout's (uploaded unless the sha256 recorded on the pod is already this
+  checkout's), and the reference is refused when the pod's record is missing or names other code; the verdict
+  records `pod_code_sha256`, `pod_code_commit` and `pod_code_dirty`. `--base-check` does the same. `training_time`
   reads the Tinker manifests (`runpod.train_backend: tinker`; `--train-backend` overrides).
 - **After the last `bench train`** (the adapters fact written into `config.yaml`), and again before
   step 13: `down`, then `up`, for the chosen candidate. That `up` is the one that serves every adapter;
@@ -639,8 +642,11 @@ keys' length and the registry):
   `/v1/models` and vLLM's `/version` through the tunnel. It records them in the manifest (`served`) and
   refuses a server whose plan is not `serve_plan(config)` (the Modal-only deploy knobs aside), whose state
   another pod wrote, whose vLLM is not `serving.vllm_version`, or whose `/v1/models` lacks a model the
-  execution can route to; on test it also refuses an SLM endpoint that is not a RunPod tunnel. A refusal
-  names the difference: `down`, then `up` again.
+  execution can route to; on test it also refuses an SLM endpoint that is not a RunPod tunnel, a pod whose
+  recorded code (`/bench/code.json`) is not this checkout's by sha256, and a server started from other code
+  than this checkout's (the server's state records the code it started from). The manifest records
+  `pod_code_sha256`, `pod_code_commit` and `pod_code_dirty` under `served`. A refusal names the difference:
+  `down`, then `up` again.
 - **The serving pod runs vLLM in dev mode**, as in the load test (`VLLM_SERVER_DEV_MODE=1`, set by `bench serve up`):
   the test's SLM arms and the sweeps are served by the same kind of server.
 - **The machine stays awake** for the whole loop: `caffeinate -dims` in another terminal (macOS). A

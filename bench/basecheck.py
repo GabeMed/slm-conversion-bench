@@ -186,6 +186,10 @@ def base_check(config: Dict[str, Any], cluster: str, on: str, tinker: Dict[int, 
                                              "observed_gpus", "versions", "pod_id", "usd_per_hour", "restart_error",
                                              "server_left_stopped")
                       if k in scored}})
+    if scored.get("pod_code"):  # RunPod: the code the job ran, this checkout's by sha256 (runpod_apps/parity.py)
+        code = scored["pod_code"]
+        result.update({"pod_code_sha256": code.get("sha256"), "pod_code_commit": code.get("commit"),
+                       "pod_code_dirty": code.get("dirty"), "pod_code_uploaded": code.get("uploaded")})
     return result
 
 
