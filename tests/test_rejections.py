@@ -2,12 +2,14 @@
 rejected because prompt + max_tokens does not, is the harness's. The vLLM strings are vLLM 0.30.0's
 (the serving image vllm/vllm-openai:v0.30.0), built from its f-strings with the serving numbers:
 max_model_len 32768, max_tokens 4096."""
-import httpx
-import openai
 import pytest
 
-from bench.agent import hooks
-from bench.agent.rejections import is_model_rejection, prompt_alone_overflows
+pytest.importorskip("langchain_core")
+httpx = pytest.importorskip("httpx")
+openai = pytest.importorskip("openai")
+
+from bench.agent import hooks  # noqa: E402
+from bench.agent.rejections import is_model_rejection, prompt_alone_overflows  # noqa: E402
 
 CONTEXT, OUTPUT = 32768, 4096
 MAX_INPUT = CONTEXT - OUTPUT  # vLLM's max_input_tokens
