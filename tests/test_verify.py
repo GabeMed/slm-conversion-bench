@@ -22,6 +22,18 @@ PRICES = {"as_of": "2026-09-30", "table": {
     "engine-model": {"provider": "provider-x", "input_per_mtok": 0.5, "cached_input_per_mtok": 0.05, "output_per_mtok": 1.5, "batch_discount": 0.5}}}
 
 
+# the arms' facts before RUNBOOK step 8: the shipped configuration names J5's centroids for B4 and B5,
+# which these worlds do not hold; a test that wants an arm's fact sets it
+NO_CENTROIDS = {"B4": {"centroids": None}, "B5": {"centroids": None}}
+
+
+def without_centroids(config):
+    """The configuration before B4's and B5's centroids were chosen (see NO_CENTROIDS)."""
+    for arm, settings in NO_CENTROIDS.items():
+        config["arms"][arm].update(settings)
+    return config
+
+
 def loadtest(run_id, concurrency, p95_ms, rps):
     write_run(run_id, {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
                        "prefix_cache": True, "sweep_id": "sweep-1"},
@@ -37,8 +49,9 @@ def world(tmp_path, monkeypatch):
     (J2), and a per-call comparison (J2); and the report plan that names them."""
     config_path, config = repo(tmp_path, monkeypatch, {
         "prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}},
-        "allocation": {"min_calls": 5}, "stats": {"n_boot": 100}, "cost": {"p95_slo_cap_ms": 1000},
-        "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}})
+        "allocation": {"min_calls": 5}, "stats": {"n_boot": 100},
+        "cost": {"p95_slo_cap_ms": 1000, "slo_from": "agent-B0-calib"},  # this world's pilot, not the shipped one's
+        "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}, "arms": NO_CENTROIDS})
     # what J7 reads beside its arguments: the size of the test split and the registered pilot
     monkeypatch.setattr(data, "load_splits", lambda: {"test": [str(q) for q in range(500)]})
     monkeypatch.setattr(data, "pilot_ids", lambda config: QUESTIONS[:50])
@@ -258,6 +271,7 @@ def test_a_result_that_does_not_say_what_it_read_cannot_be_verified(world, capsy
 def test_j5_is_recomputed_from_the_executions_it_clustered(tmp_path, monkeypatch):
     from test_j5 import build
     config, _, train, calib, _ = build(tmp_path, monkeypatch)
+    without_centroids(config)  # this world's J5 is not the one the shipped configuration names
     path, _ = j5.run("curate-t", train, calib, config)
     assert verify.verify(config, {"j5": relative(path)}) == ([relative(path)], [])
     narrower = copy.deepcopy(config)

@@ -219,10 +219,10 @@ stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are i
 
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
-    few_shot: {k: 3, source_run: null}  # k teacher examples per call site from a done B0 run on train (run id); before runs
+    few_shot: {k: 0, source_run: agent-B0-train-20261109T214533.609401Z}  # k teacher examples per call site from a done B0 run on train (run id); before runs
   B3: {choice: null}           # J6 (S4)
-  B4: {choice: null, centroids: null, adapters: null}                    # J6, J5 (S3), S5
-  B5: {choice: null, centroids: null, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
+  B4: {choice: null, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null}                 # J6, J5 (S3), S5
+  B5: {choice: null, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
 
 # F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
 # bench/preflight.py). Values are proposals; the author confirms them before runs.
@@ -394,7 +394,7 @@ cost:                          # J3 and J8 (SPEC §6.6); the container's price i
   # (judge j8 --slo-from). The cap is MLPerf's server limit for an 8B model on a ~150-token answer:
   # 2000 ms to the first token + 100 ms per token. Sustained throughput is the highest with p95 within the SLO.
   p95_slo_cap_ms: 17000
-  slo_from: null               # before prereg: the pilot's B0 execution on calib (run id); J8 and the report refuse another
+  slo_from: agent-B0-calib-20261109T151141.039667Z  # before prereg: the pilot's B0 execution on calib (run id); J8 and the report refuse another
   utilizations: [0.2, 0.5, 1.0]
 claims:                        # the SPEC §5 map (bench/report.py)
   v3_min_ratio: 3              # V3/A2: the paper's bar, met when the cost ratio's 95% CI lower bound is >= this (T9)

@@ -13,9 +13,10 @@ PILOT = "agent-B0-calib"
 
 
 def settings(cap_ms=1000, gpu_per_hour=0.8, cpu=0.0, memory=0.0):
-    """Overrides of the shipped configuration: the SLO cap and the prices of an L4 container (CPU
-    and memory free unless a test prices them, so the GPU's price is the container's)."""
-    return {"cost": {"p95_slo_cap_ms": cap_ms},
+    """Overrides of the shipped configuration: the SLO cap, no SLO execution fixed yet (the shipped one
+    names the real pilot's; each test names its own), and the prices of an L4 container (CPU and memory
+    free unless a test prices them, so the GPU's price is the container's)."""
+    return {"cost": {"p95_slo_cap_ms": cap_ms, "slo_from": None},
             "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": gpu_per_hour / 3600},
                                      "cpu_usd_per_core_s": cpu, "memory_usd_per_gib_s": memory}}}
 
