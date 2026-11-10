@@ -15,7 +15,8 @@ def loadtest(run_id, concurrency, p95_ms, rps):
 
 
 def test_a_judgment_runs_and_prints_its_result(tmp_path, monkeypatch, capsys):
-    config_path, _ = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_cap_ms": 1000},
+    # no SLO execution fixed in the configuration (the shipped one names the real pilot's): --slo-from names it
+    config_path, _ = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_cap_ms": 1000, "slo_from": None},
                                                   "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.001}}}})
     runs = [loadtest("lt-1", 1, 300, 2.0), loadtest("lt-8", 8, 800, 9.0)]
     write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib"},

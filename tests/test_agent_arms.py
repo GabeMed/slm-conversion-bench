@@ -112,6 +112,7 @@ def test_the_examples_are_seeded(monkeypatch, repo):
 
 def test_cheap_alt_never_runs_without_its_few_shot(monkeypatch, repo):
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    set_config(repo, B1={"few_shot": {"k": 3, "source_run": None}})  # the shipped one names a source run (RUNBOOK step 7)
     with pytest.raises(hooks.HarnessError, match="source_run is not set"):
         runner.run_agent(str(repo), "B1", "train", ids=["1"])  # k: 3, no source: refused before anything runs
     set_config(repo, B1={"few_shot": {"k": 3, "source_run": "agent-B0-train-missing"}})
