@@ -1753,9 +1753,76 @@ def test_b5_on_the_exploratory_allocation_is_listed_without_a_verdict(pipeline, 
     # never the arm B5, whose verdicts rest on J7's allocation
     pipeline["plan"].write_text(yaml.safe_dump({**plan, "arms": {**plan["arms"], "B5": {"eval": "eval-B5-exploratory",
                                                                                         "cost": relative(cost)}}}))
-    with pytest.raises(JudgmentError, match="ran on the exploratory allocation: it is the plan's b5_exploratory"):
+    with pytest.raises(JudgmentError, match="exploratory allocation: it is the plan's b5_exploratory"):
+        run()
+    # a J3 that prices other questions than its evaluation scored is refused
+    j3_stored = read_result(relative(cost), "J3")
+    fewer = dict(j3_stored["result"], by_question=dict(list(j3_stored["result"]["by_question"].items())[1:]))
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "b5_exploratory": {
+        "eval": "eval-B5-exploratory", "cost": relative(write_result("J3", j3_stored["reads"], fewer))}}))
+    with pytest.raises(JudgmentError, match="does not price the questions its evaluation scored"):
         run()
     # and an exploratory run bound to another fact than the configuration names is refused
     pipeline["plan"].write_text(yaml.safe_dump({**plan, "b5_exploratory": {"eval": "eval-B5", "cost": plan["arms"]["B5"]["cost"]}}))
     with pytest.raises(JudgmentError, match="not a run on the exploratory allocation"):
         run()
+
+
+def test_every_exploratory_run_the_test_completed_is_the_plans_b5_exploratory():
+    """A done B5 run on the exploratory allocation is never left out (a plan with B5 and no b5_exploratory is
+    refused), and never needs the arm B5 (a plan with b5_exploratory and no B5 is read)."""
+    judged = {"j6": {"choice_fact": {"sha256": "C"}, "choice": "qwen"}, "j5": {"centroids": {"sha256": "K"}},
+              "j7": {"adapters": "A", "allocation_fact": {"sha256": "L"}}}
+    expected = report._expected_facts({}, judged)
+    rows = [("b0", "agent", "B0", "done", {}), ("b5", "agent", "B5", "done", {**TRAINED_FACTS, "allocation": "L"}),
+            ("b5x", "agent", "B5", "done", {**TRAINED_FACTS, "allocation": "X"})]
+    registry = registry_of(*rows)
+    registry["runs"][2]["allocation"] = "exploratory"
+
+    def bind(arms, exploratory):
+        return report._registry_bindings("test", {a: {"run_id": r} for a, r in arms.items()}, registry, judged, {}, {},
+                                         expected, "h", exploratory)
+    with pytest.raises(JudgmentError, match="leaves out B5's exploratory run.*b5x; name it as the plan's b5_exploratory"):
+        bind({"B0": "b0", "B5": "b5"}, None)
+    bind({"B0": "b0", "B5": "b5"}, {"run_id": "b5x", "allocation_fact": "X"})
+    explored = {"run_id": "b5x", "allocation_fact": "X"}
+    bind({"B0": "b0"}, explored)  # (a) the arm B5 left out is another matter: the exploratory run is in the plan
+    assert explored["several_runs"] is None
+    with pytest.raises(JudgmentError, match="ran on the exploratory allocation: it is the plan's b5_exploratory"):
+        bind({"B0": "b0", "B5": "b5x"}, None)
+    with pytest.raises(JudgmentError, match="did not run on the exploratory allocation"):
+        bind({"B0": "b0"}, {"run_id": "b5", "allocation_fact": "L"})
+    with pytest.raises(JudgmentError, match="recorded the allocation fact 'X'"):
+        bind({"B0": "b0"}, {"run_id": "b5x", "allocation_fact": "Y"})
+
+
+def test_an_exploratory_run_is_never_an_arm_on_any_split(tmp_path, monkeypatch):
+    """Its evaluation copies the arm (B5) and not the allocation: the run's own manifest is read, on calib too."""
+    from fixtures.fake import write_run
+    monkeypatch.setattr(paths, "RUNS", tmp_path)
+    write_run("agent-B5-exploratory-calib", {"type": "agent", "arm": "B5", "split": "calib", "allocation": "exploratory"})
+    write_run("eval-x", {"type": "eval", "source_run_id": "agent-B5-exploratory-calib", "arm": "B5", "split": "calib",
+                         "status": None})
+    rows = lambda dirs: [{"arm": "B5", "engine": None, "split": "calib", "question_id": "1", "correct": True,  # noqa: E731
+                          "source_run_id": "agent-B5-exploratory-calib"}]
+    with pytest.raises(JudgmentError, match="a run on the exploratory allocation: it is the plan's b5_exploratory"):
+        report.per_arm({"B5": "eval-x"}, "calib", rows)
+
+
+def test_verify_recomputes_the_cost_of_b5_exploratory():
+    from bench import verify
+    plan = {"arms": {"B0": {"cost": "judgments/J3/a/result.json"}}, "b5_exploratory": {"eval": "e", "cost": "judgments/J3/x/result.json"}}
+    assert verify.plan_results(plan) == ["judgments/J3/a/result.json", "judgments/J3/x/result.json"]
+
+
+def test_the_exploratory_section_names_several_runs():
+    data = {"split": "test", "scope": report.SCOPE, "arms": {}, "map": [], "steps": [], "per_call_uncovered": [],
+            "gold_tests": {}, "prereg_in_force": "h", "deviations": None,
+            "judgments": {"j6": None, "per_call": None, "j7": None}, "registry": registry_of(),
+            "exploratory": {"n": 2, "ex": 0.5, "by_difficulty": {}, "allocation": {"c0": "slm", "c1": "production_llm"},
+                            "cost_per_correct": {"20%": 0.01}, "replaceable_fraction": {"calls": 0.4},
+                            "several_runs": ["b5x", "b5x-2"]}}
+    page = report.render(data)
+    assert "## Exploratory: B5 on a single-cluster swap (no verdict)" in page and "c0 → slm, c1 → production_llm" in page
+    assert "none (exploratory); several test runs of it: b5x, b5x-2 |" in page
+    assert "several test runs" not in report.render({**data, "exploratory": {**data["exploratory"], "several_runs": None}})

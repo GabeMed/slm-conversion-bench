@@ -221,6 +221,11 @@ def test_the_exploratory_allocation_is_exempt_from_j7_but_must_read_as_an_alloca
     only_j8 = {"split": "calib", "j8": world["plan"]["j8"]}
     verified, divergences = verify.verify(config, only_j8)
     assert divergences == [] and verified == [relative(world["results"]["j8"])]
+    # the exemption is the key's, not the fact's: named as J7's allocation, the hand-written fact has no J7 behind it
+    as_j7 = copy.deepcopy(config)
+    as_j7["arms"]["B5"]["allocation"] = relative(swap)
+    _, divergences = verify.verify(as_j7, only_j8)
+    assert divergences == [f"arms.B5.allocation ({relative(swap)}): no stored J7 result that wrote this fact verifies"]
     swap.write_text(json.dumps({**payload, "allocation": {"c0": "slm"}}))  # edited in place
     _, divergences = verify.verify(config, only_j8)
     assert len(divergences) == 1 and divergences[0].startswith(f"arms.B5.exploratory_allocation ({relative(swap)})") \

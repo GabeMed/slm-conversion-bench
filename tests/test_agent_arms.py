@@ -433,9 +433,12 @@ def test_b5_on_the_exploratory_allocation_runs_on_calib_as_its_own_configuration
     _, manifest, calls = run(monkeypatch, repo, "B5", ("1",))  # the registered B5: J7's allocation, no allocation field
     assert "allocation" not in manifest and manifest["facts"]["allocation"] == registered.parent.name
     assert {(c["cluster"], c["engine"]) for c in calls} == {("c0", "production_llm"), ("c1", "slm:qwen3-8b+lora:qwen3-8b-c1")}
-    for arm in ("B0", "B4"):
+    for arm in ("B0", "B1", "B2", "B3", "B4"):
         with pytest.raises(runner.data.DataError, match="--allocation is B5's"):
-            runner.run_agent(str(repo), arm, "calib", ids=["3"], allocation="exploratory")
+            runner.run_agent(str(repo), arm, "calib", ids=["3"], allocation="exploratory",
+                             engine="production_llm" if arm == "B2" else None)
+    with pytest.raises(runner.data.DataError, match="--allocation must be one of"):
+        runner.run_agent(str(repo), "B5", "calib", ids=["3"], allocation="c0-only")
 
 
 def test_examples_are_only_the_teachers_successful_answers(monkeypatch, repo):

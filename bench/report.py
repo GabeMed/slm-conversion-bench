@@ -164,7 +164,8 @@ def costs_of(j3: Dict[str, Any], sensitivity: bool = False) -> Dict[str, Optiona
 
 
 def per_arm(evals: Dict[str, str], split: str, ex_table: Callable) -> Dict[str, List[Dict[str, Any]]]:
-    """J1's rows of each arm's eval execution, checked to be that arm, on that split. One call to
+    """J1's rows of each arm's eval execution, checked to be that arm, on that split, and never an execution of
+    B5 on its exploratory allocation (the plan's `b5_exploratory`, no verdict), on any split. One call to
     `ex_table` for all of them, so J1 checks they share the instrument."""
     rows = ex_table([run_dir(e) for e in evals.values()])
     out = {}
@@ -174,6 +175,10 @@ def per_arm(evals: Dict[str, str], split: str, ex_table: Callable) -> Dict[str, 
         if manifest(eval_run_id).get("partial"):
             raise JudgmentError(f"{eval_run_id} scores an abandoned attempt (--partial): never an arm's evaluation")
         source = manifest(eval_run_id)["source_run_id"]
+        # the run's own record (its eval copies the arm, not the allocation); only B5 has an allocation
+        if arm == "B5" and manifest(source).get("allocation"):
+            raise JudgmentError(f"{eval_run_id} scores {source}, a run on the {manifest(source)['allocation']} allocation: "
+                                f"it is the plan's b5_exploratory, never an arm with a verdict")
         mine = [r for r in rows if r["source_run_id"] == source]
         wrong = {(r["arm"], r["engine"], r["split"]) for r in mine} - {(*J1_KEY[arm], split)}
         if not mine or wrong:
@@ -312,6 +317,13 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
                                 f"allocation")
         facts_of("B5 (exploratory allocation)", entry, NEEDS["B5"],
                  {**{k: v for k, v in expected.items() if k != "allocation"}, "allocation": exploratory["allocation_fact"]})
+    # every exploratory run the test completed is in the report, as the plan's b5_exploratory: none is left out
+    unlisted = sorted(r["run_id"] for r in registry["runs"]
+                      if r["status"] == "done" and r["type"] == "agent" and r["prereg_hash"] == in_force
+                      and r.get("allocation") and (exploratory is None or r["run_id"] != exploratory["run_id"]))
+    if unlisted:
+        raise JudgmentError(f"the plan leaves out B5's exploratory run(s) done under the registration in force: "
+                            f"{', '.join(unlisted)}; name it as the plan's b5_exploratory")
     replay_several = None
     if reads.get("per_call"):
         entry, replay_several = bind("the per-call evaluation", reads["per_call"]["replay"]["run_id"])
@@ -409,6 +421,8 @@ def b5_exploratory(plan: Dict[str, Any], config: Dict[str, Any], split: str, spe
     basis = (cost.get("slm_cost_basis") or {}).get("basis")
     if basis is not None and (j3["reads"].get("j8") or {}).get("sha256") != (sources.get("j8") or {}).get("sha256"):
         raise JudgmentError("the J3 result of b5_exploratory priced its SLM calls with another load test than the plan's j8")
+    if set(cost["by_question"]) != set(correct_of(rows)):
+        raise JudgmentError("the J3 result of b5_exploratory does not price the questions its evaluation scored")
     (summary,) = ex_summary(rows)
     sources["b5_exploratory"] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
     return {"n": summary["n"], "ex": summary["ex"], "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
@@ -1390,7 +1404,9 @@ def render(data: Dict[str, Any]) -> str:
                          + ["cost per correct query (standard prices)", "replaceable fraction (calls)", "verdict"],
                          [["B5, exploratory allocation", explored["n"], _pct(explored["ex"])]
                           + [_pct(explored["by_difficulty"].get(d)) for d in difficulties]
-                          + [costs, _pct((explored["replaceable_fraction"] or {}).get("calls")), "none (exploratory)"]]), ""]
+                          + [costs, _pct((explored["replaceable_fraction"] or {}).get("calls")),
+                             "none (exploratory)" + (f"; several test runs of it: {', '.join(explored['several_runs'])}"
+                                                     if explored.get("several_runs") else "")]]), ""]
     fraction = data["arms"].get("B5", {}).get("replaceable_fraction")
     parts += ["## Replaceable fraction (B5)", "",
               NO_SLM[0].upper() + NO_SLM[1:] + "." if b5_without_slm(data) else

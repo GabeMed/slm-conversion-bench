@@ -14,8 +14,8 @@ computed, never of a file found on disk.
 
 What is verified:
 - the judgments the report plan names (`bench/report.py`): `j5`, `j6`, `j7`, `j8`, `per_call`,
-  `teacher_train_cost`, `b1k` (B1's few-shot k, a `choice.json`), the `cost` of every arm and every
-  `format` entry;
+  `teacher_train_cost`, `b1k` (B1's few-shot k, a `choice.json`), the `cost` of every arm and of
+  `b5_exploratory`, and every `format` entry;
 - the judgments behind the facts `config.yaml › arms` points at: a `choice` is written by J6,
   `centroids` by J5, an `allocation` by J7 (`adapters` is training's output, S5, not a judgment).
   A fact stands when **at least one** stored result that wrote it verifies, with everything that
@@ -80,6 +80,7 @@ def plan_results(plan: Dict[str, Any]) -> List[str]:
     """The judgment results a report plan names."""
     named = [plan[key] for key in PLAN_KEYS if plan.get(key)]
     named += [spec["cost"] for spec in (plan.get("arms") or {}).values() if spec.get("cost")]
+    named += [plan["b5_exploratory"]["cost"]] if (plan.get("b5_exploratory") or {}).get("cost") else []
     named += list((plan.get("format") or {}).values())
     return named
 

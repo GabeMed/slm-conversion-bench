@@ -145,6 +145,18 @@ def check_config(root: Path, config_rel: str) -> Optional[Dict[str, Any]]:
                 report("WARN", f"arms.{arm}.{name} stored by its sha256", f"{value}: directory name differs")
             else:
                 report("OK", f"arms.{arm}.{name}", value)
+    # B5's exploratory allocation (SPEC §3 extension 1, no verdict): optional; set, it is registered as the facts above
+    value = (arms.get("B5") or {}).get("exploratory_allocation")
+    if not value:
+        report("OK", "arms.B5.exploratory_allocation", "not set: no exploratory B5 run is registered")
+    elif not (root / value).is_file():
+        report("BLOCK", "arms.B5.exploratory_allocation exists", f"{value}: create it (RUNBOOK step 11)")
+    elif not ok(root, "ls-files", "--error-unmatch", "--", value):
+        report("BLOCK", "arms.B5.exploratory_allocation tracked by git", f"{value} is untracked: commit judgments/")
+    elif hashlib.sha256((root / value).read_bytes()).hexdigest() != (root / value).parent.name:
+        report("BLOCK", "arms.B5.exploratory_allocation stored by its sha256", f"{value}: directory name differs")
+    else:
+        report("OK", "arms.B5.exploratory_allocation", value)
     return config
 
 

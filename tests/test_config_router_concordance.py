@@ -423,13 +423,16 @@ def test_b5_routes_by_the_exploratory_allocation_only_when_asked(arms, fact_root
 
 def test_the_shipped_exploratory_allocation_is_the_c0_swap():
     """The registered extension 1: c0 on its adapter, every other cluster on the production LLM, decided on the
-    centroids and adapters B4 and B5 run on."""
+    centroids and adapters B4 and B5 run on. The fact is rebuilt here from the configuration alone (judgments/ is in
+    no clone CI makes): the address the configuration names must be its sha256."""
+    from bench.prereg import EXPLORATORY_ALLOCATION
+    import hashlib
     b5 = load_config(BASE)["arms"]["B5"]
-    rel = b5["exploratory_allocation"]
-    assert rel.startswith("judgments/exploratory/") and rel.endswith("/allocation.json")
-    path = paths.ROOT / rel
-    if not path.is_file():  # judgments/ is not in every clone (CI): the address is checked, the content where it is
-        pytest.skip(f"{rel} is not in this clone")
-    payload, sha = facts.read_fact(str(path), "allocation")
-    assert payload["allocation"] == {"c0": "slm", "c1": "production_llm", "c2": "production_llm", "c3": "production_llm"}
-    assert payload["centroids"] == b5["centroids"].split("/")[2] and payload["adapters"] == b5["adapters"].split("/")[2]
+    assert EXPLORATORY_ALLOCATION == {"c0": "slm", "c1": "production_llm", "c2": "production_llm", "c3": "production_llm"}
+    payload = {"centroids": b5["centroids"].split("/")[2], "adapters": b5["adapters"].split("/")[2],
+               "allocation": EXPLORATORY_ALLOCATION}
+    facts.validate_fact("allocation", payload)
+    sha = hashlib.sha256(facts.canonical(payload)).hexdigest()
+    assert b5["exploratory_allocation"] == f"judgments/exploratory/{sha}/allocation.json"
+    assert b5["centroids"] == load_config(BASE)["arms"]["B4"]["centroids"]
+    assert b5["adapters"] == load_config(BASE)["arms"]["B4"]["adapters"]

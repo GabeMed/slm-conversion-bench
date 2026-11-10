@@ -702,6 +702,20 @@ def clear_send_modes() -> None:
                   file=sys.stderr)
 
 
+def check_exploratory_is_not_b5(config: Dict[str, Any]) -> None:
+    """On test, B5's exploratory allocation must differ from J7's: the same fact (one sha256) would run B5 twice,
+    once without a verdict."""
+    from bench.contracts.facts import read_fact
+    from bench.contracts.router import ALLOCATIONS
+    b5 = (config.get("arms") or {}).get("B5") or {}
+    if not (b5.get("allocation") and b5.get(ALLOCATIONS["exploratory"])):
+        return  # the router refuses an unset one, with its own message
+    registered = read_fact(str(paths.ROOT / b5["allocation"]), "allocation")[1]
+    if read_fact(str(paths.ROOT / b5[ALLOCATIONS["exploratory"]]), "allocation")[1] == registered:
+        raise data.DataError(f"arms.B5.exploratory_allocation is J7's allocation itself ({registered}): on test it "
+                             f"would run B5 again, without a verdict. Run the registered B5 (no --allocation)")
+
+
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
               batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None,
@@ -718,6 +732,8 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     if allocation != "registered" and arm != "B5":
         raise data.DataError(f"--allocation is B5's; {arm} has none")
     config = load_config(config_path)
+    if allocation == "exploratory" and split == "test":
+        check_exploratory_is_not_b5(config)
     from bench.agent import hooks
     hooks.configure(config)
     clear_send_modes()

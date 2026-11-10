@@ -284,19 +284,41 @@ def test_register_refuses_a_fact_the_configuration_names_that_git_does_not_track
 
 
 def test_the_exploratory_allocation_is_registered_as_the_arms_facts_are(repo):
-    """B5's exploratory allocation (SPEC §3 extension 1) is optional; set, it must be a fact the registration
-    commit holds, and the configuration registered with it is the only one a test run opens the barrier for."""
-    rel = "judgments/exploratory/e/allocation.json"
-    config = {**CONFIG, "arms": {**CONFIG["arms"], "B5": {**CONFIG["arms"]["B5"], "exploratory_allocation": rel}}}
-    (repo / "config.yaml").write_text(yaml.safe_dump(config))
-    git(repo, "add", "-A")
-    git(repo, "commit", "-q", "-m", "the exploratory allocation, named")
-    with pytest.raises(PreregError, match=rf"{rel}, a fact the configuration names, does not exist"):
+    """B5's exploratory allocation (SPEC §3 extension 1) is optional; set, it must be exactly the declared swap (c0 on
+    its adapter, the rest on the production LLM) on arms.B5's centroids and adapters, a fact the registration commit
+    holds, and the configuration registered with it is the only one a test run opens the barrier for."""
+    from bench.contracts.facts import write_fact
+    from bench.prereg import EXPLORATORY_ALLOCATION
+
+    def named(payload=None, rel=None):
+        rel = rel or str(write_fact("exploratory", "allocation", payload, root=repo).relative_to(repo))
+        config = {**CONFIG, "arms": {**CONFIG["arms"], "B5": {**CONFIG["arms"]["B5"], "exploratory_allocation": rel}}}
+        (repo / "config.yaml").write_text(yaml.safe_dump(config))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", f"the exploratory allocation: {rel}")
+        return rel, config
+    rel, _ = named(rel="judgments/exploratory/e/allocation.json")
+    with pytest.raises(PreregError, match=rf"arms.B5.exploratory_allocation \({rel}\): .*no allocation fact there"):
         register("config.yaml", root=repo)
-    (repo / rel).parent.mkdir(parents=True)
-    (repo / rel).write_text("{}\n")
-    with pytest.raises(PreregError, match="uncommitted|not tracked"):
+    on = {"centroids": "c", "adapters": "a"}  # arms.B5's, by their addresses (judgments/J5/c/..., judgments/S5/a/...)
+    for payload, reason in (({**on, "allocation": {}}, "allocates {}"),
+                            ({**on, "allocation": {**EXPLORATORY_ALLOCATION, "c1": "cheap_alt"}}, "allocates"),
+                            ({**on, "allocation": {"c0": "slm"}}, "allocates"),
+                            ({**on, "centroids": "other", "allocation": EXPLORATORY_ALLOCATION}, "other centroids or adapters"),
+                            ({**on, "adapters": "other", "allocation": EXPLORATORY_ALLOCATION}, "other centroids or adapters")):
+        named(payload)
+        with pytest.raises(PreregError, match=reason):
+            register("config.yaml", root=repo)
+    assert not (repo / "prereg" / "manifest.json").exists()
+    rel, config = named({**on, "allocation": EXPLORATORY_ALLOCATION})
+    git(repo, "rm", "-q", "--cached", "--", rel)
+    git(repo, "commit", "-q", "-m", "the exploratory allocation, untracked")
+    (repo / ".gitignore").write_text("judgments/exploratory/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignored")
+    with pytest.raises(PreregError, match=rf"{rel}, a fact the configuration names, is not tracked"):
         register("config.yaml", root=repo)
+    (repo / ".gitignore").unlink()
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "the exploratory allocation, tracked")
     assert register("config.yaml", root=repo)["new"] is True
