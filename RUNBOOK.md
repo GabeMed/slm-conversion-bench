@@ -431,14 +431,20 @@ At the end of the day, check the console's Pods page, and the network volume if 
 
 - **Step 3 (smoke) and step 4 (pilot):** `up` each candidate before `bench replay ... --engine slm:<name>`.
   `bench preflight`'s `engines` check calls every candidate, so both must be up while it runs.
-- **Step 9:** P-4's reference runs on a RunPod GPU, with the adapter uploaded from `train/adapters/` when it
-  is missing:
+- **Step 9:** P-4's reference runs in the serving pod, on its GPU, with the adapter uploaded from
+  `train/adapters/` when it is missing:
   ```sh
   bench train --cluster <the smallest> --on tinker
   bench serve --on runpod down --candidate <chosen> ; bench serve --on runpod up --candidate <chosen>
   bench preflight --parity <the smallest> --on runpod
   ```
-  A server serves the adapters that exist when it starts, so restart it after training. `training_time`
+  A server serves the adapters that exist when it starts, so restart it after training. No other pod is
+  created. The preflight first collects the served generations through the tunnel. Then it stops vLLM in the
+  pod and waits until the GPU's memory is free (`nvidia-smi`). It runs the HF-PEFT reference there, in the
+  train lock's environment, which the first run installs onto the volume. Finally it starts the server again
+  as `up` does and checks its health through the tunnel, even when the reference failed. The server is down
+  for the reference and the warm-up after it, so run nothing else against it meanwhile. If the server does
+  not come back, the error says so and the pod is still billing: `down`, then `up`. `training_time`
   reads the Tinker manifests (`runpod.train_backend: tinker`; `--train-backend` overrides).
 - **Step 10:** `bench loadtest ... --on runpod`. AIPerf runs in a CPU pod in the server's data center. That
   pod reaches vLLM through its own SSH tunnel with a key pair made for this load test, which the server

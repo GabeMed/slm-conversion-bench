@@ -672,41 +672,105 @@ def parity_job(reference):
     return run
 
 
-def test_p4_on_runpod_runs_the_reference_on_a_gpu_pod(runpod_repo):
-    from bench.preflight import PASS, lora_parity
+def serving_for_p4(world, monkeypatch):
+    """The candidate served on its pod (`up`), the server stop recorded and the tunnel faked; the served
+    generations come from a FakeVLLM. The order of the jobs and of the served requests goes in world.events."""
+    from runpod_apps import parity
     from test_preflight import FakeVLLM, _reference, _sha, cards, gen
 
-    world = runpod_repo
-    rserve.setup(world.provider())
+    ready_volume(world)
+    served_now = rserve.up(world.provider(), TINY_NAME, tunnel=fake_tunnel(world))
     prompts = [json.loads(line)["prompt"] for line in (paths.ROOT / "train/datasets/c0.jsonl").read_text().splitlines()]
     server = FakeVLLM({TINY_NAME: [gen([10 + i, 20, 30]) for i in range(len(prompts))],
                        served("c0"): [gen([40 + i, 50, 60]) for i in range(len(prompts))]}, prompts, cards(_sha()))
-    reference, _ = _reference(prompts)
-    world.jobs["parity"] = parity_job(reference)
-    state = world.tmp / "volume" / "vllm-cache" / "bench-serving" / f"{TINY_NAME}.json"  # what the server recorded
-    state.parent.mkdir(parents=True)
-    state.write_text(json.dumps({"gpus": ["NVIDIA A100 80GB PCIe"], "versions": {"vllm": "0.30.0", "torch": "2.13.0",
-                                                                       "transformers": "5.18.0",
-                                                                       "flashinfer-python": "0.9.1"}}))
+    world.events = []
+    serve = world.jobs["serve"]
+
+    def stop(shell, name, command):
+        assert "nvidia-smi" in command and "$JOB serve" in command  # the server's processes, then its VRAM
+        world.events.append(("serve-stop", sum(1 for r in server.requests if r["body"])))
+        shell.local("/bench/jobs/serve.ready").unlink()
+        return 0
+
+    def restart(shell, name, command):
+        world.events.append(("serve", None))
+        return serve(shell, name, command)
+
+    world.jobs.update({"serve-stop": stop, "serve": restart})
+    monkeypatch.setattr(parity, "open_tunnel", fake_tunnel(world))
     world.config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
+    reference, _ = _reference(prompts)
+    return served_now, server, prompts, reference
+
+
+def test_p4_on_runpod_runs_the_reference_in_the_serving_pod_between_two_servers(runpod_repo, monkeypatch):
+    from bench.preflight import PASS, lora_parity
+    from runpod_apps import parity
+
+    world = runpod_repo
+    served_now, server, prompts, reference = serving_for_p4(world, monkeypatch)
+    world.jobs["parity"] = parity_job(reference)
+    returned = []
+    original = parity.peft_reference
+    monkeypatch.setattr(parity, "peft_reference", lambda *a: returned.append(original(*a)) or returned[-1])
     try:
         verdict = lora_parity(world.config, "c0", "runpod")
     finally:
         server.close()
     assert verdict["status"] == PASS and verdict["reference_on"] == "runpod" and verdict["reference_gpu_seconds"] == 31.5
-    assert verdict["reference_versions"]["peft"] == "0.21.1" and verdict["serving_versions"] == {"vllm": "0.30.0", "torch": "2.13.0", "transformers": "5.18.0", "flashinfer-python": "0.9.1"}
-    body, = world.fake.created("parity")
-    assert body["gpu"]["id"] == "NVIDIA A100 80GB PCIe" and body["image"] == "nvidia/cuda:13.0.3-devel-ubuntu24.04"
-    assert not world.fake.pods  # terminated
-    command = next(c for s in world.shells.values() for c in s.commands if c.startswith("# bench-job parity"))
+    assert verdict["reference_versions"]["peft"] == "0.21.1" and verdict["serving_versions"]["vllm"] == "0.30.0"
+    shell = world.shells[served_now["pod_id"]]
+    assert shell.started == ["serve", "serve-stop", "parity", "serve"]  # stopped, the reference, served again
+    assert world.events[0] == ("serve-stop", 2 * len(prompts))  # every served generation came before the stop
+    assert not world.fake.created("parity") and len(world.fake.created("serve")) == 1  # no pod of its own
+    assert list(world.fake.pods) == [served_now["pod_id"]] and not world.fake.terminated[1:]  # the server lives on
+    assert returned[0]["pod_id"] == served_now["pod_id"] and returned[0]["usd_per_hour"] == 1.09
+    assert (shell.pod_dir / "bench/jobs/serve.ready").is_file()  # warm again
+    assert State().serving(TINY_NAME)["observed_gpus"] == ["NVIDIA A100 80GB PCIe"]
+    assert world.tunnels[-1] == ("203.0.113.7", 40001, world.port)  # health checked through the tunnel
+    command = next(c for c in shell.commands if c.startswith("# bench-job parity"))
     assert "env/train/requirements.lock" in command and "/opt/bench-train" in command  # the train lock's environment
 
 
-def test_p4_on_runpod_fails_with_its_reason_when_runpod_refuses(runpod_repo):
+def _p4_args():
+    manifest = json.loads((paths.ROOT / "train/adapters/c0/manifest.json").read_text())
+    return manifest["adapter_sha256"], manifest["base"], manifest["chat_template_kwargs"]
+
+
+def test_p4_on_runpod_serves_again_when_the_reference_fails(runpod_repo, monkeypatch):
+    from runpod_apps import parity
+
+    world = runpod_repo
+    served_now, server, prompts, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["parity"] = lambda shell, name, command: 1
+    sha, base, kwargs = _p4_args()
+    with pytest.raises(RunPodError, match="job parity exited with 1"):
+        parity.peft_reference(world.config, "c0", sha, base, prompts, kwargs, 8, 5)
+    shell = world.shells[served_now["pod_id"]]
+    assert shell.started == ["serve", "serve-stop", "parity", "serve"]
+    assert (shell.pod_dir / "bench/jobs/serve.ready").is_file() and list(world.fake.pods) == [served_now["pod_id"]]
+
+
+def test_p4_on_runpod_says_so_when_the_server_does_not_come_back(runpod_repo, monkeypatch):
+    from runpod_apps import parity
+
+    world = runpod_repo
+    served_now, server, prompts, reference = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["parity"] = parity_job(reference)
+    world.jobs["serve"] = lambda shell, name, command: 1  # vLLM exits before it is warm
+    sha, base, kwargs = _p4_args()
+    with pytest.raises(RunPodError, match=f"(?s)the server of {TINY_NAME} did not come back.*job serve exited.*still billing"):
+        parity.peft_reference(world.config, "c0", sha, base, prompts, kwargs, 8, 5)
+
+
+def test_p4_on_runpod_needs_a_serving_pod_and_fails_with_that_reason(runpod_repo):
     from bench.preflight import FAIL, check_lora_parity
     from test_preflight import FakeVLLM, _sha, cards, gen
 
-    world = runpod_repo  # no volume yet: setup was not run
+    world = runpod_repo
+    rserve.setup(world.provider())  # a volume, but no `up`
     prompts = [json.loads(line)["prompt"] for line in (paths.ROOT / "train/datasets/c0.jsonl").read_text().splitlines()]
     server = FakeVLLM({name: [gen([1, 2]) for _ in prompts] for name in (TINY_NAME, served("c0"))}, prompts, cards(_sha()))
     world.config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = server.base_url
@@ -714,7 +778,8 @@ def test_p4_on_runpod_fails_with_its_reason_when_runpod_refuses(runpod_repo):
         failed = check_lora_parity(world.config, "c0", "runpod")
     finally:
         server.close()
-    assert failed["status"] == FAIL and "RunPodError: no network volume yet" in failed["evidence"]["error"]
+    assert failed["status"] == FAIL and f"RunPodError: no running pod serves {TINY_NAME}" in failed["evidence"]["error"]
+    assert not world.fake.created()  # no pod made for it
 
 
 def test_p4_on_runpod_never_imports_modal(monkeypatch):

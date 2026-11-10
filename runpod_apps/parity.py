@@ -1,46 +1,124 @@
-"""P-4's HF-PEFT reference on a RunPod GPU (`bench preflight --parity <cluster> --on runpod`), as
+"""P-4's HF-PEFT reference on RunPod (`bench preflight --parity <cluster> --on runpod`), as
 modal_apps/train.py:peft_reference runs it on Modal: bench.preflight.peft_generate, in the training environment
-(env/train/requirements.lock), on train.gpu, with the adapter read from the volume at its sha256 (uploaded from
+(env/train/requirements.lock), with the adapter read from the volume at its sha256 (uploaded from
 train/adapters/<cluster>/adapter when missing, and checked byte for byte in the pod).
 
-The image: runpod.images.train when set (a custom image built from env/runpod/Dockerfile.train, the lock
-already installed), otherwise runpod.images.gpu_job with the lock installed at the first job onto the volume
-(a venv keyed by the lock's sha256, reused by every later job and by the load client)."""
+It runs in the pod that serves the adapter's SLM, never in a pod of its own (A100s are scarce, and a fresh pod
+may never answer SSH): bench.preflight.lora_parity has already collected the served generations when it is
+called, so the server is stopped, its VRAM waited free, the reference run on the same GPU, and the server
+started again as `bench serve --on runpod up` starts it, whether the reference succeeded or not.
+
+The serving image (runpod.images.serve) has no training environment: the train lock is installed at the first
+job onto the volume (a venv keyed by the lock's sha256, Python managed by uv, reused by every later job and by
+the load client), or taken from /opt/bench-train when the image has it. The reference runs the code the
+serving pod was given at `up`."""
 import json
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
-from runpod_apps import pods as rp
-from runpod_apps import settings as rs
 from bench import paths
+from runpod_apps import pods as rp
+from runpod_apps import serve as rserve
 from runpod_apps.settings import VOLUME, WORK, RunPodError
+from runpod_apps.ssh import Remote, open_tunnel
+
+STOP_TIMEOUT_S = 300   # the server's processes gone and its VRAM free (SIGKILL past half of it)
+FREE_MIB = 1024        # what the GPU may still hold, in MiB, once the server is gone
+
+# Stops `runpod_apps.job serve` (its process group: the job's shell, the job, vLLM and vLLM's workers), then
+# waits until nothing of it runs and the GPU holds at most FREE_MIB. /proc only (the image may lack procps);
+# the patterns are split so that they never match this script's own command line.
+STOP_SERVE = r"""set -u
+T={timeout}; FREE={free}; JOB="runpod_apps.job"; VLLM="vllm"
+command -v nvidia-smi >/dev/null 2>&1 || {{ echo "no nvidia-smi: the GPU's memory cannot be seen"; exit 3; }}
+rm -f {work}/jobs/serve.ready
+server() {{
+  for d in /proc/[0-9]*; do
+    p=${{d#/proc/}}; [ "$p" = "$$" ] && continue
+    c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+    case "$c" in *"$JOB serve"*|*"$VLLM serve"*) echo "$p";; esac
+  done
+}}
+pgid() {{ local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1; s=${{s##*\) }}; set -- $s; echo "$3"; }}
+mine=$(pgid $$)
+groups=""
+for p in $(server); do
+  g=$(pgid "$p") || continue
+  [ "$g" -gt 1 ] && [ "$g" != "$mine" ] && groups="$groups $g"
+done
+for g in $groups; do kill -TERM -- "-$g" 2>/dev/null || true; done
+kill -TERM $(server) 2>/dev/null || true
+start=$(date +%s); killed=""
+while :; do
+  alive=$(server | tr '\n' ' ')
+  used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{{s+=$1}} END {{print s+0}}')
+  if [ -z "${{alive// /}}" ] && [ "$used" -le "$FREE" ]; then echo "server stopped; GPU memory used: $used MiB"; exit 0; fi
+  waited=$(( $(date +%s) - start ))
+  if [ "$waited" -ge $(( T / 2 )) ] && [ -z "$killed" ]; then
+    killed=1
+    echo "still running after $waited s (processes: ${{alive:-none}}; $used MiB used): SIGKILL"
+    for g in $groups; do kill -KILL -- "-$g" 2>/dev/null || true; done
+    kill -KILL $alive $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null) 2>/dev/null || true
+  fi
+  if [ "$waited" -ge "$T" ]; then echo "the GPU is not free after $T s (processes: ${{alive:-none}}; $used MiB used)"; exit 1; fi
+  sleep 2
+done
+"""
 
 
 def peft_reference(config: Dict[str, Any], cluster: str, adapter_sha256: str, base: Dict[str, str],
                    prompts: List[List[dict]], template_kwargs: Dict[str, Any], max_new_tokens: int,
                    top_k: int) -> Dict[str, Any]:
     provider = rp.make_provider(config)
-    settings = provider.settings
-    image = settings["images"].get("train") or settings["images"]["gpu_job"]
-    timeout = config["preflight"]["lora_parity"]["reference_timeout_s"]
-    gpu = rs.gpu_id(settings, config["train"]["gpu"])
-    env = {"HF_TOKEN": rs.secret_ref(settings["secrets"]["hf_token"])} if settings["secrets"].get("hf_token") else {}
-    with provider.job_pod("parity", image, gpu=gpu, env=env) as ready:
-        remote = ready["remote"]
-        provider.ensure_adapters(remote, [{"cluster": cluster, "sha256": adapter_sha256}])
-        provider.clear_stale_train_lock(remote)
-        slm = json.loads((paths.ROOT / "train" / "adapters" / cluster / "manifest.json").read_text())["slm"]
-        spec = {"adapter_sha256": adapter_sha256, "base": base, "prompts": prompts, "template_kwargs": template_kwargs,
-                "max_new_tokens": max_new_tokens, "top_k": top_k,
-                "serving_state": f"{VOLUME}/vllm-cache/bench-serving/{slm}.json"}  # the server compared with
-        with tempfile.TemporaryDirectory() as work:
-            local = Path(work) / "parity.json"
-            local.write_text(json.dumps(spec))
-            remote.shell.put(local, f"{WORK}/parity.json")
+    slm = json.loads((paths.ROOT / "train" / "adapters" / cluster / "manifest.json").read_text())["slm"]
+    record = provider.state.serving(slm)
+    pod = provider.api.get_pod(record["id"]) if record else None
+    if pod is None or pod.get("status") != "RUNNING":
+        raise RunPodError(f"no running pod serves {slm} (P-4's reference runs in it, after the served generations): "
+                          f"bench serve --on runpod up --candidate {slm}")
+    remote = provider.remote(pod)
+    provider.ensure_adapters(remote, [{"cluster": cluster, "sha256": adapter_sha256}])
+    provider.clear_stale_train_lock(remote)
+    spec = {"adapter_sha256": adapter_sha256, "base": base, "prompts": prompts, "template_kwargs": template_kwargs,
+            "max_new_tokens": max_new_tokens, "top_k": top_k,
+            "serving_state": f"{VOLUME}/vllm-cache/bench-serving/{slm}.json"}  # the server compared with
+    with tempfile.TemporaryDirectory() as work:
+        local = Path(work) / "parity.json"
+        local.write_text(json.dumps(spec))
+        remote.shell.put(local, f"{WORK}/parity.json")
+    remote.check(f"rm -f {WORK}/parity.out.json", "clearing the last reference")
+    try:
+        remote.start_job("serve-stop", STOP_SERVE.format(timeout=STOP_TIMEOUT_S, free=FREE_MIB, work=WORK))
+        remote.wait_job("serve-stop", STOP_TIMEOUT_S + 120, provider.poll_s)
+        timeout = config["preflight"]["lora_parity"]["reference_timeout_s"]
         remote.start_job("parity", rp.TRAIN_ENV + f'"$PY" -m runpod_apps.job parity {WORK}/parity.json {WORK}/parity.out.json')
         remote.wait_job("parity", timeout + 3600, provider.poll_s)  # the first job also builds the environment
         out = remote.read(f"{WORK}/parity.out.json")
         if out is None:
             raise RunPodError("the P-4 reference ended without its output")
-        return {**json.loads(out), "pod_id": ready["pod"]["id"], "usd_per_hour": ready["pod"].get("cost")}
+    finally:
+        restart_serving(provider, remote, slm, pod["id"])
+    return {**json.loads(out), "pod_id": pod["id"], "usd_per_hour": pod.get("cost")}
+
+
+def restart_serving(provider: rp.Provider, remote: Remote, slm: str, pod_id: str) -> None:
+    """The server started again as `up` starts it (its plan, already in the pod, written anew only if gone),
+    warm, and healthy through the local tunnel."""
+    from modal_apps import common
+
+    config = provider.config
+    try:
+        if not remote.exists(rserve.PLAN):
+            plan = common.serve_plan(config, slm)
+            remote.check(f"echo {rp.quote(json.dumps(plan))} > {rserve.PLAN}", "writing the plan")
+        remote.check(f"rm -f {WORK}/jobs/serve.ready", "clearing the server's ready marker")
+        remote.start_job("serve", f"python3 -m runpod_apps.job serve {rserve.PLAN}")
+        remote.wait_job("serve", config["serving"]["startup_timeout_s"] + config["serving"]["warmup_timeout_s"],
+                        provider.poll_s, ready=f"{WORK}/jobs/serve.ready")
+        observed = json.loads(remote.read(f"{VOLUME}/vllm-cache/bench-serving/{slm}.json") or "{}")
+        provider.state.set_pod(pod_id, observed_gpus=observed.get("gpus"))
+        rserve.ensure_tunnel(provider, slm, open_tunnel)
+    except Exception as e:
+        raise RunPodError(f"the server of {slm} did not come back after P-4's reference ({type(e).__name__}: {e}); "
+                          f"pod {pod_id} is still billing: bench serve --on runpod down --candidate {slm}, then up") from e
