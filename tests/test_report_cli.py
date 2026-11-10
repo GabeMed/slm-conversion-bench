@@ -3,14 +3,13 @@ refusal is exit code 2 with its reason, and a library bug is not swallowed as on
 import pytest
 
 from bench import cli
-from fixtures.fake import call, repo, write_run
+from fixtures.fake import aiperf_level, call, repo, write_run
 
 
 def loadtest(run_id, concurrency, p95_ms, rps):
     write_run(run_id, {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
                        "prefix_cache": True, "sweep_id": "sweep-1", "composition": {"source": {"call_sites": {"select_tables": 1}}}},
-              files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95_ms},
-                                                    "request_throughput": {"unit": "requests/sec", "avg": rps}}})
+              files=aiperf_level(concurrency, p95_ms, rps))
     return run_id
 
 
@@ -21,7 +20,7 @@ def test_a_judgment_runs_and_prints_its_result(tmp_path, monkeypatch, capsys):
                                                             "gpu_prices_sensitivity": None}})
     runs = [loadtest("lt-1", 1, 300, 2.0), loadtest("lt-8", 8, 800, 9.0)]
     write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib"},
-              [call("agent-B0-calib", "1", "select_tables", latency_ms=500)])
+              [call("agent-B0-calib", "1", "select_tables", latency_ms=500)], config={})
     judge = ["judge", "j8", "--loadtest", runs[0], "--loadtest", runs[1], "--config", str(config_path)]
     with pytest.raises(SystemExit):  # the SLO rule needs the pilot's B0 run: there is no J8 without --slo-from
         cli.main(judge)

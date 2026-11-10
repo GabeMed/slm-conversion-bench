@@ -16,7 +16,12 @@ with `taskset` to 4 cores the server is not pinned to (the server's threads that
 kept off them, so the two are disjoint), against vLLM on the loopback (no tunnel, no key).
 Its record (cores, nproc, the cgroup's CPU limits) goes in every level's manifest (`client`), with a CPU
 sample of AIPerf and of the server over the level (`cpu_sample`) and the loopback's calibration
-(`loopback_calibration`, the tunnel's counterpart); see runpod_apps/colocated.py.
+(`loopback_calibration`, the tunnel's counterpart); see runpod_apps/colocated.py. The serving pod's code is
+made this checkout's first (Provider.sync_code: uploaded unless its sha256 is already the pod's), so a pod
+brought `up` by older code never runs the load test with it.
+
+Every level records the code that ran AIPerf (`pod_code_sha256`, and `pod_code_commit`/`pod_code_dirty`, the
+checkout it was uploaded from); the manifest's own `commit` is this checkout's.
 """
 import io
 import json
@@ -36,7 +41,6 @@ from runpod_apps.ssh import TUNNEL_OPTIONS
 
 CLIENT_KEY = "/root/.ssh/bench_client"
 CLIENTS = ("pod", "colocated")  # `bench loadtest --client`: the default, and the opt-in fallback
-COLOCATED_NEEDS = "runpod_apps/colocated.py"  # a serving pod brought `up` by code without it gets this checkout's
 LOOPBACK = f"http://127.0.0.1:{rp.POD_PORT}"
 
 
@@ -89,6 +93,7 @@ def connect(config: Dict[str, Any], candidate: str, client_kind: str = "pod") ->
                 calibration = calibrate(config, candidate, port, server, client, provider.poll_s)
                 flavor = provider.settings["cpu_flavor"]
                 session.update(provider=provider, client=client, levels=0, calibration=calibration,
+                               code={**ready["code"], "uploaded": True},
                                calibration_key="tunnel_calibration", pin="", rewrite={},
                                record={"kind": "pod", "description": f"cpu pod {flavor} {vcpus}",
                                        "pod_id": ready["pod"]["id"], "flavor": flavor, "vcpus": vcpus,
@@ -105,8 +110,7 @@ def connect(config: Dict[str, Any], candidate: str, client_kind: str = "pod") ->
         cores chosen (runpod_apps.job cpuset), every AIPerf job pinned to them with taskset, against vLLM on
         the loopback; the calibration on the loopback, unpinned (as the server's own side of the tunnel's is)
         and pinned."""
-        if not server.exists(f"{WORK}/code/{COLOCATED_NEEDS}"):  # a pod brought `up` by code without this client
-            provider.upload_code(server)
+        code = provider.sync_code(server)  # a pod brought `up` by other code (older, or without this client) gets this
         provider.clear_stale_train_lock(server)
         server.start_job("train-env", rp.TRAIN_ENV + '"$PY" -c "import aiperf"')
         server.wait_job("train-env", 3600, provider.poll_s)
@@ -129,7 +133,7 @@ def connect(config: Dict[str, Any], candidate: str, client_kind: str = "pod") ->
                   "server_affinity_after": probe.get("server_affinity_after"),
                   "nproc": probe.get("nproc"), "allowed_cpus": probe.get("allowed_cpus"),
                   "allowed_count": probe.get("allowed_count"), "cgroup": probe.get("cgroup")}
-        session.update(provider=provider, client=server, levels=0, calibration=calibration,
+        session.update(provider=provider, client=server, levels=0, calibration=calibration, code=code,
                        calibration_key="loopback_calibration", pin=pin, record=record,
                        rewrite={"base_url": f"{LOOPBACK}/v1", "url": LOOPBACK, "cpu_sample": {"cores": cores}})
         try:
@@ -163,7 +167,8 @@ def connect(config: Dict[str, Any], candidate: str, client_kind: str = "pod") ->
         result = json.loads(files.pop("result.json"))
         state = client.read(f"{VOLUME}/vllm-cache/bench-serving/{candidate}.json")
         return {**result, "server_state": json.loads(state) if state else None, "files": files,
-                session["calibration_key"]: session["calibration"], "client": session["record"]}
+                session["calibration_key"]: session["calibration"], "client": session["record"],
+                "pod_code": session["code"]}
 
     return types.SimpleNamespace(app=types.SimpleNamespace(run=run), run_aiperf=types.SimpleNamespace(remote=run_aiperf))
 

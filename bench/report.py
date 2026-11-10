@@ -68,34 +68,49 @@ Every verdict holds for this workload only: the map opens with a scope line, and
 - A5: format validity per call site (SPEC §6.3), B4 against B0 (T11): refutes only if B4 is more than
   `thresholds.format_tolerance_pp` below B0 on a call site with at least `allocation.min_calls`
   invocations in both arms; confirms otherwise; call sites with fewer are listed and do not count.
-- A6, V3/A2, AV2: cost per correct query. "The best arm without training" is the cheapest among B0,
-  B1 and B2 that is non-inferior to B0 (B0 always is). An SLM arm's cost falls as its utilization
-  rises, so each claim is decided where it is hardest to win (T10): it confirms only if it holds at
-  the lowest configured utilization (`cost.utilizations`), refutes only if it fails at the highest,
-  and is otherwise utilization-dependent, with the tipping point u* at which the SLM arm breaks
-  even (interpolated: its cost is A + G/u, fitted through the lowest and the highest utilization).
-  - V3 (T9): the ratio of cost per correct query, the best arm without training ÷ the cheapest of the
-    SLM arms (B4, B5 with SLM calls) that are non-inferior to B0, with a 95% interval from a paired
+- A6, V3/A2, AV2: cost per correct query, against two comparators among B0, B1 and B2: (i) the cheapest
+  non-inferior to B0 (B0 always is) and (ii) the cheapest not shown worse than B0 (non-inferior or
+  inconclusive), never dearer than (i). A claim confirms only if it holds against both, refutes only if it
+  fails against both, and is inconclusive when they disagree; both are printed. V3 and AV2 are judged on
+  the all-SLM arm B4 alone: a hybrid's savings can come from its LLM engines. An SLM arm's cost falls as
+  its utilization rises, so each claim is decided where it is hardest to win (T10): it confirms only if it
+  holds at the lowest configured utilization (`cost.utilizations`), refutes only if it fails at the
+  highest, and is otherwise utilization-dependent, with the tipping point u* at which the SLM arm breaks
+  even (interpolated: its cost is A + G/u, fitted through the lowest and the highest utilization), read
+  against comparator (ii).
+  - V3 (T9): the ratio of cost per correct query, each comparator ÷ B4, with a 95% interval from a paired
     bootstrap over the questions (`seeds.bootstrap`, `stats.n_boot`; each question's cost is J3's
-    `by_question`). Each resample takes the cheapest arm of each set again, so the interval covers the
-    choice of the arms too (which arms are non-inferior is J4's verdict, and stays). At one utilization it reads "meets the paper's bar" if the lower bound is at or
-    above `claims.v3_min_ratio`, "cheaper, below the bar" if the lower bound is above 1, "refutes V3"
-    if the upper bound is at or below 1, and inconclusive otherwise. Over the two ends: the reading
-    at the lowest utilization when it is cheaper there (the bar is met only if met there); refutes when
-    not cheaper at the highest; utilization-dependent, with u*, when not cheaper at the lowest and
-    cheaper at the highest; and when an end's interval holds 1 and neither rule decides, inconclusive,
-    saying how each end reads (no u* is printed for an end the data does not decide). Not testable
-    when every SLM arm is worse than B0: there is no arm to price.
-  - A6: confirms if B5 is cheaper than the best arm without training at the lowest utilization and
-    non-inferior to B0; refutes if B5 is worse than B0, or not cheaper at the highest. Not testable
-    when B5's allocation gave no cluster to an SLM, or its execution made no SLM call.
-  - AV2 wins (the paper is refuted) only if B1 costs no more than the cheaper SLM arm at the highest
-    utilization too; it does not refute if the SLM arm is cheaper at the lowest. The fixed cost and
-    its payback (SPEC §6.6) are not a J1–J8 output and are left out, which the row says.
+    `by_question`). Each resample takes the cheapest arm of the comparator's set again, so the interval
+    covers the choice of the arm too (which arms are in each set is J4's verdict, and stays). At one
+    utilization a comparator's ratio reads "meets the paper's bar" if the lower bound is at or above
+    `claims.v3_min_ratio`, "cheaper, below the bar" if the lower bound is above 1, "refutes V3" if the
+    upper bound is at or below 1, and inconclusive otherwise; the two comparators' readings combine as
+    above. Over the two ends: the reading at the lowest utilization when it is cheaper there (the bar is
+    met only if met there); refutes when not cheaper at the highest; utilization-dependent, with u*, when
+    not cheaper at the lowest and cheaper at the highest; and when an end's interval holds 1 and neither
+    rule decides, inconclusive, saying how each end reads (no u* is printed for an end the data does not
+    decide). Not testable when B4 is not non-inferior to B0 (no all-SLM arm is): B4's ratio is then
+    printed as descriptive.
+  - A6: B5, the hybrid, with its share of calls, tokens and cost per engine. Confirms if B5 is cheaper
+    than both comparators at the lowest utilization and non-inferior to B0; refutes if B5 is worse than
+    B0, or not cheaper than either at the highest. Its cost part compares point estimates (no interval),
+    and says so. Not testable when B5's allocation gave no cluster to an SLM, or its execution made no
+    SLM call.
+  - AV2 wins (the paper is refuted) only if B1 costs no more than B4 at the highest utilization too; it
+    does not refute if B4 is cheaper at the lowest. B5 is printed beside it and decides nothing. A
+    comparison of point costs (no interval), which the verdict says. Marginal cost only: training cost
+    and hours are reported descriptively (A2/A3).
+- A5 compares observed rates (no interval), which its verdict says. J4's interval is two-sided 90%: its
+  bounds are the one-sided 95% bounds the outcome reads. No correction for multiplicity: the map says how
+  many claims it decides.
 - **The provider's price and Modal's** (SPEC §6.6): where J3 priced the SLM arms at the sensitivity price too
   (J8's `modal.gpu_prices_sensitivity`, `standard@<u>@sensitivity`), a V3 or A6 confirmation must also hold
   at that price: a V3 that meets the bar at the provider's price and is only cheaper at Modal's reads
   "cheaper"; one that does not hold at Modal's at all, and an A6 not cheaper there, is inconclusive, saying so.
+  Without the sensitivity price there is no confirmation: the V3 or A6 is inconclusive ("no data at Modal's").
+- **V3's interval is conditional on J8**: the paired bootstrap resamples the questions; the SLM's cost per
+  request (J8's sustained throughput, from one load test per engine) enters as a fixed number, so the interval
+  carries the questions' uncertainty and not the load test's.
 - **An SLM engine outside its latency limit** (J8's `outside_slo`) has no cost: the arms whose calls ran on
   it have none, and their cost rows carry the label "no cost within the latency limit"; a cost claim with no
   SLM arm priced for that reason is "not testable at the API's latency", naming the engines.
@@ -123,9 +138,9 @@ from bench.contracts.concordance import GOLD_CALL_SITES as GOLD_SITES
 from bench.contracts.facts import read_fact
 from bench.contracts.router import ARM_FACTS
 from bench.provenance import scrub
-from bench.judge import j4
-from bench.judge.base import (JudgmentError, canonical, manifest, n_boot, read_result, reference, result_reference,
-                              run_dir)
+from bench.judge import j3, j4
+from bench.judge.base import (JudgmentError, calls_of, canonical, manifest, n_boot, read_result, reference,
+                              result_reference, run_dir)
 
 UNTRAINED = ("B0", "B1", "B2-production", "B2-cheap")
 TRAINED = ("B4", "B5")
@@ -310,6 +325,15 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
                                 f"the plan's b5_exploratory, never an arm with a verdict")
         if arm in NEEDS:
             facts_of(arm, entry, NEEDS[arm])
+    # every arm the test ran is in the report: a comparator left out would change which arm is cheapest
+    named = {J1_KEY[a]: a for a in ARMS}
+    plan_arm = lambda r: named.get((r["arm"], r["engine"] if r["arm"] == "B2" else None))  # noqa: E731
+    left_out = sorted(f"{plan_arm(r) or r['arm']} ({r['run_id']})" for r in registry["runs"]
+                      if r["status"] == "done" and r["type"] == "agent" and r["prereg_hash"] == in_force
+                      and not r.get("allocation") and plan_arm(r) not in arms)  # an exploratory run: below
+    if left_out:
+        raise JudgmentError(f"the plan leaves out arms with a done test run under the registration in force: "
+                            f"{', '.join(left_out)}; every arm the test ran is in the report")
     if exploratory is not None:
         entry, exploratory["several_runs"] = bind("B5 (exploratory allocation)", exploratory["run_id"])
         if entry.get("allocation") != "exploratory":
@@ -373,6 +397,30 @@ def training_datasets(plan: Dict[str, Any], sources: Dict[str, Any]) -> Optional
     return {"rows": {c: v["n"] for c, v in found["clusters"].items()},
             "rule_of_thumb": found.get("rule_of_thumb"),
             "rule_of_thumb_reading": {c: v.get("rule_of_thumb") for c, v in found["clusters"].items()}, "rules": rules}
+
+
+def engine_shares(run_id: str, j8_path: Optional[str], prices: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """B5's share of calls, tokens (input + output) and cost per model role (the SLM, the production LLM, the
+    cheap alternative), priced by J3's own functions on the execution's calls and the plan's J8, at standard
+    prices: {role: {"calls": f, "tokens": f, "cost": {"": f} or {"20%": f, ...}}}. A hybrid's savings can come
+    from any of its engines; this says from which."""
+    calls = calls_of(run_id)
+    slm, _ = j3.slm_cost_per_request(j8_path, calls, "B5")
+
+    def cost(priced: Dict[str, Any]) -> Dict[str, Optional[float]]:
+        return {("" if k == "standard" else k.split("@", 1)[1]): v for k, v in j3.scenarios(priced).items()
+                if (k == "standard" or k.startswith("standard@")) and not k.endswith(SENSITIVITY)}
+    whole = j3.price_calls(calls, prices, slm)
+    whole_tokens = whole["tokens"]["input"] + whole["tokens"]["output"]
+    whole_cost = cost(whole)
+    out = {}
+    for role in sorted({c["model_role"] for c in calls}):
+        part = j3.price_calls([c for c in calls if c["model_role"] == role], prices, slm)
+        out[role] = {"calls": part["calls"] / whole["calls"],
+                     "tokens": (part["tokens"]["input"] + part["tokens"]["output"]) / whole_tokens if whole_tokens else None,
+                     "cost": {u: (c / whole_cost[u] if c is not None and whole_cost.get(u) else None)
+                              for u, c in cost(part).items()}}
+    return out
 
 
 REQUIRED_COST = ("upper_bound", "cache_not_reported", "lower_bound", "failed_unbilled", "prices", "by_question")
@@ -510,6 +558,8 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
                      "failed_unbilled": cost["failed_unbilled"], "prices_as_of": cost["prices_as_of"],
                      "prices_sha256": cost["prices"]["sha256"],
                      "calls": cost["calls"], "replaceable_fraction": cost["replaceable_fraction"]}
+        if arm == "B5":  # a hybrid: where its calls, tokens and cost went (A6 prints it)
+            arms[arm]["engine_shares"] = engine_shares(j3["reads"]["run"]["run_id"], plan.get("j8"), config["prices"])
         sources["arms"][arm] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
     tables = {(a["prices_as_of"], a["prices_sha256"]) for a in arms.values()}
     if len(tables) > 1:
@@ -683,21 +733,27 @@ def b5_without_slm(data) -> bool:
     return bool(j7) and "slm" not in j7["allocation"].values()
 
 
-def best_untrained(data) -> Tuple[Optional[str], Optional[float]]:
-    """The cheapest per correct query among the arms without training that are non-inferior to B0 (B0
-    always is; B2 counts, design §6.3 T9). None of them has SLM calls, so the cost is one number. An
-    arm with several completed test runs is never left out here: `cost_verdict` gives every verdict
-    over this set no verdict, naming it."""
-    options = [(c, a) for a in present(data, UNTRAINED) if _passes_v1(data, a)
+def _not_worse(data, arm) -> bool:
+    """Not shown worse than B0: non-inferior or inconclusive (B0 itself is)."""
+    if arm == "B0":
+        return "B0" in data["arms"]
+    return outcome(data["tests"].get(f"B0|{arm}")) not in ("worse", "no data")
+
+
+def best_untrained(data, admits: Callable = _passes_v1) -> Tuple[Optional[str], Optional[float]]:
+    """The cheapest per correct query among the arms without training that `admits` lets in (B2 counts,
+    design §6.3 T9). The cost claims read two comparators, and confirm only if they hold against both:
+    (i) the cheapest non-inferior to B0 (`_passes_v1`, the default; B0 always is), and (ii) the cheapest
+    not shown worse than B0 (`_not_worse`), so that an arm left merely inconclusive is not dropped in
+    favour of a dearer one. (ii) admits every arm (i) does, so it is never dearer. None of them has SLM
+    calls, so the cost is one number. An arm with several completed test runs is never left out here:
+    `cost_verdict` gives every verdict over this set no verdict, naming it."""
+    options = [(c, a) for a in present(data, UNTRAINED) if admits(data, a)
                for c in [_cost(data, a, "")] if c is not None]
     return (min(options)[1], min(options)[0]) if options else (None, None)
 
 
-def best_slm(data, u, sensitivity: bool = False) -> Tuple[Optional[str], Optional[float]]:
-    """The cheapest per correct query, at utilization u, among the SLM arms that are non-inferior to B0."""
-    options = [(c, a) for a in slm_arms(data) if _passes_v1(data, a) for c in [_cost(data, a, u, sensitivity)]
-               if c is not None]
-    return (min(options)[1], min(options)[0]) if options else (None, None)
+PURE_SLM = "B4"  # the all-SLM arm: V3 and AV2 are judged on it alone; B5, a hybrid, is A6's
 
 
 def cost_ratio_ci(bases: Dict[str, Dict[str, Tuple[float, bool]]], slms: Dict[str, Dict[str, Tuple[float, bool]]],
@@ -732,22 +788,25 @@ def cost_ratio_ci(bases: Dict[str, Dict[str, Tuple[float, bool]]], slms: Dict[st
 def cost_ratios(data, by_question: Dict[str, Dict[str, Dict[str, float]]], correct: Dict[str, Dict[str, bool]],
                 seed: int, n_boot: int, sensitivity: bool = False) -> Dict[str, Dict[str, Any]]:
     """Per configured utilization, V3's cost ratio with its interval: the best arm without training ÷ the
-    cheapest SLM arm (T9), each read from J3's `by_question` and J1's answers. `base` and `slm` name the
-    arms the full sample chose; the interval is over every arm non-inferior to B0, chosen again in each
-    resample."""
+    all-SLM arm B4 (T9), each read from J3's `by_question` and J1's answers, against each comparator:
+    (i) the cheapest arm non-inferior to B0 (the top level) and (ii) the cheapest not shown worse than B0
+    (`not_worse`). `base` names the arm the full sample chose; the interval is over every arm of the
+    comparator's set, chosen again in each resample. B4's ratio is computed whatever its V1 outcome: when
+    B4 is not non-inferior, V3 is not testable and the ratio is printed as descriptive."""
     out = {}
     base, _ = best_untrained(data)
+    base_ii, _ = best_untrained(data, _not_worse)
     pairs = lambda arm, scenario: {q: (by_question[arm][q][scenario], correct[arm][q]) for q in correct[arm]}  # noqa: E731
     untrained = {a: pairs(a, "standard") for a in present(data, UNTRAINED) if _passes_v1(data, a)}
+    untrained_ii = {a: pairs(a, "standard") for a in present(data, UNTRAINED) if _not_worse(data, a)}
     suffix = SENSITIVITY if sensitivity else ""
     for u in data["utilizations"]:
-        slm, _ = best_slm(data, u, sensitivity)
-        if base is None or slm is None:
+        # no cost here (an engine outside its latency limit, or no sensitivity price): no ratio
+        if base is None or PURE_SLM not in slm_arms(data) or _cost(data, PURE_SLM, u, sensitivity) is None:
             continue
-        # an arm without a cost here (an engine outside its latency limit, or no sensitivity price) is left out
-        trained = {a: pairs(a, f"standard@{u}{suffix}") for a in slm_arms(data) if _passes_v1(data, a)
-                   and _cost(data, a, u, sensitivity) is not None}
-        out[u] = {"base": base, "slm": slm, **cost_ratio_ci(untrained, trained, seed, n_boot)}
+        trained = {PURE_SLM: pairs(PURE_SLM, f"standard@{u}{suffix}")}
+        out[u] = {"base": base, "slm": PURE_SLM, **cost_ratio_ci(untrained, trained, seed, n_boot),
+                  "not_worse": {"base": base_ii, **cost_ratio_ci(untrained_ii, trained, seed, n_boot)}}
     return out
 
 
@@ -760,6 +819,20 @@ def cost_reading(found: Dict[str, Any], bar: float) -> str:
     if found["ci_low"] > 1:
         return "cheaper"
     return "refutes" if found["ci_high"] <= 1 else "inconclusive"
+
+
+STRENGTH = ("refutes", "inconclusive", "cheaper", "meets")  # how far a reading goes for the SLM arm
+
+
+def both_readings(found: Dict[str, Any], bar: float) -> str:
+    """How a cost ratio reads against both comparators (`cost_ratios`): a confirmation ("meets",
+    "cheaper") holds only as far as it holds against both, and a refutation only if both refute; any
+    other pair is inconclusive."""
+    first, second = cost_reading(found, bar), cost_reading(found["not_worse"], bar)
+    weaker = min(first, second, key=STRENGTH.index)
+    if weaker == "refutes":
+        return "refutes" if first == second else "inconclusive"
+    return weaker
 
 
 def break_even(costs: Dict[str, Optional[float]], target: float) -> Optional[float]:
@@ -860,7 +933,18 @@ def v1_verdict(t4) -> str:
 
 
 def _ci(t) -> str:
-    return f"CI [{_pp(t['ci_low'])}, {_pp(t.get('ci_high'))}]"
+    """J4's interval: two-sided 90%, i.e. the one-sided 95% lower bound (non-inferior above −Δ) and the
+    one-sided 95% upper bound (worse below −Δ)."""
+    return f"90% CI [{_pp(t['ci_low'])}, {_pp(t.get('ci_high'))}]"
+
+
+POINT = " (by point estimate, no interval)"  # a reading that compares point values: descriptive of this sample
+MULTIPLICITY = ("Multiplicity: the map decides six claims (V1, Appendix B, A5, A6, V3, AV2), each at its own level "
+                "(J4 at one-sided 95%, the cost ratio at two-sided 95%; A5, AV2 and A6's cost part by point estimate), "
+                "with no correction for multiplicity; the K4 per-call-site tests below are read beside them, also "
+                "uncorrected, and a conjunctive reading (A5 on every call site) requires each of its parts.")
+POWER_HEADER = ("planned power (at a true difference of 0; d from the pilot: B3 × B0, and for repair J6's zero-shot "
+                "candidate × the teacher)")
 
 
 def _against_b0(arm: str, t) -> str:
@@ -933,9 +1017,10 @@ def _a6(data, t5) -> Dict[str, str]:
         return {**row, "result": "—", "verdict": NO_SLM}
     low, high = _bracket(data)
     arms = ["B5"] + present(data, UNTRAINED)
-    base, base_cost = best_untrained(data)
+    base, base_cost = best_untrained(data, _not_worse)  # (ii): a confirmation must beat it
+    dear, dear_cost = best_untrained(data)  # (i), never cheaper than (ii): a refutation must fail against it too
     at_low, at_high = _cost(data, "B5", low), _cost(data, "B5", high)
-    quality = f"{_against_b0('B5', t5)}, {outcome(t5)}"
+    quality = f"{_against_b0('B5', t5)}, {outcome(t5)}" + _engine_shares(data, low, high)
     latency = outside_slo(data, present(data, ["B5"]))
     if latency:
         return {**row, "result": quality, "verdict": cost_verdict(data, latency, arms)}
@@ -944,61 +1029,98 @@ def _a6(data, t5) -> Dict[str, str]:
     if "B5" not in slm_arms(data):  # allocated to an SLM, and no call reached one: an LLM system all the same
         return {**row, "result": quality, "verdict": several_of(data, arms) or "not testable (B5's execution made no SLM call)"}
     result = (f"{quality}; cost per correct query: B5 {_usd(at_low)} at {low} utilization and {_usd(at_high)} at {high}, "
-              f"against {_usd(base_cost)} of the best arm without training ({base})")
+              f"against {_comparators(dear, dear_cost, base, base_cost)}")
     if outcome(t5) == "worse":  # decided on quality: no cost, and so no cost label, changes it
         return {**row, "result": result, "verdict": several_of(data, arms) or "refutes (B5 is worse than B0)"}
-    if at_high >= base_cost:
-        verdict = f"refutes (B5 is not cheaper even at {high} utilization)"
+    if at_high >= dear_cost:
+        verdict = f"refutes (B5 is not cheaper even at {high} utilization){POINT}"
+    elif at_high >= base_cost or base_cost <= at_low < dear_cost:  # the two comparators read B5 differently
+        verdict = (f"inconclusive (the comparators disagree: B5 at {_usd(at_low)} ({low}) and {_usd(at_high)} ({high}) "
+                   f"against {dear} at {_usd(dear_cost)} and {base} at {_usd(base_cost)}){POINT}")
     elif at_low >= base_cost:
         verdict = f"utilization-dependent ({tipping_point(data, ['B5'], base_cost)})"
     elif _passes_v1(data, "B5"):
         at_low_modal = _cost(data, "B5", low, sensitivity=True)
-        if data["arms"]["B5"].get("cost_per_correct_sensitivity") and (at_low_modal is None or at_low_modal >= base_cost):
+        if at_low_modal is None or at_low_modal >= base_cost:  # no Modal price is no confirmation (SPEC §6.6)
             verdict = (f"inconclusive (B5 is cheaper at {low} utilization at the provider's price, not at Modal's: "
                        f"{_usd(at_low_modal)})")
         else:
             verdict = f"confirms (B5 is cheaper even at {low} utilization, and non-inferior to B0)"
     else:
         verdict = _inconclusive(t5)
+    if verdict.startswith(("utilization-dependent", "confirms")):
+        verdict += POINT  # the cost part compares point estimates
     return {**row, "result": result, "verdict": cost_verdict(data, verdict, arms)}
 
 
+def _comparators(dear: Optional[str], dear_cost: Optional[float], base: Optional[str], base_cost: Optional[float]) -> str:
+    """The two comparators of a cost claim, by name and cost: one when they are the same arm."""
+    if dear == base:
+        return f"{_usd(base_cost)} of the best arm without training ({base}: the cheapest non-inferior to B0 and not worse)"
+    return (f"{_usd(dear_cost)} of the cheapest arm without training non-inferior to B0 ({dear}) and {_usd(base_cost)} "
+            f"of the cheapest not worse than B0 ({base})")
+
+
+def _engine_shares(data, low: str, high: str) -> str:
+    """B5's share of calls, tokens and cost per engine role: whether a hybrid's savings come from the SLM."""
+    shares = (data["arms"].get("B5") or {}).get("engine_shares")
+    if not shares:
+        return ""
+    def cost(found):  # noqa: E306
+        c = found["cost"]
+        return _pct(c[""]) if "" in c else f"{_pct(c.get(low))} at {low}, {_pct(c.get(high))} at {high}"
+    return "; B5's share per engine (calls, tokens, cost): " + "; ".join(
+        f"{role} {_pct(found['calls'])}, {_pct(found['tokens'])}, {cost(found)}" for role, found in sorted(shares.items()))
+
+
+def _ratio_text(u: str, found: Dict[str, Any], said: Dict[str, str], bar: float) -> str:
+    """One utilization's cost ratio against both comparators, each with its 95% interval and reading."""
+    one = lambda f: (f"{f['ratio']:.1f}× (95% CI [{f['ci_low']:.1f}, {f['ci_high']:.1f}]) {f['base']} ÷ {found['slm']}, "  # noqa: E731
+                     f"{said[cost_reading(f, bar)]}")
+    second = found["not_worse"]
+    if second["base"] == found["base"]:
+        return f"{u}: {one(found)} (the cheapest non-inferior and the cheapest not worse are the same arm)"
+    return f"{u}: against the cheapest non-inferior {one(found)}; against the cheapest not worse {one(second)}"
+
+
 def _v3(data, t4, t5) -> Dict[str, str]:
+    """V3 is judged on the all-SLM arm B4 alone: a hybrid's savings can come from its LLM engines (B5 is
+    A6's). Against both comparators (`cost_ratios`, `both_readings`). When B4 is not non-inferior to B0,
+    not testable, and B4's ratio is printed as descriptive (cheaper and worse stays visible)."""
     bar = data["v3_min_ratio"]
-    row = {"claim": "V3 / A2 (this workload): a 7B SLM is 10–30× cheaper (p.4)", "power": _power(t4, t5)}
+    row = {"claim": "V3 / A2 (this workload): a 7B SLM is 10–30× cheaper (p.4)", "power": _power(t4)}
     said = {"meets": f"meets the paper's {bar:g}× bar", "cheaper": f"cheaper, below the {bar:g}× bar",
             "refutes": "refutes V3", "inconclusive": "inconclusive"}
     end = {"meets": f"meets the {bar:g}× bar", "cheaper": "cheaper", "refutes": "not cheaper",
            "inconclusive": "the interval holds 1"}  # how one end of the bracket reads inside a verdict
     low, high = _bracket(data)
-    arms = present(data, TRAINED) + present(data, UNTRAINED)
-    base, base_cost = best_untrained(data)
+    arms = present(data, [PURE_SLM]) + present(data, UNTRAINED)
+    base, base_cost = best_untrained(data, _not_worse)  # the stricter comparator: the tipping point is read against it
     ratios = data.get("cost_ratios") or {}
-    readings = {u: cost_reading(found, bar) for u, found in ratios.items()}
-    result = " · ".join(f"{u}: {found['ratio']:.1f}× (95% CI [{found['ci_low']:.1f}, {found['ci_high']:.1f}]) "
-                        f"{found['base']} ÷ {found['slm']}, {said[readings[u]]}"
-                        for u, found in sorted(ratios.items(), key=lambda kv: _fraction(kv[0])))
-    result = (f"cost per correct query, the best arm without training ÷ the cheapest SLM arm non-inferior to B0, per "
-              f"utilization: {result or '—'}")
-    passing = [a for a in slm_arms(data) if _passes_v1(data, a)]
-    modal = {u: cost_reading(found, bar) for u, found in (data.get("cost_ratios_sensitivity") or {}).items()}
-    latency = outside_slo(data, slm_arms(data))
+    readings = {u: both_readings(found, bar) for u, found in ratios.items()}
+    result = " · ".join(_ratio_text(u, found, said, bar) for u, found in sorted(ratios.items(), key=lambda kv: _fraction(kv[0])))
+    pure = [a for a in slm_arms(data) if a == PURE_SLM]
+    passing = [a for a in pure if _passes_v1(data, a)]
+    result = (f"cost per correct query, the best arm without training ÷ B4 (the all-SLM arm), per utilization"
+              f"{'' if passing or not result else ', descriptive (B4 is not non-inferior to B0)'}: {result or '—'}"
+              f" (the interval is over the questions, conditional on J8's measured throughput)")
+    modal = {u: both_readings(found, bar) for u, found in (data.get("cost_ratios_sensitivity") or {}).items()}
+    latency = outside_slo(data, pure)
     if latency and base is not None:
         return {**row, "result": result, "verdict": cost_verdict(data, latency, arms)}
-    if base is not None and slm_arms(data) and all(outcome(data["tests"].get(f"B0|{a}")) == "worse" for a in slm_arms(data)):
+    if base is not None and pure and not passing:
         # decided on quality: no cost, and so no cost label, changes it
-        return {**row, "result": result, "verdict": several_of(data, arms) or "not testable (every SLM arm is worse than B0)"}
-    if base is None or not slm_arms(data):
+        return {**row, "result": result, "verdict": several_of(data, arms) or
+                f"not testable (no all-SLM arm is non-inferior to B0: B4 is {outcome(t4)})"}
+    if base is None or not passing:
         verdict = "no data"
-    elif not passing:
-        verdict = f"{_inconclusive(t4, t5)} (no SLM arm is non-inferior to B0)"
     elif low not in ratios or high not in ratios:
         verdict = "no data"
-    elif readings[low] in ("meets", "cheaper") and modal and modal.get(low) not in ("meets", "cheaper"):
-        # a confirmation holds at Modal's price too, or it is none (SPEC §6.6)
+    elif readings[low] in ("meets", "cheaper") and modal.get(low) not in ("meets", "cheaper"):
+        # a confirmation holds at Modal's price too, or it is none (SPEC §6.6): without that price, none
         verdict = (f"inconclusive (at {low} utilization: {end[readings[low]]} at the provider's price, "
                    f"{end.get(modal.get(low), 'no data')} at Modal's)")
-    elif readings[low] == "meets" and (not modal or modal[low] == "meets"):
+    elif readings[low] == "meets" and modal[low] == "meets":
         verdict = f"meets the paper's {bar:g}× bar (even at {low} utilization)"
     elif readings[low] in ("meets", "cheaper"):
         verdict = f"cheaper even at {low} utilization, below the {bar:g}× bar there" + (
@@ -1013,22 +1135,30 @@ def _v3(data, t4, t5) -> Dict[str, str]:
 
 
 def _av2(data) -> Dict[str, str]:
-    row = {"claim": "AV2 / CA3–CA4 (this workload): centralized scale can be cheaper (p.7–8)", "power": "—",
-           "result": "B1 vs the cheaper of B4, B5, marginal cost only: the fixed cost and its payback (SPEC §6.6) are not a J1–J8 output"}
+    """AV2 (T10) on the all-SLM arm B4 alone, like V3: B1 wins only if it costs no more than B4 at the highest
+    utilization too. B5, a hybrid, is printed beside it and decides nothing. Marginal cost only: the
+    training cost and hours are reported descriptively (A2/A3 row). A comparison of point costs."""
+    row = {"claim": "AV2 / CA3–CA4 (this workload): centralized scale can be cheaper (p.7–8)", "power": "—"}
     low, high = _bracket(data)
-    arms = ["B1"] + present(data, TRAINED)
+    arms = ["B1"] + present(data, [PURE_SLM])
     b1 = _cost(data, "B1", "")
-    cheapest = lambda u: min((c for a in slm_arms(data) for c in [_cost(data, a, u)] if c is not None), default=None)  # noqa: E731
-    at_low, at_high = cheapest(low), cheapest(high)
+    slm = PURE_SLM in slm_arms(data)
+    at_low, at_high = (_cost(data, PURE_SLM, low), _cost(data, PURE_SLM, high)) if slm else (None, None)
+    priced = (f"B1 {_usd(b1)} against B4 (the all-SLM arm) {_usd(at_low)} at {low} utilization and {_usd(at_high)} at "
+              f"{high}, per correct query" if None not in (b1, at_low, at_high) else "B1 against B4 (the all-SLM arm): —")
+    result = f"{priced}; marginal cost only (training cost and hours are reported descriptively)"
+    if "B5" in slm_arms(data):
+        result += (f"; B5, a hybrid, beside it, deciding nothing: {_usd(_cost(data, 'B5', low))} at {low}, "
+                   f"{_usd(_cost(data, 'B5', high))} at {high}")
     if b1 is None or at_low is None or at_high is None:
         verdict = "no data"
     elif b1 <= at_high:
-        verdict = f"refutes the paper (AV2 wins: B1 costs no more even at {high} utilization)"
+        verdict = f"refutes the paper (AV2 wins: B1 costs no more even at {high} utilization){POINT}"
     elif at_low < b1:
-        verdict = f"does not refute (the SLM arm is cheaper even at {low} utilization)"
+        verdict = f"does not refute (the SLM arm is cheaper even at {low} utilization){POINT}"
     else:
-        verdict = f"utilization-dependent ({tipping_point(data, slm_arms(data), b1)})"
-    return {**row, "verdict": cost_verdict(data, verdict, arms)}
+        verdict = f"utilization-dependent ({tipping_point(data, [PURE_SLM], b1)}){POINT}"
+    return {**row, "result": result, "verdict": cost_verdict(data, verdict, arms)}
 
 
 def _a5(data) -> Dict[str, str]:
@@ -1052,7 +1182,7 @@ def _a5(data) -> Dict[str, str]:
         result += f"; not counted (fewer than {floor} invocations in an arm): " + ", ".join(shown(s) for s in thin)
     if not counted:
         return {**row, "result": result, "verdict": f"no data (no call site with {floor} invocations in both arms)"}
-    return {**row, "result": result, "verdict": several_of(data, ["B4", "B0"]) or ("refutes" if below else "confirms")}
+    return {**row, "result": result, "verdict": several_of(data, ["B4", "B0"]) or (("refutes" if below else "confirms") + POINT)}
 
 
 def _appendix_b(data) -> Dict[str, str]:
@@ -1369,13 +1499,17 @@ def render(data: Dict[str, Any]) -> str:
             rows.append([arm, a["n"], _pct(a["ex"])] + [_pct(a["by_difficulty"].get(d)) for d in difficulties]
                         + [costs, usage])
     parts += [_table(["arm", "n", "EX"] + [f"EX {d}" for d in difficulties] + ["cost per correct query (standard prices)", "usage"], rows), ""]
-    parts += ["## The SPEC §5 map", "", data["scope"], "", _table(["claim", "result", "verdict", "planned power"],
-                                               [[r["claim"], r["result"], r["verdict"], r["power"]] for r in data["map"]]), ""]
+    parts += ["## The SPEC §5 map", "", data["scope"], "", _table(["claim", "result", "verdict", POWER_HEADER],
+                                               [[r["claim"], r["result"], r["verdict"], r["power"]] for r in data["map"]]), "",
+              MULTIPLICITY, ""]
     tests = data.get("tests") or {}
     comparisons = [(key, tests[key]) for key in (f"{r}|{c}" for c, r in PAIRS) if key in tests]
     if comparisons:
         parts += ["## J4 comparisons: non-inferiority at the fixed margin", "",
-                  _table(["pair", "n", "diff (Δ)", "CI", "outcome", "planned power"],
+                  "Non-inferior when the one-sided 95% lower bound of the difference is above −Δ; worse when the "
+                  "one-sided 95% upper bound is below −Δ; inconclusive otherwise. The two bounds together are a "
+                  "two-sided 90% interval.", "",
+                  _table(["pair", "n", "diff (Δ)", "two-sided 90% CI (one-sided 95% bounds)", "outcome", POWER_HEADER],
                          [[f"{key.split('|')[1]} against {key.split('|')[0]}", t["n"],
                            f"{_pp(t['diff'])} (Δ {_margin(t['delta'])})", _ci(t), outcome(t), _power(t)]
                           for key, t in comparisons]), ""]
@@ -1429,7 +1563,8 @@ def render(data: Dict[str, Any]) -> str:
     elif data["gold_tests"]:
         by_design = repair_calls_below_floor(data)
         parts += [k4, "",
-                  _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "CI", "outcome", "planned power"],
+                  _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "two-sided 90% CI (one-sided 95% bounds)",
+                          "outcome", "planned power (at a true difference of 0, at the pilot d)"],
                          [[site, t["n"], "—" if t.get("d_pilot") is None else f"{t['d_pilot']:.3f}", _margin(t["delta"]),
                            _pp(t["diff"]), _ci(t), outcome(t),
                            "—" if site == "revise" and by_design is not None else _power(t)]

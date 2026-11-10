@@ -86,6 +86,38 @@ def write_run(run_id: str, manifest: Dict[str, Any], calls: Optional[List[dict]]
     return run_dir
 
 
+# ---------------------------------------------------------------- load tests (J8)
+
+def aiperf_records(concurrency, p95_ms, rps, per_slot=100):
+    """AIPerf per-request records whose steady state has exactly this p95 and throughput: `concurrency` slots
+    from t = 0, each `per_slot` requests, one in ten at `p95_ms` (so the interpolated p95 is it) and the rest
+    shorter, with equal idle gaps between them, so the slots' common length is per_slot × concurrency / rps."""
+    total_ms = per_slot * concurrency * 1000 / rps
+    slow = per_slot // 10
+    short = min(p95_ms, (total_ms - slow * p95_ms) / (per_slot - slow))
+    assert 0 < short <= p95_ms, "no such level: lower the throughput"
+    gap = (total_ms - slow * p95_ms - (per_slot - slow) * short) / (per_slot - 1)
+    rows, n = [], 0
+    for slot in range(concurrency):
+        t = 0.0
+        for i in range(per_slot):
+            latency = p95_ms if i % 10 == 0 else short
+            rows.append({"metadata": {"session_num": n, "request_start_ns": round(t * 1e6),
+                                      "request_end_ns": round((t + latency) * 1e6), "benchmark_phase": "profiling",
+                                      "was_cancelled": False}})
+            t += latency + gap
+            n += 1
+    return rows
+
+
+def aiperf_level(concurrency: int, p95_ms: float, rps: float) -> Dict[str, Any]:
+    """A load level's AIPerf files, as J8 reads them: the export (its aggregates and status) and the per-request
+    records, whose steady state has this p95 and throughput."""
+    return {"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95_ms},
+                                           "request_throughput": {"unit": "requests/sec", "avg": rps},
+                                           "error_summary": [], "was_cancelled": False, "is_complete": True},
+            "profile_export.jsonl": aiperf_records(concurrency, p95_ms, rps)}
+
 # ---------------------------------------------------------------- embeddings
 
 DIMENSION = 64

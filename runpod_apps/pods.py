@@ -13,6 +13,7 @@ The pods run the code of this checkout, uploaded at start (bench/, modal_apps/, 
 import gzip
 import hashlib
 import io
+import json
 import shlex
 import tarfile
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from bench import paths
+from bench.provenance import git_state
 from runpod_apps import settings as rs
 from runpod_apps.settings import VOLUME, WORK, RunPodError
 from runpod_apps.ssh import Remote, Shell, SshShell
@@ -177,6 +179,16 @@ def code_archive() -> bytes:
     return buffer.getvalue()
 
 
+CODE_RECORD = f"{WORK}/code.json"  # the uploaded code's record (code_record), written once it is unpacked
+
+
+def code_record(archive: bytes) -> Dict[str, Any]:
+    """What identifies the code a pod runs: the archive's sha256, and the commit of the checkout it came from
+    with whether that checkout differed from it (`dirty`: the sha256, not the commit, then names the code)."""
+    state = git_state(REPO)
+    return {"sha256": hashlib.sha256(archive).hexdigest(), "commit": state["commit"] or None, "dirty": state["dirty"]}
+
+
 def ssh_endpoint(pod: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The pod's direct SSH (public IP and the port mapped to 22), once it has one."""
     direct = (pod.get("ssh") or {}).get("direct")
@@ -283,17 +295,37 @@ class Provider:
 
     def upload_code(self, remote: Remote) -> str:
         """This checkout's code into /bench/code; the archive's sha256."""
+        return self.put_code(remote, code_archive())["sha256"]
+
+    def put_code(self, remote: Remote, archive: bytes) -> Dict[str, Any]:
+        """`archive` into /bench/code, and its record (code_record) beside it once it is unpacked (removed
+        first, so a failed unpacking leaves none); the record."""
         import tempfile
 
-        archive = code_archive()
+        record = code_record(archive)
         with tempfile.TemporaryDirectory() as work:
             local = Path(work) / "code.tar.gz"
             local.write_bytes(archive)
             remote.check(f"mkdir -p {WORK}", "mkdir")
             remote.shell.put(local, f"{WORK}/code.tar.gz")
-        remote.check(f"rm -rf {WORK}/code && mkdir -p {WORK}/code && tar -xzf {WORK}/code.tar.gz -C {WORK}/code",
-                     "unpacking the code")
-        return hashlib.sha256(archive).hexdigest()
+        remote.check(f"rm -rf {WORK}/code {CODE_RECORD} && mkdir -p {WORK}/code && "
+                     f"tar -xzf {WORK}/code.tar.gz -C {WORK}/code && "
+                     f"echo {quote(json.dumps(record, sort_keys=True))} > {CODE_RECORD}", "unpacking the code")
+        return record
+
+    def sync_code(self, remote: Remote) -> Dict[str, Any]:
+        """The pod's code made this checkout's: uploaded unless the record the last upload left on the pod
+        names this archive's sha256 (a pod holding older code, or code from before the record, gets it). The
+        record of the code the pod now runs (its sha256, and the commit and dirtiness of the checkout it was
+        uploaded from), with `uploaded`."""
+        archive = code_archive()
+        try:
+            held = json.loads(remote.read(CODE_RECORD) or "null")
+        except ValueError:
+            held = None
+        if isinstance(held, dict) and held.get("sha256") == hashlib.sha256(archive).hexdigest():
+            return {**held, "uploaded": False}
+        return {**self.put_code(remote, archive), "uploaded": True}
 
     def ensure_adapters(self, remote: Remote, adapters: List[Dict[str, Any]]) -> List[str]:
         """Each adapter (train/adapters/<cluster>/adapter) at /runpod-volume/adapters/<sha256>, uploaded when
@@ -339,7 +371,8 @@ class Provider:
         pod = self.create(role, body, candidate)
         try:
             ready = self.wait_ssh(pod["id"], self.config["serving"]["startup_timeout_s"])
-            ready["code_sha256"] = self.upload_code(ready["remote"])
+            ready["code"] = self.put_code(ready["remote"], code_archive())
+            ready["code_sha256"] = ready["code"]["sha256"]
             yield ready
         finally:
             self.terminate(pod["id"])

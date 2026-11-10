@@ -3,6 +3,7 @@ terminate, volumes, the catalog's choice of data center, retries and errors), th
 the serving pod (`bench serve --on runpod up`), the load test and P-4's reference on pods, and the config
 patch, with every pod's shell run on this machine (tests/fixtures/fake_runpod.py). No network."""
 import copy
+import hashlib
 import importlib.util
 import json
 import re
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # runpod_apps/ 
 
 from bench import cli, paths  # noqa: E402
 from bench.contracts import facts  # noqa: E402
+from bench.provenance import git_state  # noqa: E402
 from fixtures.fake_runpod import FakeRunPod, LocalShell  # noqa: E402
 from modal_apps import common  # noqa: E402
 from runpod_apps import api as rapi  # noqa: E402
@@ -648,7 +650,11 @@ def aiperf_job(world, monkeypatch):
         (run_dir / loadtest.EXPORT).write_text(json.dumps({
             "request_latency": {"unit": "ms", "avg": 400.0, "p95": 900.0},
             "request_throughput": {"unit": "requests/sec", "avg": 2.5},
-            "overall_usage_prompt_cache_read_pct": {"unit": "%", "avg": 61.0}}))
+            "overall_usage_prompt_cache_read_pct": {"unit": "%", "avg": 61.0},
+            "error_summary": [], "was_cancelled": False, "is_complete": True}))
+        from fixtures.fake import aiperf_records  # the per-request records J8 reads its steady state from
+        concurrency = yaml.safe_load((run_dir / "aiperf.yaml").read_text())["benchmark"]["phases"]["concurrency"]
+        (run_dir / "profile_export.jsonl").write_text("".join(json.dumps(r) + "\n" for r in aiperf_records(concurrency, 900.0, 2.5)))
         return 0
 
     def run(shell, name, command):
@@ -702,6 +708,9 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
         assert m["client"]["kind"] == "pod" and m["client"]["description"] == f"cpu pod cpu5c {world.config['loadtest']['client']['cpu']}"
         assert m["client"]["pod_id"] and m["client"]["pod_id"] != m["client"]["server_pod_id"]
         assert not {"cpu_sample", "loopback_calibration"} & set(m)
+        # the code the client pod ran AIPerf with: uploaded to it, this checkout's
+        assert m["pod_code_sha256"] == hashlib.sha256(rp.code_archive()).hexdigest() and m["pod_code_uploaded"] is True
+        assert m["pod_code_commit"] == git_state(rp.REPO)["commit"]
     direct, through = world.calibrated  # once per sweep: on the server against vLLM's port, then through the tunnel
     assert direct["base_url"] == "http://127.0.0.1:8000/v1" and through["base_url"] == f"http://127.0.0.1:{world.port}/v1"
     assert direct["concurrency"] == [1, max(world.config["loadtest"]["concurrency"])] and direct["model"] == TINY_NAME
@@ -728,7 +737,7 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     # the teacher on both of the sweep's call sites (its limit is the teacher reweighted to the sweep's mix)
     write_run(pilot, {"type": "agent", "arm": "B0", "split": "calib"},
               [call(pilot, str(q), site, latency_ms=3000, parsed={"tool": "x"} if site == "agent_ss" else None)
-               for q in (1, 2, 3) for site in ("select_tables", "agent_ss")])
+               for q in (1, 2, 3) for site in ("select_tables", "agent_ss")], config={})  # no cache break: no gate
     result = read_result(j8.run([d.name for d in run_dirs], patched, slo_from=pilot), "J8")["result"]
     assert result["gpu"] == "A100-80GB" and result["gpu_prices_as_of"] == "2026-11-09"
     assert result["price_per_hour"] == pytest.approx(0.000497 * 3600)
@@ -803,10 +812,13 @@ def test_the_colocated_client_runs_aiperf_on_the_serving_pod_pinned_on_the_loopb
     world = runpod_repo
     server = colocated_world(world, monkeypatch)
     (server.pod_dir / "bench/code/runpod_apps/colocated.py").unlink()  # a pod brought up before this client
+    (server.pod_dir / "bench/code.json").unlink()  # and before the code's record
     engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
     source = _source_run("agent-B4-calib-src", calls=[dict(c, engine=engine) for c in SOURCE])
     run_dirs = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1, 4], client="colocated")
     assert (server.pod_dir / "bench/code/runpod_apps/colocated.py").is_file()  # the code uploaded to it first
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    assert json.loads((server.pod_dir / "bench/code.json").read_text())["sha256"] == sha
     # no client pod, no tunnel, no key authorized: everything on the serving pod
     assert world.fake.created("loadtest") == [] and world.ssh == []
     assert [p["name"].rsplit("-", 1)[0] for p in world.fake.pods.values()] == [f"slm-bench-serve-{TINY_NAME}"]
@@ -841,6 +853,38 @@ def test_the_colocated_client_runs_aiperf_on_the_serving_pod_pinned_on_the_loopb
         # the criterion, per level (here no cgroup or server to read: no proof, so it fails; the sweep still ends)
         assert m["contention_check"]["pass"] is False and m["contention_check"]["thresholds"]["CONTAINER_SHARE_MAX"] == 0.75
         assert "from-the-secret" not in (d / "aiperf.log").read_text() and m["secrets_redacted_in"] == ["aiperf.log"]
+        assert m["pod_code_sha256"] == sha and m["pod_code_uploaded"] is True
+        assert m["pod_code_commit"] == git_state(rp.REPO)["commit"] and m["pod_code_dirty"] == git_state(rp.REPO)["dirty"]
+
+
+def test_the_colocated_client_replaces_older_code_on_the_serving_pod_and_keeps_the_same(runpod_repo, monkeypatch):
+    from bench import loadtest
+
+    world = runpod_repo
+    server = colocated_world(world, monkeypatch)
+    uploads = []
+    original = rp.Provider.put_code
+    monkeypatch.setattr(rp.Provider, "put_code", lambda self, remote, archive: uploads.append(1) or original(self, remote, archive))
+    stale = server.pod_dir / "bench/code/runpod_apps/colocated.py"
+    stale.write_text("# an older version of the client, without what this checkout has\n")
+    record = server.pod_dir / "bench/code.json"
+    old = {"sha256": "0" * 64, "commit": "1" * 40, "dirty": False}
+    record.write_text(json.dumps(old))  # the pod holds older code that has the client's file
+    engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
+    source = _source_run("agent-B4-calib-src", calls=[dict(c, engine=engine) for c in SOURCE])
+    first, = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1], client="colocated")
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    assert len(uploads) == 1 and stale.read_text() == (rp.REPO / "runpod_apps/colocated.py").read_text()
+    m = json.loads((first / "manifest.json").read_text())
+    assert m["pod_code_sha256"] == sha != old["sha256"] and m["pod_code_commit"] == git_state(rp.REPO)["commit"]
+    assert m["pod_code_uploaded"] is True
+    # the pod now holds this checkout's code: the next sweep uploads nothing and records the same code
+    held = json.loads(record.read_text())
+    record.write_text(json.dumps({**held, "commit": "2" * 40}))  # the same archive, uploaded from another commit
+    second, = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1], client="colocated")
+    assert len(uploads) == 1
+    m = json.loads((second / "manifest.json").read_text())
+    assert (m["pod_code_sha256"], m["pod_code_commit"], m["pod_code_uploaded"]) == (sha, "2" * 40, False)
 
 
 def test_the_colocated_client_needs_taskset_and_leaves_no_pod(runpod_repo, monkeypatch):
