@@ -52,7 +52,8 @@ def world(tmp_path, monkeypatch):
         "prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}},
         "allocation": {"min_calls": 5}, "stats": {"n_boot": 100},
         "cost": {"p95_slo_cap_ms": 1000, "slo_from": "agent-B0-calib"},  # this world's pilot, not the shipped one's
-        "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}}, "arms": NO_CENTROIDS})
+        "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}, "gpu_prices_sensitivity": None},
+        "arms": NO_CENTROIDS})
     # what J7 reads beside its arguments: the size of the test split and the registered pilot
     monkeypatch.setattr(data, "load_splits", lambda: {"test": [str(q) for q in range(500)]})
     monkeypatch.setattr(data, "pilot_ids", lambda config: QUESTIONS[:50])
