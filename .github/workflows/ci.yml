@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install -e ".[test]"
-      - run: pytest -q
+      - run: pytest -q -n auto
         env:
           PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
 
@@ -36,7 +36,7 @@ jobs:
           import llm.models, workflow.team_builder, runner.run_manager
           print("patched CHESS imports")
           PY
-      - run: pytest -q
+      - run: pytest -q -n auto
 
   analysis:
     # the judgments and the report (env/analysis: numpy, scipy, scikit-learn), never importing CHESS
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install -r env/analysis/requirements.txt -e ".[test]"
-      - run: pytest -q
+      - run: pytest -q -n auto
 
   train:
     # training, load test and preflight (env/train: TRL, PEFT, AIPerf, Modal SDK) on CPU torch; the
@@ -60,4 +60,4 @@ jobs:
       - run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -r "$RUNNER_TEMP/train-cpu.lock" -e ".[test]"
       # without the +cpu build pip would take the CUDA one and its libraries, unpinned: fail instead
       - run: python -c "import torch, sys; sys.exit(f'CUDA torch {torch.__version__}' if torch.version.cuda else 0)"
-      - run: pytest -q
+      - run: pytest -q -n auto

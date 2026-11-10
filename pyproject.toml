@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = ["pyyaml>=6", "jsonschema>=4.17"]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-xdist>=3.6"]  # -n auto: the suites in parallel (as CI runs them)
 
 [project.scripts]
 bench = "bench.cli:main"
