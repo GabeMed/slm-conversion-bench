@@ -12,7 +12,8 @@ RunPod secret, never sent from here. The training environment (AIPerf v0.13.0) i
 
 `--client colocated` (opt-in; the default is the CPU pod above) is the fallback for a data center with no CPU
 pod to give: AIPerf runs on the serving pod itself, in the same training environment from the volume, pinned
-with `taskset` to 4 cores the server is not pinned to, against vLLM on the loopback (no tunnel, no key).
+with `taskset` to 4 cores the server is not pinned to (the server's threads that could run on them are then
+kept off them, so the two are disjoint), against vLLM on the loopback (no tunnel, no key).
 Its record (cores, nproc, the cgroup's CPU limits) goes in every level's manifest (`client`), with a CPU
 sample of AIPerf and of the server over the level (`cpu_sample`) and the loopback's calibration
 (`loopback_calibration`, the tunnel's counterpart); see runpod_apps/colocated.py.
@@ -124,6 +125,8 @@ def connect(config: Dict[str, Any], candidate: str, client_kind: str = "pod") ->
                   "pinned_cores_list": format_cpu_list(cores), "cores_rule": probe["choice"]["rule"],
                   "server_pinned": probe["choice"]["server_pinned"], "server_cores": probe["choice"]["server_cores"],
                   "server_affinity": probe.get("server_affinity"), "server_pids": probe.get("server_pids"),
+                  "server_isolated": probe.get("server_isolated"),
+                  "server_affinity_after": probe.get("server_affinity_after"),
                   "nproc": probe.get("nproc"), "allowed_cpus": probe.get("allowed_cpus"),
                   "allowed_count": probe.get("allowed_count"), "cgroup": probe.get("cgroup")}
         session.update(provider=provider, client=server, levels=0, calibration=calibration,

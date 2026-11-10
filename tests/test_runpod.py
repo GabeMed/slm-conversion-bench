@@ -764,7 +764,9 @@ def cpuset_job(world, taskset="/usr/bin/taskset", allowed="0-251"):
             "cgroup": {"cpuset_effective": allowed, "cpu_max": "1600000 100000", "cpu_limit": 16.0},
             "server_pids": [101, 102], "server_affinity": [allowed],
             "choice": colocated.choose_cores(cpus, {101: cpus, 102: cpus}), "taskset": taskset,
-            "hostname": "a100-host", "pod_id": "serving"}))
+            "hostname": "a100-host", "pod_id": "serving",
+            "server_isolated": {"threads_changed": 40, "before": [allowed], "away_from": "248-251"},
+            "server_affinity_after": ["0-247"]}))
         return 0
     return run
 
@@ -829,12 +831,15 @@ def test_the_colocated_client_runs_aiperf_on_the_serving_pod_pinned_on_the_loopb
         assert client["pod_id"] == State().serving(TINY_NAME)["id"] and client["reaches_server"] == "loopback http://127.0.0.1:8000"
         assert client["pinned_cores"] == [248, 249, 250, 251] and client["server_pinned"] is False
         assert "not pinned" in client["cores_rule"] and client["nproc"] == 252
+        assert client["server_isolated"]["away_from"] == "248-251" and client["server_affinity_after"] == ["0-247"]
         assert client["cgroup"] == {"cpuset_effective": "0-251", "cpu_max": "1600000 100000", "cpu_limit": 16.0}
         assert m["loopback_calibration"]["overhead_ms"] == {"1": 0.0, str(max(world.config["loadtest"]["concurrency"])): 0.0}
         assert "tunnel_calibration" not in m
         sample = m["cpu_sample"]  # measured in the job around AIPerf's run (this machine: what it can read)
-        assert {"wall_s", "aiperf", "server", "container", "pinned_cores_host_busy", "method"} <= set(sample)
-        assert sample["aiperf"]["cpu_s"] >= 0
+        assert {"wall_s", "aiperf", "server", "container", "pinned_cores_host_busy", "method", "throttling"} <= set(sample)
+        assert sample["aiperf"]["cpu_s"] >= 0 and "contention_check" not in sample
+        # the criterion, per level (here no cgroup or server to read: no proof, so it fails; the sweep still ends)
+        assert m["contention_check"]["pass"] is False and m["contention_check"]["thresholds"]["CONTAINER_SHARE_MAX"] == 0.75
         assert "from-the-secret" not in (d / "aiperf.log").read_text() and m["secrets_redacted_in"] == ["aiperf.log"]
 
 

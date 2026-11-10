@@ -498,8 +498,12 @@ At the end of the day, check the console's Pods page, and the network volume if 
     CPUs), against vLLM on the loopback, with no tunnel and no key. Each manifest records the client
     (`client`: kind, pod, pinned cores, nproc, the cgroup's cpuset and CPU quota), the loopback's calibration
     (`loopback_calibration`), and per level the CPU AIPerf, the server and the container used over AIPerf's
-    run (`cpu_sample`). Every sweep of one candidate under one configuration must use the same client: a
-    sweep on the other kind is refused before it starts. The fallback is a deviation: it is recorded in
+    run (`cpu_sample`). The server's threads that could run on the 4 cores are kept off them first
+    (`client.server_isolated`). Each level records `contention_check` (see runpod_apps/colocated.py): it fails
+    if the cgroup throttled, the container used >= 75% of its vCPUs, the pinned cores were >= 90% busy, or the
+    server could run on them. A sweep with a failed level is still completed and written, and `bench loadtest`
+    exits 3, printing `CONTENTION: level N ... failed <which>`. Every sweep of one candidate under one
+    configuration must use the same client: a sweep on the other kind is refused before it starts. The fallback is a deviation: it is recorded in
     prereg/DEVIATIONS.md once approved, before the first sweep.
 - **The training environment's build lock.** The first job builds the environment on the volume. It holds a
   lock there with its pod id and a heartbeat. A lock without a heartbeat for `runpod.lock_stale_minutes`

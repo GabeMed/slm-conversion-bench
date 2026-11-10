@@ -112,6 +112,11 @@ def test_the_sample_is_each_sides_cpu_over_the_level(tmp_path, monkeypatch):
     assert out["server"] == {"pids": 3, "cpu_s": 10.0, "cores": 1.0}
     assert out["container"] == {"cpu_s": 41.0, "cores": 4.1}
     assert out["pinned_cores_host_busy"] == {"12": 0.3, "13": 0.0}
+    assert out["cpu_limit"] == 16.0 and out["throttling"]["before"] is None  # this fake cgroup shows no counters
+    assert out["server_affinity"] == {"50/50": "0-15", "51/51": "0-15", "52/52": "0-15"}
+    check = out["contention_check"]  # vLLM unpinned here: it may run on the client's cores
+    assert check["pass"] is False and [f[0] for f in check["failed"]] == ["a", "d"]
+    assert check["metrics"]["container_share"] == round(4.1 / 16, 3) and check["metrics"]["server_cores_used"] == 1.0
 
 
 def test_the_sample_says_none_for_what_the_machine_does_not_show(tmp_path):
@@ -121,6 +126,7 @@ def test_the_sample_says_none_for_what_the_machine_does_not_show(tmp_path):
     assert out["server"] == {"pids": 0, "cpu_s": None, "cores": None}
     assert out["container"] == {"cpu_s": None, "cores": None} and out["pinned_cores_host_busy"] is None
     assert out["aiperf"]["cpu_s"] >= 0
+    assert [f[0] for f in out["contention_check"]["failed"]] == ["a", "b", "c", "d"]  # unmeasured is no proof
 
 
 def test_the_aiperf_job_samples_only_when_asked(tmp_path, monkeypatch):
@@ -162,3 +168,96 @@ def test_run_level_returns_the_sample_taken_around_aiperf_alone(tmp_path, monkey
     out = loadtest.run_level(tmp_path, args, None, {}, None, "aiperf", measure=Measure)
     assert out["cpu_sample"] == {"aiperf": "sampled"} and order == ["warm-up", "enter", "aiperf", "exit"]
     assert "cpu_sample" not in loadtest.run_level(tmp_path, args, None, {}, None, "aiperf")
+
+
+def clean_sample(**changes):
+    """A level's sample with no contention: no throttling, 4 of 16 vCPUs, the pinned cores 30% busy, the server's
+    threads off them."""
+    sample = {"throttling": {"before": {"source": "/sys/fs/cgroup/cpu.stat", "nr_throttled": 7, "throttled_usec": 900.0},
+                             "after": {"source": "/sys/fs/cgroup/cpu.stat", "nr_throttled": 7, "throttled_usec": 900.0}},
+              "container": {"cpu_s": 40.0, "cores": 4.0}, "cpu_limit": 16.0, "cpu_limit_from": "quota",
+              "pinned_cores_host_busy": {"12": 0.3, "13": 0.3, "14": 0.3, "15": 0.3},
+              "server_affinity": {"50/50": list(range(12)), "52/53": list(range(12))},
+              "server": {"pids": 3, "cpu_s": 10.0, "cores": 1.0}}
+    sample.update(changes)
+    return sample
+
+
+CORES = [12, 13, 14, 15]
+
+
+def test_a_level_without_contention_passes_and_says_its_metrics_and_thresholds():
+    check = colocated.contention_check(clean_sample(), CORES)
+    assert check["pass"] is True and check["failed"] == []
+    assert check["metrics"]["container_share"] == 0.25 and check["metrics"]["pinned_cores_busy_mean"] == 0.3
+    assert check["metrics"]["server_pinned_core_overlap"] == [] and check["metrics"]["server_cores_used"] == 1.0
+    assert check["thresholds"]["CONTAINER_SHARE_MAX"] == 0.75 and check["thresholds"]["PINNED_BUSY_MAX"] == 0.90
+
+
+@pytest.mark.parametrize("changes, letter", [
+    ({"throttling": {"before": {"nr_throttled": 7, "throttled_usec": 900.0},
+                     "after": {"nr_throttled": 8, "throttled_usec": 900.0}}}, "a"),
+    ({"throttling": {"before": {"nr_throttled": 7, "throttled_usec": 900.0},
+                     "after": {"nr_throttled": 7, "throttled_usec": 1200.0}}}, "a"),
+    ({"container": {"cpu_s": 120.0, "cores": 12.0}}, "b"),  # exactly 75% of 16
+    ({"pinned_cores_host_busy": {"12": 0.95, "13": 0.9, "14": 0.85, "15": 0.9}}, "c"),  # 90% on average
+    ({"server_affinity": {"50/50": list(range(16))}}, "d"),
+    ({"server_affinity": {}}, "d"),
+])
+def test_each_contention_fails_the_level_by_its_letter(changes, letter):
+    check = colocated.contention_check(clean_sample(**changes), CORES)
+    assert check["pass"] is False and [f[0] for f in check["failed"]] == [letter]
+
+
+def test_throttling_is_read_from_cgroup_v2_or_v1(tmp_path):
+    v2 = tmp_path / "v2/fs/cgroup"
+    v2.mkdir(parents=True)
+    (v2 / "cpu.stat").write_text("usage_usec 5\nnr_periods 10\nnr_throttled 2\nthrottled_usec 300\n")
+    assert colocated.throttling(tmp_path / "v2") == {"source": "/sys/fs/cgroup/cpu.stat", "nr_throttled": 2,
+                                                     "throttled_usec": 300.0}
+    v1 = tmp_path / "v1/fs/cgroup/cpu,cpuacct"
+    v1.mkdir(parents=True)
+    (v1 / "cpu.stat").write_text("nr_periods 10\nnr_throttled 3\nthrottled_time 5000\n")
+    assert colocated.throttling(tmp_path / "v1")["throttled_usec"] == 5.0
+    assert colocated.throttling(tmp_path / "none") is None
+
+
+def test_the_server_is_kept_off_the_clients_cores_thread_by_thread(tmp_path, monkeypatch):
+    proc, sysfs = tmp_path / "proc", tmp_path / "sys"
+    fake_proc(proc, SERVER)
+    for pid, tid, cpus in ((52, 52, "0-15"), (52, 70, "0-15"), (51, 51, "0-11")):
+        task = proc / str(pid) / "task" / str(tid)
+        task.mkdir(parents=True)
+        (task / "status").write_text(f"Cpus_allowed_list:\t{cpus}\n")
+    fake_cgroup(sysfs)
+    monkeypatch.setattr(colocated, "own_affinity", lambda: list(range(16)))
+    calls = []
+    found = colocated.probe(proc, sysfs, isolate_server=True, setter=lambda tid, cpus: calls.append((tid, sorted(cpus))))
+    assert found["choice"]["cores"] == [12, 13, 14, 15]
+    assert calls == [(50, list(range(12))), (52, list(range(12))), (70, list(range(12)))]  # 51 already off them
+    assert found["server_isolated"] == {"threads_changed": 3, "before": ["0-15"], "away_from": "12-15"}
+    assert colocated.probe(proc, sysfs)["server_isolated"] is None  # only when asked (the job asks)
+
+
+def test_a_failed_level_is_reported_and_the_cli_exits_3_after_writing_the_sweep(tmp_path, monkeypatch, capsys):
+    from bench import cli, loadtest
+
+    dirs = []
+    for index, (concurrency, passed) in enumerate(((1, True), (4, False))):
+        d = tmp_path / f"loadtest-x-c{concurrency}"
+        d.mkdir()
+        check = colocated.contention_check(clean_sample() if passed else clean_sample(container={"cores": 13.0}), CORES)
+        (d / "manifest.json").write_text(json.dumps({"run_id": d.name, "level_index": index,
+                                                     "concurrency": concurrency, "contention_check": check}))
+        dirs.append(d)
+    assert loadtest.contention_failures(dirs[:1]) == []
+    line, = loadtest.contention_failures(dirs)
+    assert line.startswith("CONTENTION: level 2 (concurrency 4") and "failed b: the container used 13.0 of 16.0" in line
+    monkeypatch.setattr(loadtest, "loadtest", lambda *a: dirs)
+    monkeypatch.setattr(loadtest.paths, "ROOT", tmp_path)
+    args = ["loadtest", "--engine", "e", "--source", "s", "--on", "runpod", "--client", "colocated"]
+    assert cli.main(args) == loadtest.CONTENTION_EXIT == 3
+    err = capsys.readouterr().err
+    assert "CONTENTION: level 2" in err and "level 1" not in err
+    monkeypatch.setattr(loadtest, "loadtest", lambda *a: dirs[:1])
+    assert cli.main(args) == 0

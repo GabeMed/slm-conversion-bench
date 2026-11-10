@@ -162,9 +162,46 @@ def own_affinity() -> Optional[List[int]]:
     return sorted(getter(0)) if getter else None
 
 
-def probe(proc: Path = Path("/proc"), sysfs: Path = Path("/sys"), n: int = N_CORES) -> Dict[str, Any]:
+def task_affinities(proc: Path, pids: Iterable[int]) -> Dict[str, List[int]]:
+    """{"<pid>/<tid>": affinity} of every thread of `pids` (a process's threads may differ from its main one)."""
+    out = {}
+    for pid in pids:
+        for task in sorted((proc / str(pid) / "task").glob("[0-9]*"), key=lambda t: int(t.name)):
+            found = affinity(proc / str(pid) / "task", int(task.name))
+            if found is not None:
+                out[f"{pid}/{task.name}"] = found
+        if not any(k.startswith(f"{pid}/") for k in out) and (found := affinity(proc, pid)) is not None:
+            out[f"{pid}/{pid}"] = found  # no task directory shown: the process's own
+    return out
+
+
+def isolate(proc: Path, pids: Iterable[int], away: Iterable[int],
+            setter: Optional[Callable[[int, set], None]] = None) -> Dict[str, Any]:
+    """Every thread of the server's processes kept off the cores in `away` (the client's), its affinity otherwise
+    as it was: what makes the server's affinity disjoint from the client's (criterion d). Returns the threads
+    changed and the affinities before."""
+    setter = setter or getattr(os, "sched_setaffinity", None)
+    if setter is None:
+        raise ColocatedError("this system cannot set a process's affinity (no sched_setaffinity)")
+    off, changed, before = set(away), [], {}
+    for key, cpus in task_affinities(proc, pids).items():
+        if off & set(cpus):
+            keep = set(cpus) - off
+            if not keep:
+                raise ColocatedError(f"thread {key} of the server may run only on the client's cores {sorted(off)}")
+            setter(int(key.split("/")[1]), keep)
+            changed.append(key)
+            before[key] = format_cpu_list(cpus)
+    return {"threads_changed": len(changed), "before": sorted(set(before.values())),
+            "away_from": format_cpu_list(off)}
+
+
+def probe(proc: Path = Path("/proc"), sysfs: Path = Path("/sys"), n: int = N_CORES,
+          isolate_server: bool = False, setter: Optional[Callable[[int, set], None]] = None) -> Dict[str, Any]:
     """What the co-located client is chosen from, and the choice (see the module's docstring). No server
-    process found is an error: the cores would be chosen blind and no level could show the server's CPU."""
+    process found is an error: the cores would be chosen blind and no level could show the server's CPU. With
+    `isolate_server`, the server's threads that may run on the chosen cores are kept off them (`isolate`), and
+    the server's affinity after that is recorded."""
     limits = cgroup_limits(sysfs)
     mine = own_affinity()
     allowed = parse_cpu_list(limits["cpuset_effective"]) if limits["cpuset_effective"] else list(mine or [])
@@ -176,17 +213,90 @@ def probe(proc: Path = Path("/proc"), sysfs: Path = Path("/sys"), n: int = N_COR
     if not pids:
         raise ColocatedError(f"no server process ({' or '.join(SERVER_PATTERNS)}) runs in this pod")
     server_affinity = {pid: a for pid in pids if (a := affinity(proc, pid)) is not None}
-    return {"nproc": os.cpu_count(), "allowed_cpus": format_cpu_list(allowed), "allowed_count": len(allowed),
-            "job_affinity": format_cpu_list(mine) if mine is not None else None, "cgroup": limits,
-            "server_pids": pids,
-            "server_affinity": sorted({format_cpu_list(a) for a in server_affinity.values()}),
-            "choice": choose_cores(allowed, server_affinity, n), "taskset": shutil.which("taskset"),
-            "hostname": os.uname().nodename, "pod_id": os.environ.get("RUNPOD_POD_ID")}
+    choice = choose_cores(allowed, server_affinity, n)
+    out = {"nproc": os.cpu_count(), "allowed_cpus": format_cpu_list(allowed), "allowed_count": len(allowed),
+           "job_affinity": format_cpu_list(mine) if mine is not None else None, "cgroup": limits,
+           "server_pids": pids,
+           "server_affinity": sorted({format_cpu_list(a) for a in server_affinity.values()}),
+           "choice": choice, "taskset": shutil.which("taskset"),
+           "hostname": os.uname().nodename, "pod_id": os.environ.get("RUNPOD_POD_ID"), "server_isolated": None}
+    if isolate_server:
+        out["server_isolated"] = isolate(proc, pids, choice["cores"], setter)
+        out["server_affinity_after"] = sorted({format_cpu_list(a) for a in task_affinities(proc, pids).values()})
+    return out
+
+
+# ---------------------------------------------------------------- the no-contention criterion, per level
+
+CONTAINER_SHARE_MAX = 0.75  # (b) the container's CPU over the level, as a share of its allotted vCPUs: below
+PINNED_BUSY_MAX = 0.90      # (c) the client's pinned cores, mean host-wide busy share over the level: below
+THROTTLE_FILES = (("fs/cgroup/cpu.stat", 1.0), ("fs/cgroup/cpu,cpuacct/cpu.stat", 1e-3),
+                  ("fs/cgroup/cpu/cpu.stat", 1e-3))  # cgroup v2 (throttled_usec), v1 (throttled_time, ns)
+
+
+def throttling(sysfs: Path) -> Optional[Dict[str, Any]]:
+    """The cgroup's throttling counters: {"source", "nr_throttled", "throttled_usec"}; None when not shown."""
+    for rel, to_usec in THROTTLE_FILES:
+        fields = {}
+        for line in (_read(sysfs / rel) or "").splitlines():
+            name, _, value = line.partition(" ")
+            if value.strip().isdigit():
+                fields[name] = int(value)
+        if "nr_throttled" in fields:
+            spent = fields.get("throttled_usec", fields.get("throttled_time"))
+            return {"source": f"/sys/{rel}", "nr_throttled": fields["nr_throttled"],
+                    "throttled_usec": round(spent * to_usec, 3) if spent is not None else None}
+    return None
+
+
+def contention_check(sample: Dict[str, Any], cores: List[int]) -> Dict[str, Any]:
+    """The level ran without contention unless one of these holds (a quantity not measured fails too: no proof):
+    (a) the cgroup throttled over the level (nr_throttled or throttled_usec grew);
+    (b) the container used >= CONTAINER_SHARE_MAX of its allotted vCPUs (the cgroup's quota) over the level;
+    (c) the client's pinned cores were >= PINNED_BUSY_MAX busy on average over the level (/proc/stat);
+    (d) a thread of the server may run on a pinned core (its affinity, at the level's start and end, is not
+        disjoint from them), or no server process was seen. The server's CPU is recorded beside it."""
+    failed = []
+    before, after = (sample.get("throttling") or {}).get("before"), (sample.get("throttling") or {}).get("after")
+    if before is None or after is None:
+        failed.append("a: the cgroup's throttling counters were not readable")
+    elif after["nr_throttled"] > before["nr_throttled"] or (after["throttled_usec"] or 0) > (before["throttled_usec"] or 0):
+        failed.append(f"a: the cgroup throttled (nr_throttled {before['nr_throttled']} -> {after['nr_throttled']}, "
+                      f"throttled_usec {before['throttled_usec']} -> {after['throttled_usec']})")
+    used, limit = (sample.get("container") or {}).get("cores"), sample.get("cpu_limit")
+    share = round(used / limit, 3) if used is not None and limit else None
+    if share is None:
+        failed.append("b: the container's CPU use or its allotted vCPUs were not readable")
+    elif share >= CONTAINER_SHARE_MAX:
+        failed.append(f"b: the container used {used} of {limit} vCPUs ({share:.0%} >= {CONTAINER_SHARE_MAX:.0%})")
+    busy = sample.get("pinned_cores_host_busy") or {}
+    mean_busy = round(sum(busy.values()) / len(busy), 3) if busy and len(busy) == len(cores) else None
+    if mean_busy is None:
+        failed.append("c: the pinned cores' busy share was not readable")
+    elif mean_busy >= PINNED_BUSY_MAX:
+        failed.append(f"c: the pinned cores were {mean_busy:.0%} busy (>= {PINNED_BUSY_MAX:.0%}): client-bound")
+    affinities = sample.get("server_affinity") or {}
+    overlap = sorted({c for cpus in affinities.values() for c in cpus} & set(cores))
+    if not affinities:
+        failed.append("d: no server thread's affinity was seen")
+    elif overlap:
+        failed.append(f"d: the server may run on the pinned cores {format_cpu_list(overlap)}")
+    return {"pass": not failed, "failed": failed,
+            "metrics": {"throttling_before": before, "throttling_after": after, "container_cores": used,
+                        "allotted_vcpus": limit, "allotted_from": sample.get("cpu_limit_from"),
+                        "container_share": share, "pinned_cores": cores, "pinned_cores_busy_mean": mean_busy,
+                        "server_threads": len(affinities), "server_pinned_core_overlap": overlap,
+                        "server_cores_used": (sample.get("server") or {}).get("cores")},
+            "thresholds": {"CONTAINER_SHARE_MAX": CONTAINER_SHARE_MAX, "PINNED_BUSY_MAX": PINNED_BUSY_MAX,
+                           "throttling": "any increase of nr_throttled or throttled_usec",
+                           "server_affinity": "disjoint from the pinned cores"},
+            "source": "runpod_apps/colocated.py:contention_check"}
 
 
 class Sampler:
-    """The CPU each side used over one AIPerf run (a context manager; `result` once it exits). Cores are CPU
-    seconds over wall seconds; a quantity the pod does not show (no /proc, no cgroup file) is None."""
+    """The CPU each side used over one AIPerf run (a context manager; `result` once it exits), and the
+    no-contention criterion on it (`result["contention_check"]`). Cores are CPU seconds over wall seconds; a
+    quantity the pod does not show (no /proc, no cgroup file) is None."""
 
     def __init__(self, cores: List[int], proc: Path = Path("/proc"), sysfs: Path = Path("/sys"),
                  clock: Callable[[], float] = time.monotonic):
@@ -200,6 +310,8 @@ class Sampler:
 
     def __enter__(self):
         self.pids = server_pids(self.proc, exclude=[os.getpid()])
+        self.affinity0 = task_affinities(self.proc, self.pids)
+        self.throttle0 = throttling(self.sysfs)
         self.started = self.clock()
         self.server0 = {pid: cpu_ticks(self.proc, pid) for pid in self.pids}
         self.children0, self.cgroup0 = self._children_s(), cgroup_usage_s(self.sysfs)
@@ -217,25 +329,39 @@ class Sampler:
         host1 = host_cpu_ticks(self.proc, self.cores)
         busy = {str(c): round((host1[c][0] - self.host0[c][0]) / max(host1[c][1] - self.host0[c][1], 1), 3)
                 for c in self.cores if c in host1 and c in self.host0}
+        throttle1 = throttling(self.sysfs)
+        affinities = {**self.affinity0}
+        for key, cpus in task_affinities(self.proc, self.pids).items():  # the union of start and end
+            affinities[key] = sorted(set(affinities.get(key, [])) | set(cpus))
+        limits = cgroup_limits(self.sysfs)
+        limit, limit_from = limits["cpu_limit"], "the cgroup's CPU quota (cpu.max or cfs_quota_us/cfs_period_us)"
+        if limit is None and limits["cpuset_effective"]:
+            limit, limit_from = len(parse_cpu_list(limits["cpuset_effective"])), "the cgroup's cpuset (no quota)"
 
         def cores(seconds):
             return round(seconds / wall, 3) if seconds is not None else None
         self.result = {
             "method": "CPU seconds over the AIPerf run: AIPerf's processes reaped (RUSAGE_CHILDREN), the server's "
                       "/proc/<pid>/stat utime+stime deltas, the container's cgroup usage; the pinned cores' "
-                      "host-wide busy share from /proc/stat",
+                      "host-wide busy share from /proc/stat; the cgroup's throttling counters (cpu.stat) and the "
+                      "server threads' affinity (/proc/<pid>/task/<tid>/status) at the start and the end",
             "wall_s": round(wall, 3), "aiperf_affinity": format_cpu_list(own_affinity() or []) or None,
             "aiperf": {"cpu_s": round(aiperf_s, 3), "cores": cores(aiperf_s)},
             "server": {"pids": len(both), "cpu_s": round(server_s, 3) if server_s is not None else None,
                        "cores": cores(server_s)},
             "container": {"cpu_s": round(container_s, 3) if container_s is not None else None,
                           "cores": cores(container_s)},
+            "cpu_limit": limit, "cpu_limit_from": limit_from if limit is not None else None,
             "pinned_cores_host_busy": busy or None,
+            "throttling": {"before": self.throttle0, "after": throttle1},
+            "server_affinity": {k: format_cpu_list(v) for k, v in sorted(affinities.items())} or None,
         }
+        self.result["contention_check"] = contention_check(
+            {**self.result, "server_affinity": affinities}, self.cores)
         return False
 
 
 def write_probe(out_path: str) -> int:
-    """`python -m runpod_apps.job cpuset <out.json>`."""
-    Path(out_path).write_text(json.dumps(probe()))
+    """`python -m runpod_apps.job cpuset <out.json>`: the probe, the server kept off the chosen cores."""
+    Path(out_path).write_text(json.dumps(probe(isolate_server=True)))
     return 0
