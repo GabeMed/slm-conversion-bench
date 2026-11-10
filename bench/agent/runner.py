@@ -290,15 +290,17 @@ class _WorkerStop:
         self.flag.set()
 
 
-def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: Any) -> None:
+def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: Any,
+            new: Optional[Callable[[], Dict[str, Any]]] = None) -> None:
     """One worker process: answer its part, then leave what happened in run_dir/outcome.w<k>.json
     (the parent merges it). What carries error text is redacted, as in the manifest it ends up in
     (the file outlives a parent that dies before merging); the predictions are written as they are,
     as a run of one process writes them. Whatever stops it other than a question that failed stops
     every worker too and is reported in `stopped_by`: a Ctrl-C, and equally a SIGTERM or SIGHUP,
-    which reach the workers too when sent to the run's process group (a closed terminal)."""
+    which reach the workers too when sent to the run's process group (a closed terminal). `new`
+    makes the empty outcome (default: an agent run's; a replay's has no predictions)."""
     from bench.provenance import redact
-    outcome: Dict[str, Any] = new_outcome()
+    outcome: Dict[str, Any] = (new or new_outcome)()
     try:
         _interrupted_by_stopping_signals()
         execute(outcome=outcome, part=f".w{k}", stop=_WorkerStop(stop), **kwargs)
@@ -308,11 +310,13 @@ def _worker(execute: Callable[..., None], kwargs: Dict[str, Any], k: int, stop: 
     finally:
         errors = {key: value for key, value in outcome.items() if key != "predictions"}
         errors = json.loads(redact(json.dumps(errors, ensure_ascii=False), kwargs["config"]))
-        _write_json(kwargs["run_dir"] / f"outcome.w{k}.json", {**errors, "predictions": outcome["predictions"]})
+        kept = {"predictions": outcome["predictions"]} if "predictions" in outcome else {}
+        _write_json(kwargs["run_dir"] / f"outcome.w{k}.json", {**errors, **kept})
 
 
-def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: List[List[Dict[str, Any]]],
-                outcome: Dict[str, Dict]) -> None:
+def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: List[List[Any]],
+                outcome: Dict[str, Dict], new: Optional[Callable[[], Dict[str, Any]]] = None,
+                merge: Optional[Callable[[Path, List[Any], Dict[str, Any]], List[str]]] = None) -> None:
     """Run `execute` on each part of the questions in its own process (spawned: the agent's threads
     and clients do not survive a fork), wait for all of them, then merge what they left into
     `outcome` and their C1 files, in worker order, into run_dir/calls.jsonl. A worker that dies
@@ -321,11 +325,12 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
     same failure raises in a run of one process. SIGTERM and SIGHUP interrupt the wait as a Ctrl-C
     does (left to their default they would end this process and leave the workers answering). From
     the first of them to the end of the merge both are ignored: only a Ctrl-C, or SIGKILL, ends a
-    run whose worker never ends."""
+    run whose worker never ends. `new` and `merge` are a replay's (`bench.agent.replay`): its outcome
+    is not an agent run's."""
     run_dir = kwargs["run_dir"]
     context = multiprocessing.get_context("spawn")
     stop = context.Event()
-    processes = [context.Process(target=_worker, args=(execute, {**kwargs, "dataset": part}, k, stop))
+    processes = [context.Process(target=_worker, args=(execute, {**kwargs, "dataset": part}, k, stop, new))
                  for k, part in enumerate(parts)]
     started: List[Any] = []
     handlers: Dict[int, Any] = {}
@@ -349,7 +354,7 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
                 process.join()
             raise
     finally:
-        stopped = _merge_workers(run_dir, processes, outcome)
+        stopped = (merge or _merge_workers)(run_dir, processes, outcome)
         for signum, handler in handlers.items():
             signal.signal(signum, handler)
     if stopped:
@@ -357,10 +362,17 @@ def _in_workers(execute: Callable[..., None], kwargs: Dict[str, Any], parts: Lis
         raise HarnessError("; ".join(stopped))
 
 
-def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict]) -> List[str]:
+def _combine(outcome: Dict[str, Dict], reported: Dict[str, Any]) -> None:
+    for key in OUTCOME_KEYS:
+        outcome[key].update(reported[key])
+
+
+def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict],
+                   combine: Callable[[Dict[str, Any], Dict[str, Any]], None] = _combine) -> List[str]:
     """Merge every worker's outcome and C1 file into the run's. A worker that did not end cleanly (a
     non-zero exit, or no readable outcome) died: that is the harness's failure, recorded under
-    `harness_errors` (so the run is `failed`). Returns why workers stopped (`stopped_by`), if any did."""
+    `harness_errors` (so the run is `failed`). Returns why workers stopped (`stopped_by`), if any did.
+    `combine` adds one worker's reported outcome to the run's."""
     stopped, unregistered = [], set()
     with open(run_dir / "calls.jsonl", "a") as merged:
         for k, process in enumerate(processes):
@@ -382,8 +394,7 @@ def _merge_workers(run_dir: Path, processes: List[Any], outcome: Dict[str, Dict]
                     f"{'' if reported is not None else ', no outcome reported'})"]
             if reported is None:
                 continue
-            for key in OUTCOME_KEYS:
-                outcome[key].update(reported[key])
+            combine(outcome, reported)
             unregistered.update(reported.get("unregistered_call_sites", []))
             if reported.get("stopped_by"):
                 stopped.append(f"worker {k} stopped: {reported['stopped_by']}")

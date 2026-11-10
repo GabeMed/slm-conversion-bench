@@ -219,6 +219,21 @@ def test_the_cli_passes_the_ids_and_the_workers(monkeypatch, capsys):
     monkeypatch.setattr(replay_module, "replay", lambda config, source, **kwargs: seen.update(replay=(source, kwargs)) or "r")
     monkeypatch.setattr(runner, "run_agent", lambda config, arm, split, **kwargs: seen.update(run=kwargs) or "a")
     assert cli.main(["replay", "agent-B0-calib-x", "--engine", "cheap_alt", "--ids", "7", "8"]) == 0
-    assert seen["replay"] == ("agent-B0-calib-x", {"engine": "cheap_alt", "arm": None, "call_sites": None, "ids": ["7", "8"]})
+    assert seen["replay"] == ("agent-B0-calib-x", {"engine": "cheap_alt", "arm": None, "call_sites": None, "ids": ["7", "8"],
+                                                   "workers": 1})  # the default
+    assert cli.main(["replay", "agent-B0-calib-x", "--engine", "cheap_alt", "--workers", "4"]) == 0
+    assert seen["replay"][1]["workers"] == 4
     assert cli.main(["run", "--arm", "B0", "--split", "calib", "--workers", "8"]) == 0
     assert cli.main(["run", "--arm", "B0", "--split", "calib"]) == 0 and seen["run"]["workers"] == 1  # the default
+
+
+def test_fewer_than_one_worker_is_refused(monkeypatch, repo, source):
+    runs = set(paths.RUNS.iterdir())
+    with pytest.raises(runner.data.DataError, match="--workers must be at least 1"):
+        replay(str(repo), source, engine="production_llm", workers=0)
+    assert set(paths.RUNS.iterdir()) == runs
+
+
+def test_a_replay_of_one_process_records_its_workers(monkeypatch, repo, source):
+    _, manifest, _ = replayed(monkeypatch, repo, source, engine="production_llm")
+    assert manifest["workers"] == 1

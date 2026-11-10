@@ -109,12 +109,14 @@ bench eval <B0 calib>
 bench eval <B0 calib> --per-call
 bench call-sites <B0 calib>
 bench preflight
-bench replay <B0 calib> --engine slm:<candidate>
+bench replay <B0 calib> --engine slm:<candidate> --workers 8
 bench eval <each zero-shot replay> --per-call
 bench judge j6 --zeroshot <replay>=<its eval> --zeroshot <replay>=<its eval> --teacher-eval <B0 per-call eval>
 ```
 
 - `--workers` is the number of questions answered at once: choose it by the provider's rate limit.
+  On a replay it is the number of questions resent at once; it changes no output, only how full the
+  SLM server is kept.
 - The replay and its eval run once per candidate (zero-shot).
 - J6 prints the choice fact. Write its path into `arms.B3.choice`, `arms.B4.choice` and
   `arms.B5.choice`, and set `cost.slo_from` to `<B0 calib>`: the SLO is the stricter of the cap and

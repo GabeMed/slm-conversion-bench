@@ -18,7 +18,7 @@ import yaml
 pytest.importorskip("langchain_openai")
 
 from bench import cli, paths  # noqa: E402
-from bench.agent import hooks, runner  # noqa: E402
+from bench.agent import hooks, replay, runner  # noqa: E402
 from bench.contracts.calls import read_calls, validate_calls  # noqa: E402
 from bench.contracts.config import load_config  # noqa: E402
 from bench.data import DataError  # noqa: E402
@@ -31,11 +31,11 @@ QUESTIONS = [str(q) for q in range(1, 7)]
 class FakeChess:
     """An OpenAI-compatible endpoint answering each CHESS prompt as `ScriptedChess` does. A prompt
     that carries `refuse` is answered 401 (the harness's failure: the run fails); `hold(text)` runs
-    before any other answer, and may wait."""
+    before any other answer, and may wait; both can be changed while the endpoint serves."""
 
     def __init__(self, refuse=None, hold=None):
         fake, script = self, ScriptedChess()
-        self.prompts, self.refuse = [], refuse  # `refuse` can be changed while the endpoint serves
+        self.prompts, self.refuse, self.hold = [], refuse, hold
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -48,8 +48,8 @@ class FakeChess:
                 if fake.refuse and fake.refuse in text:
                     code, answer = 401, {"error": {"message": "this key is not allowed", "type": "authentication_error"}}
                 else:
-                    if hold:
-                        hold(text)
+                    if fake.hold:
+                        fake.hold(text)
                     code, answer = 200, {
                         "id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
                         "choices": [{"index": 0, "finish_reason": "stop",
@@ -480,3 +480,89 @@ def test_a_signal_that_follows_does_not_interrupt_the_merge(tmp_path, monkeypatc
     outcome, ended_by, _ = signalled_run(tmp_path, (signal.SIGHUP,), {signal.SIGTERM: unhandled, signal.SIGHUP: unhandled})
     assert ended_by == "SIGHUP" and outcome["predictions"] == {"1": "stopped", "2": "stopped"}
     assert (tmp_path / "calls.jsonl").exists() and not list(tmp_path.glob("outcome.w*"))
+
+
+# ---- `bench replay --workers N`: the replay's questions in N processes, as `bench run`'s
+
+def replay_source(tmp_path, monkeypatch, server):
+    """The six questions answered by a B0 run of one process on `server`: the replays' source."""
+    config_path = make_worker_repo(tmp_path, monkeypatch, server)
+    source = runner.run_agent(str(config_path), "B0", "train")
+    assert json.loads((source / "manifest.json").read_text())["status"] == "done"
+    return config_path, source.name
+
+
+def read_replay(run_dir):
+    return json.loads((run_dir / "manifest.json").read_text()), read_calls(run_dir / "calls.jsonl")
+
+
+RUN_OWN = ("run_id", "started_at", "finished_at", "commit", "dirty", "workers")  # what is each run's own
+
+
+def test_three_workers_give_the_replay_of_one(tmp_path, monkeypatch, capsys):
+    server = FakeChess()
+    config_path, source = replay_source(tmp_path, monkeypatch, server)
+    one, one_calls = read_replay(replay.replay(str(config_path), source, engine="production_llm"))
+    capsys.readouterr()
+    assert cli.main(["replay", source, "--config", str(config_path), "--engine", "production_llm", "--workers", "3"]) == 0
+    run_dir = paths.RUNS / capsys.readouterr().out.strip().splitlines()[-1].rsplit("/", 1)[-1]
+    three, three_calls = read_replay(run_dir)
+
+    assert (one["status"], three["status"]) == ("done", "done"), three
+    assert (one["workers"], three["workers"]) == (1, 3)
+    assert {k: v for k, v in three.items() if k not in RUN_OWN} == {k: v for k, v in one.items() if k not in RUN_OWN}
+    assert three["n_questions_replayed"] == len(QUESTIONS) and three["model_failures"] == {}
+    # the same invocations, and every call written in the order of the questions, as one process writes them
+    assert sorted(map(identity, three_calls)) == sorted(map(identity, one_calls))
+    assert [c["question_id"] for c in three_calls] == [c["question_id"] for c in one_calls]
+    content = ("prompt_messages", "response_text", "parsed_output", "parsed_ok", "engine", "temperature")
+    assert sorted(json.dumps([identity(c), [c[k] for k in content]]) for c in three_calls) == \
+        sorted(json.dumps([identity(c), [c[k] for k in content]]) for c in one_calls)
+    assert {c["run_id"] for c in three_calls} == {three["run_id"]} and validate_calls(three_calls) == []
+    assert sorted(p.name for p in run_dir.iterdir()) == ["calls.jsonl", "config.json", "manifest.json"]
+
+
+def test_a_question_that_fails_in_one_replay_worker_stops_the_others(tmp_path, monkeypatch):
+    """Question 1 (worker 0) is refused: a harness failure. The other workers' calls of their first
+    question are held until worker 0 has reported, so the flag is set while they are in flight: their
+    question is not replayed, and the questions after it never start."""
+    server = FakeChess()
+    config_path, source = replay_source(tmp_path, monkeypatch, server)
+
+    def hold(text):
+        if not any(marker(q) in text for q in QUESTIONS[1:]):
+            return
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not list(paths.RUNS.glob("replay-*/outcome.w0.json")):
+            time.sleep(0.05)
+
+    server.refuse, server.hold = marker("1"), hold
+    asked = len(server.prompts)
+    manifest, calls = read_replay(replay.replay(str(config_path), source, engine="production_llm", workers=3))
+
+    assert manifest["status"] == "failed" and manifest["workers"] == 3
+    assert list(manifest["harness_errors"]) == ["1"] and "401" in json.dumps(manifest["harness_errors"])
+    assert manifest["n_questions_replayed"] == 0 and manifest["model_failures"] == {}
+    sent = server.prompts[asked:]
+    assert not any(marker(q) in prompt for prompt in sent for q in ("4", "5", "6"))
+    assert {c["question_id"] for c in calls} <= {"1", "2", "3"} and validate_calls(calls) == []
+
+
+def test_the_replay_merge_writes_the_questions_in_order_and_adds_the_failures_up(tmp_path):
+    def line(question_id, call_id):
+        return json.dumps({"question_id": question_id, "call_id": call_id}) + "\n"
+    (tmp_path / "calls.w0.jsonl").write_text(line("1", "a") + line("4", "d") + line("1", "a2"))
+    (tmp_path / "calls.w1.jsonl").write_text(line("2", "b") + '{"question_id": "5", "cut')  # killed mid-line
+    (tmp_path / "outcome.w0.json").write_text(json.dumps({
+        **replay.new_outcome(), "model_failures": {"revise": 1, "select_tables": 2}, "replayed": ["1", "4"]}))
+    (tmp_path / "calls.w2.jsonl").write_text(line("3", "c"))
+    (tmp_path / "outcome.w2.json").write_text(json.dumps({**replay.new_outcome(), "model_failures": {"revise": 3},
+                                                          "replayed": ["3"]}))
+    outcome = replay.new_outcome()
+    stopped = replay._merge(["1", "2", "3", "4", "5"], tmp_path, [SimpleNamespace(exitcode=c) for c in (0, -9, 0)], outcome)
+    assert stopped == [] and list(outcome["harness_errors"]) == ["worker 1"]
+    assert outcome["model_failures"] == {"revise": 4, "select_tables": 2} and sorted(outcome["replayed"]) == ["1", "3", "4"]
+    rows = (tmp_path / "calls.jsonl").read_text().splitlines()
+    assert [json.loads(row)["call_id"] for row in rows[:-1]] == ["a", "a2", "b", "c", "d"]
+    assert rows[-1] == '{"question_id": "5", "cut'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["calls.jsonl"]
