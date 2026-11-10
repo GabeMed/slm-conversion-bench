@@ -208,6 +208,10 @@ def test_tool_errors_are_reported_without_failing_the_run(monkeypatch, repo):
 
 
 def test_preconditions_are_checked_before_a_run_starts(monkeypatch, repo):
+    import yaml
+    config = yaml.safe_load(repo[0].read_text())
+    config["arms"]["B3"]["choice"] = None  # the configuration before J6's choice: B3 has no `choice` fact
+    repo[0].write_text(yaml.safe_dump(config))
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
     with pytest.raises(FactError, match="choice is not set"):
         runner.run_agent(str(repo[0]), "B3", "train", ids=["1"])

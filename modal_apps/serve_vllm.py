@@ -6,8 +6,8 @@ OpenAI-compatible; the candidate is served under `--served-model-name <name>` an
 `usage` with cached tokens, thinking off by the candidate's template kwargs, only the request's sampling
 parameters (`serving.generation_config: vllm`). Weights come from the HF-cache volume at the pinned
 revision, offline: `download` puts them there once. One GPU container at most, so a load test measures one
-GPU. Auth, fail closed: Modal proxy auth (`serving.unauthenticated: false`; clients send the headers their
-endpoint's `headers_env` names) and vLLM's own key from the Modal secret `modal.secrets.vllm_api_key` as a
+GPU. Auth, fail closed: Modal proxy auth when `serving.unauthenticated` is false (clients send the headers
+their endpoint's `headers_env` names) and vLLM's own key from the Modal secret `modal.secrets.vllm_api_key` as a
 second layer; the container refuses to start with neither. Knobs that change no output (min_containers,
 scaledown_window_s) come from modal_apps/deploy.yaml and BENCH_MIN_CONTAINERS / BENCH_SCALEDOWN_WINDOW_S.
 

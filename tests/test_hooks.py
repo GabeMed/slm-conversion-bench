@@ -202,9 +202,10 @@ def test_agent_call_records_the_action_it_selects(run):
     assert validate_calls([ok, bad]) == []
 
 
-def test_harness_failures_are_raised_and_kept_for_the_runner(run):
+def test_harness_failures_are_raised_and_kept_for_the_runner(run, monkeypatch):
     model, calls_path, _ = run
-    hooks._run.arm = "B3"  # B3 needs a `choice` fact the smoke config does not set
+    monkeypatch.setitem(hooks.config()["arms"]["B3"], "choice", None)  # the configuration before J6's choice
+    hooks._run.arm = "B3"  # B3 needs a `choice` fact this configuration does not set
     with pytest.raises(hooks.HarnessError):
         hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     assert model.calls == 0 and read_calls(calls_path) == []

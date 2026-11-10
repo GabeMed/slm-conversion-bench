@@ -159,6 +159,7 @@ def test_preflight_counts_each_datasets_tokens_with_the_candidates_tokenizer(tmp
     from bench.preflight import PASS, check_training_time
 
     _, _, config = make_s5_repo(tmp_path, monkeypatch)
+    config.pop("runpod", None)  # trained on Modal: no runpod section, so no train_backend (as test_preflight's on_modal)
     write_dataset("c1", rows("c1", 7))
     manifest = fake_adapter("c0", config).parent / "manifest.json"
     manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "where": "modal", "gpu": config["train"]["gpu"],
