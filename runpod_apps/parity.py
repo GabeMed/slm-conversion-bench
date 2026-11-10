@@ -6,13 +6,16 @@ train/adapters/<cluster>/adapter when missing, and checked byte for byte in the 
 It runs in the pod that serves the adapter's SLM, never in a pod of its own (A100s are scarce, and a fresh pod
 may never answer SSH): bench.preflight.lora_parity has already collected the served generations when it is
 called, so the server is stopped, its VRAM waited free, the reference run on the same GPU, and the server
-started again as `bench serve --on runpod up` starts it, whether the reference succeeded or not.
+started again as `bench serve --on runpod up` starts it, whether the reference succeeded or not (unless the stop
+touched nothing: a pod without nvidia-smi keeps its one server). A restart that fails is reported beside the
+reference's result or error, never in place of it.
 
 The serving image (runpod.images.serve) has no training environment: the train lock is installed at the first
 job onto the volume (a venv keyed by the lock's sha256, Python managed by uv, reused by every later job and by
 the load client), or taken from /opt/bench-train when the image has it. The reference runs the code the
 serving pod was given at `up`."""
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,13 +28,17 @@ from runpod_apps.ssh import Remote, open_tunnel
 
 STOP_TIMEOUT_S = 300   # the server's processes gone and its VRAM free (SIGKILL past half of it)
 FREE_MIB = 1024        # what the GPU may still hold, in MiB, once the server is gone
+NO_GPU_VIEW = 3        # the stop's exit code when the pod has no nvidia-smi: it stopped nothing
 
 # Stops `runpod_apps.job serve` (its process group: the job's shell, the job, vLLM and vLLM's workers), then
 # waits until nothing of it runs and the GPU holds at most FREE_MIB. /proc only (the image may lack procps);
-# the patterns are split so that they never match this script's own command line.
+# the patterns are split so that they never match this script's own command line. Every process it signals is
+# one it found in this container's /proc (the server's, or a member of its process groups): never a PID that
+# nvidia-smi reports, which inside a container may be the host's, naming another process here or none.
+# Exit 3 (NO_GPU_VIEW) comes before anything is touched: the server is left serving.
 STOP_SERVE = r"""set -u
 T={timeout}; FREE={free}; JOB="runpod_apps.job"; VLLM="vllm"
-command -v nvidia-smi >/dev/null 2>&1 || {{ echo "no nvidia-smi: the GPU's memory cannot be seen"; exit 3; }}
+command -v nvidia-smi >/dev/null 2>&1 || {{ echo "no nvidia-smi: the GPU's memory cannot be seen; nothing was stopped"; exit {no_gpu_view}; }}
 rm -f {work}/jobs/serve.ready
 server() {{
   for d in /proc/[0-9]*; do
@@ -47,11 +54,18 @@ for p in $(server); do
   g=$(pgid "$p") || continue
   [ "$g" -gt 1 ] && [ "$g" != "$mine" ] && groups="$groups $g"
 done
+members() {{
+  for d in /proc/[0-9]*; do
+    p=${{d#/proc/}}; [ "$p" = "$$" ] && continue
+    g=$(pgid "$p") || continue
+    for w in $groups; do [ "$g" = "$w" ] && echo "$p"; done
+  done
+}}
 for g in $groups; do kill -TERM -- "-$g" 2>/dev/null || true; done
 kill -TERM $(server) 2>/dev/null || true
 start=$(date +%s); killed=""
 while :; do
-  alive=$(server | tr '\n' ' ')
+  alive=$( {{ server; members; }} | tr '\n' ' ')
   used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{{s+=$1}} END {{print s+0}}')
   if [ -z "${{alive// /}}" ] && [ "$used" -le "$FREE" ]; then echo "server stopped; GPU memory used: $used MiB"; exit 0; fi
   waited=$(( $(date +%s) - start ))
@@ -59,7 +73,7 @@ while :; do
     killed=1
     echo "still running after $waited s (processes: ${{alive:-none}}; $used MiB used): SIGKILL"
     for g in $groups; do kill -KILL -- "-$g" 2>/dev/null || true; done
-    kill -KILL $alive $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null) 2>/dev/null || true
+    kill -KILL $alive 2>/dev/null || true
   fi
   if [ "$waited" -ge "$T" ]; then echo "the GPU is not free after $T s (processes: ${{alive:-none}}; $used MiB used)"; exit 1; fi
   sleep 2
@@ -88,18 +102,46 @@ def peft_reference(config: Dict[str, Any], cluster: str, adapter_sha256: str, ba
         local.write_text(json.dumps(spec))
         remote.shell.put(local, f"{WORK}/parity.json")
     remote.check(f"rm -f {WORK}/parity.out.json", "clearing the last reference")
+    result, error = None, None
     try:
-        remote.start_job("serve-stop", STOP_SERVE.format(timeout=STOP_TIMEOUT_S, free=FREE_MIB, work=WORK))
-        remote.wait_job("serve-stop", STOP_TIMEOUT_S + 120, provider.poll_s)
+        try:
+            remote.start_job("serve-stop", STOP_SERVE.format(timeout=STOP_TIMEOUT_S, free=FREE_MIB, work=WORK,
+                                                             no_gpu_view=NO_GPU_VIEW))
+            remote.wait_job("serve-stop", STOP_TIMEOUT_S + 120, provider.poll_s)
+        except RunPodError as e:
+            if remote.job_rc("serve-stop") == NO_GPU_VIEW:  # it stopped nothing: the server still serves
+                raise ServerNotStopped(f"P-4's reference did not run: the pod serving {slm} has no nvidia-smi, so the "
+                                       f"server could not be stopped and its VRAM seen free; it was left serving, "
+                                       f"untouched ({e})") from e
+            raise
         timeout = config["preflight"]["lora_parity"]["reference_timeout_s"]
         remote.start_job("parity", rp.TRAIN_ENV + f'"$PY" -m runpod_apps.job parity {WORK}/parity.json {WORK}/parity.out.json')
         remote.wait_job("parity", timeout + 3600, provider.poll_s)  # the first job also builds the environment
         out = remote.read(f"{WORK}/parity.out.json")
         if out is None:
             raise RunPodError("the P-4 reference ended without its output")
-    finally:
+        result = {**json.loads(out), "pod_id": pod["id"], "usd_per_hour": pod.get("cost")}
+    except ServerNotStopped:
+        raise  # a second server would be started beside the first
+    except BaseException as e:  # noqa: B902 -- an interrupted reference serves again too, then is re-raised
+        error = e
+    # the server is started again whatever the reference did; its failure never replaces the reference's
+    # result or error, and is reported beside them
+    try:
         restart_serving(provider, remote, slm, pod["id"])
-    return {**json.loads(out), "pod_id": pod["id"], "usd_per_hour": pod.get("cost")}
+    except RunPodError as restart:
+        if error is not None:
+            error.add_note(f"and then: {restart}")
+            raise error
+        print(f"P-4's reference finished, but {restart}", file=sys.stderr)
+        return {**result, "restart_error": str(restart)}
+    if error is not None:
+        raise error
+    return result
+
+
+class ServerNotStopped(RunPodError):
+    """The server could not be stopped and was not touched: it is not to be started again."""
 
 
 def restart_serving(provider: rp.Provider, remote: Remote, slm: str, pod_id: str) -> None:
