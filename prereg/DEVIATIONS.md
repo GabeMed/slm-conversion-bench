@@ -82,3 +82,23 @@ Changes after Stage 0 that can change a result or its interpretation.
   before any c0 or c3 adapter was evaluated (c3 was trained once, as a speed measurement on the earlier file,
   outside the registry and never evaluated). It changes the trained arms' (B4, B5) training data and tends to
   favour them, which is why it is declared
+- 2026-11-09 · the model-rejection rule narrowed after Stage 0 (9f2a972, 17:33 UTC; b65a3d4, 17:43 UTC;
+  bench/agent/rejections.py, bench/agent/hooks.py classify, patch 5b). At Stage 0 any HTTP 400 or 413 from the
+  engine was the model's failure (scored, the question wrong), except Anthropic's "credit balance" 400. Now only a
+  413, or a 400 whose message says the prompt is longer than the context, is the model's; a 400 naming max_tokens
+  or max_completion_tokens, and every other 400 (workspace, key, permission, billing, invalid parameter or model),
+  is the harness's: the run fails and nothing is scored. The rule is the same for every arm and engine (B0 to B5,
+  API and vLLM). 49556b3 (2026-11-10 07:09 UTC, branch rejection-maxtokens) decides a message that gives the
+  lengths in numbers by them: the model's only when the prompt alone is longer than the context. vLLM 0.30's
+  "your prompt contains at least N input tokens", which the pattern matched even when the prompt fits and only
+  prompt + max_tokens does not, is now the harness's, since with max_tokens set it never proves the prompt alone
+  too long; vLLM's input-processor and Responses messages for the prompt alone are now the model's. Direction:
+  up to 2026-11-10, 11 HTTP 400s and no 413 occurred, all Anthropic's "credit balance is too low", all in
+  K1's sessions and classified as the harness's (the runs failed and were resumed); no 400 about the context or
+  max_tokens occurred, so no recorded call changes class. The largest prompt in the Qwen replay of record
+  (replay-slm_qwen3-8b-calib-20261110T025007.659032Z), B3's pilot (agent-B3-calib-20261110T051808.826362Z) and
+  Granite's replay (replay-slm_granite-4.2-8b-calib-20261110T032255.812515Z) is 11,951 tokens (B3's pilot,
+  select_tables), counted with the pinned tokenizer and equal to vLLM's usage.input; with max_tokens 4,096 and a
+  context of 32,768, none of their calls would have triggered it. A prompt that fits but leaves no room for
+  max_tokens, which has not occurred, fails the execution as a harness error; if it occurs on test, it is a
+  documented defect
