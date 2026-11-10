@@ -15,6 +15,12 @@ does not change, and nothing on the test split runs before step 12.
   compensated, so a sum over a set does not move with `PYTHONHASHSEED` and a judgment recomputes to
   the same bytes (under the agent environment's 3.11, J6's score moves in the last digit), and its
   numpy is the pinned one J5's floats were tested with.
+- **`bench eval` always runs in the agent environment** (`.venv-agent`), whatever the step, never in
+  the analysis one. An eval records the SQLite version it executed with (3.53.1 in `.venv-agent`,
+  3.50.4 in `.venv-analysis`), and J1 refuses a split whose evals do not share it (the instrument:
+  fixed date, timeout, SQLite version, pre-registration). Every eval so far ran in `.venv-agent`, so
+  one eval elsewhere would leave its split without EX. In short: `bench run`, `bench replay` and
+  `bench eval` in `.venv-agent`; `bench judge`, `bench verify` and `bench report` in `.venv-analysis`.
 - **Paths written into `config.yaml` are relative to the repository root** (`judgments/J6/<sha>/choice.json`).
   The commands print absolute paths: cut the prefix. The configuration is registered and published.
 
@@ -388,6 +394,10 @@ sets `modal.gpu_prices` back to Modal's values. The patch keeps them in a commen
    (`runpod.secrets.vllm_api_key`). Its value is the one exported locally as `SLM_VLLM_API_KEY` (the
    candidates' `api_key_env`). The pods receive it as `VLLM_API_KEY` through
    `{{ RUNPOD_SECRET_slm-bench-vllm-api-key }}`, so this machine never sends it to RunPod.
+   **At least 8 characters** (`SECRET_MIN_LENGTH`, `bench/provenance.py`): a shorter value is never
+   redacted from a record, and every run on test refuses to start with one (`registry.check_keys`, before
+   its intent). Nothing checks it earlier, neither `up` nor a run on train or calib, so choose a long one
+   from the start: changing it later means changing the RunPod secret and restarting the servers.
 4. **A spend limit** on the RunPod account (Settings > Billing; the default is $80/h) and a prepaid balance
    no larger than this phase needs.
 5. **The volume and its data center:**
@@ -445,7 +455,8 @@ At the end of the day, check the console's Pods page, and the network volume if 
   bench serve --on runpod down --candidate <chosen> ; bench serve --on runpod up --candidate <chosen>
   bench preflight --parity <the smallest> --on runpod
   ```
-  A server serves the adapters that exist when it starts, so restart it after training. No other pod is
+  A server serves the adapters that exist when it starts, so restart it after training: `up` on a pod
+  that is still running only checks (and reopens) its tunnel, and loads no new adapter. No other pod is
   created. The preflight first collects the served generations through the tunnel. Then it stops vLLM in the
   pod and waits until the GPU's memory is free (`nvidia-smi`). It runs the HF-PEFT reference there, in the
   train lock's environment, which the first run installs onto the volume. Finally it starts the server again
@@ -453,6 +464,12 @@ At the end of the day, check the console's Pods page, and the network volume if 
   for the reference and the warm-up after it, so run nothing else against it meanwhile. If the server does
   not come back, the error says so and the pod is still billing: `down`, then `up`. `training_time`
   reads the Tinker manifests (`runpod.train_backend: tinker`; `--train-backend` overrides).
+- **After the last `bench train`** (the adapters fact written into `config.yaml`), and again before
+  step 13: `down`, then `up`, for the chosen candidate. That `up` is the one that serves every adapter;
+  a pod already up would keep the adapters it started with.
+  ```sh
+  bench serve --on runpod down --candidate <chosen> ; bench serve --on runpod up --candidate <chosen> --hours <h>
+  ```
 - **Step 10:** `bench loadtest ... --on runpod`. AIPerf runs in a CPU pod in the server's data center. That
   pod reaches vLLM through its own SSH tunnel with a key pair made for this load test, which the server
   authorizes and then removes. The runs come back into `runs/<id>/` with `where: runpod` and `gpu: A100-80GB`,
@@ -551,32 +568,80 @@ git push origin main
 
 ### 13. K2 and K4: the test split
 
+**Before the first test run, check every item** (nothing here is checked by the harness except the
+keys' length and the registry):
+
+- **Balances.** Anthropic (the production LLM: B0, B2-production, B5): about US$ 255 in the worst case,
+  B5 with every cluster on the LLM (step 5's table). OpenRouter (the cheap alternative): B1 and
+  B2-cheap. OpenAI: the embeddings of retrieval (every agent arm). A balance that runs out mid-run fails that run.
+- **Free disk:** the test adds about 5 GB under `runs/`. Leave more than that free.
+- **A fresh serving pod with enough `--hours`.** A server terminates itself after `runpod.max_pod_hours`
+  (12 h), counted from its creation, not from the test's start. Run `down` and `up --hours <h>` just
+  before, with `<h>` covering B3, B4, B5 and the B4 replay with a margin (step 5's time projection), and
+  check that it serves every adapter (the RunPod section after step 9).
+- **The machine stays awake** for the whole loop: `caffeinate -dims` in another terminal (macOS). A
+  sleeping laptop drops the SSH tunnels; `bench serve --on runpod tunnel` reopens one.
+- **No merges, pulls, checkouts or other git activity in this checkout while the runs go.** Each run
+  commits and pushes to `main` from here. A registry commit waits up to about 30 s for another git's
+  lock (`index.lock`), then fails the run. Work on code in another worktree, and merge nothing to `main`
+  until the loop is over (a push to origin's main from elsewhere makes the next intent's push fail).
+- **The environments:** the runs and `bench eval` in `.venv-agent`; `bench judge`, `bench verify` and
+  `bench report` in `.venv-analysis` (the notes at the top).
+
 ```sh
-for arm in B0 B1 B3 B4 B5; do
-  bench run --arm "$arm" --split test --workers 8 && git push origin main || break
+set -o pipefail
+START=B0   # after a failure: the configuration that failed (B0 B1 B3 B4 B5 B2-production B2-cheap B4-replay)
+STEPS=(B0 B1 B3 B4 B5 B2-production B2-cheap B4-replay)
+go=
+for step in "${STEPS[@]}"; do
+  [ "$step" = "$START" ] && go=1
+  [ -n "$go" ] || continue
+  run=$(case "$step" in
+    (B2-production) bench run --arm B2 --split test --engine production_llm ;;
+    (B2-cheap)      bench run --arm B2 --split test --engine cheap_alt ;;
+    (B4-replay)     bench replay <B0 test> --arm B4 ;;
+    (*)             bench run --arm "$step" --split test --workers 8 ;;
+  esac | tail -n 1) || { echo "stopped at $step: no run ended (see the error)"; break; }
+  git push origin main || { echo "stopped at $step: the push failed"; break; }
+  status=$(python -c 'import json, sys; print(json.load(open(sys.argv[1] + "/manifest.json"))["status"])' "$run")
+  [ "$status" = done ] || { echo "stopped at $step: $run is $status"; break; }
 done
-bench run --arm B2 --split test --engine production_llm && git push origin main
-bench run --arm B2 --split test --engine cheap_alt && git push origin main
-bench replay <B0 test> --arm B4 && git push origin main
 ```
 
-- The loop stops at the first run that fails or cannot be pushed: read why before going on.
-
+- `set -o pipefail` first, or the `| tail` hides a refusal. A run that ends `failed` or `interrupted`
+  still exits 0 and prints its directory: the loop reads its manifest's `status`, pushes its manifest
+  either way, and stops unless it is `done`.
+- The loop stops at the first configuration that does not end `done`, or cannot be pushed, and prints
+  where. Read why. If the run raised before its push (exit code not 0), publish what it committed with
+  `git push origin main` (the next test run refuses to start while a registry commit is unpushed). Fix
+  the cause, and run the block again with `START` set to the configuration that stopped. The
+  configurations before it are done and are **not** run again.
+- **One completed run per configuration** (type, arm, engine, pre-registration, as the report keys
+  it). A run that died is listed and may be run again; a second *completed* run of one configuration
+  would leave that arm's comparisons without a verdict, so `bench run` and `bench replay` refuse to open
+  it, before its intent and before any call. Rerunning the block from `B0` by mistake therefore stops at
+  once at B0, with the run id that already completed it.
+- `--resume-from` is refused on test: a configuration that failed is run again from its first question.
 - Each run pushes its intent to `origin/main` before its first question; a run that cannot push
   does not start. When it ends it **commits** its manifest, and the `git push` after it publishes
-  that: the next test run refuses to start while a registry commit is unpushed.
+  that.
 - The last replay is the per-call-site evaluation.
-- **One completed run per configuration.** A run that died is listed and may be run again; a second
-  *completed* run of one configuration leaves that arm's comparisons without a verdict.
 - A defect that needs a new registration: `bench prereg --replace --reason "<the defect>"`. It
   becomes a line of `prereg/DEVIATIONS.md`, which the report prints.
 
 ### 14. Evaluation, cost, verification, report
 
+In `.venv-agent` (the SQLite every eval has used):
+
 ```sh
 bench eval <each test run>
 bench eval <B0 test> --per-call
 bench eval <the B4 test replay> --per-call
+```
+
+Then in `.venv-analysis`:
+
+```sh
 bench judge j3 --run <run> --eval <its eval> --j8 <J8 result>
 bench judge j3 --run <B0 train>
 bench judge j2 --run <B0 test>

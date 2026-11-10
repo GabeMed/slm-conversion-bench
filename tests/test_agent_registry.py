@@ -380,3 +380,102 @@ def test_a_key_too_short_to_redact_keeps_a_test_run_from_starting(repo, monkeypa
     monkeypatch.setenv("OPENAI_API_KEY", "1")  # set, but this run never uses it (fake embeddings): no refusal
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+
+
+def test_a_second_completed_run_of_one_configuration_is_refused_before_its_intent(repo, monkeypatch):
+    """SPEC 6.1: one completed run per configuration (type, arm, engine, pre-registration), as the report
+    keys it. A run that did not complete may be run again; once one is done, another is refused before
+    its intent is committed and before any model call. Another configuration still runs."""
+    root, config_path = repo
+    register(root, config_path)
+
+    class Failing(ScriptedChess):
+        def invoke(self, messages):
+            raise OSError("the network went away")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Failing())
+    failed = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert json.loads((failed / "manifest.json").read_text())["status"] == "failed"
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    done = runner.run_agent(str(config_path), "B0", "test", ids=["9"])  # after a failure: allowed
+    assert json.loads((done / "manifest.json").read_text())["status"] == "done"
+    git(root, "push", "-q", "origin", "main")
+    before = git(root, "rev-parse", "HEAD").strip()
+    calls = []
+
+    class Counting(ScriptedChess):
+        def invoke(self, messages):
+            calls.append(1)
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Counting())
+    runs_before = set(paths.RUNS.iterdir())
+    with pytest.raises(barrier.TestSplitLocked, match=f"{done.name} already completed it"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert calls == [] and set(paths.RUNS.iterdir()) == runs_before
+    assert git(root, "rev-parse", "HEAD").strip() == before  # no intent committed
+    other = runner.run_agent(str(config_path), "B2", "test", ids=["9"], engine="production_llm")
+    assert json.loads((other / "manifest.json").read_text())["status"] == "done"
+
+
+def test_done_runs_are_matched_by_type_arm_engine_and_registration(repo):
+    root, _ = repo
+    (root / registry.TEST_DIR).mkdir(parents=True)
+    entries = {
+        "a": {"type": "agent", "arm": "B2", "engine": "cheap_alt", "prereg_hash": "h1", "status": "done"},
+        "b": {"type": "agent", "arm": "B2", "engine": "production_llm", "prereg_hash": "h1", "status": "done"},
+        "c": {"type": "agent", "arm": "B2", "engine": "cheap_alt", "prereg_hash": "h0", "status": "done"},
+        "d": {"type": "agent", "arm": "B2", "engine": "cheap_alt", "prereg_hash": "h1", "status": "failed"},
+        "e": {"type": "replay", "arm": "B2", "engine": "cheap_alt", "prereg_hash": "h1", "status": "done"},
+    }
+    for run_id, entry in entries.items():
+        (root / registry.TEST_DIR / f"{run_id}.manifest.json").write_text(json.dumps({"run_id": run_id, **entry}))
+    (root / registry.TEST_DIR / "f.intent.json").write_text(json.dumps({"run_id": "f", **entries["a"]}))
+    git(root, "add", "registry")
+    git(root, "commit", "-q", "-m", "entries")
+    assert registry.done_runs_of("agent", "B2", "cheap_alt", "h1", "HEAD") == ["a"]
+    assert registry.done_runs_of("agent", "B0", None, "h1", "HEAD") == []
+    assert registry.done_runs_of("replay", "B2", "cheap_alt", "h1", "HEAD") == ["e"]
+
+
+def test_a_registry_commit_waits_for_another_gits_lock(repo, monkeypatch):
+    """A git process that holds the index for a moment (an editor, a `git status` elsewhere) must not
+    fail a run that finished: the commit waits for the lock, a bounded number of times."""
+    import threading
+    root, _ = repo
+    lock = root / ".git" / "index.lock"
+    lock.write_text("")
+    threading.Timer(0.3, lock.unlink).start()
+    registry._write("registry/note.json", {"a": 1})
+    registry._commit("registry/note.json", "a note")
+    assert git(root, "log", "-1", "--format=%s").strip() == "a note"
+    assert git(root, "show", "--name-only", "--format=", "HEAD").split() == ["registry/note.json"]
+
+
+def test_a_lock_that_outlasts_the_waits_is_still_an_error(repo, monkeypatch):
+    root, _ = repo
+    waits = []
+    monkeypatch.setattr(registry.time, "sleep", waits.append)
+    (root / ".git" / "index.lock").write_text("")
+    registry._write("registry/note.json", {"a": 1})
+    with pytest.raises(registry.RegistryError, match="index.lock"):
+        registry._commit("registry/note.json", "a note")
+    assert waits == list(registry.LOCK_WAITS_S)  # bounded: every wait once, then the error
+    (root / ".git" / "index.lock").unlink()
+
+
+def test_a_lock_at_the_end_of_a_test_run_leaves_it_done(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    real, locked = registry._git, []
+
+    def busy_once(*args):
+        if args[:1] == ("commit",) and "manifest of test execution" in " ".join(args) and not locked:
+            locked.append(args)
+            return subprocess.CompletedProcess(args, 128, "", "fatal: Unable to create '/x/.git/index.lock': File exists.")
+        return real(*args)
+    monkeypatch.setattr(registry, "_git", busy_once)
+    monkeypatch.setattr(registry.time, "sleep", lambda s: None)
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert locked and manifest["status"] == "done" and manifest["problems"] == []
+    assert json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))["status"] == "done"
