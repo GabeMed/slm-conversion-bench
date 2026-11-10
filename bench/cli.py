@@ -56,6 +56,8 @@ def main(argv=None) -> int:
     group.add_argument("--arm", choices=AGENT_ARMS, help="route each call as this arm does")
     p.add_argument("--call-sites", nargs="+", help="only these call sites")
     p.add_argument("--ids", nargs="+", help="only these questions of the source run")
+    p.add_argument("--workers", type=int, default=1,
+                   help="replay the questions in this many processes: still one run and one manifest (default 1)")
 
     p = sub.add_parser("call-sites", help="add the call sites of done train/calib runs to registry/call_sites.json")
     p.add_argument("run_ids", nargs="+")
@@ -128,7 +130,7 @@ def main(argv=None) -> int:
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,
-                         ids=args.ids))
+                         ids=args.ids, workers=args.workers))
         elif args.command == "call-sites":
             from bench.agent.registry import update_call_sites
             print(update_call_sites(args.run_ids))

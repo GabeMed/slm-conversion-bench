@@ -13,17 +13,26 @@ the `config.json` snapshot every execution keeps; no predictions, since no SQL i
 barrier applies to the source run's split, and on `test` so do the registry and the call-site
 assertion. A model failure on one invocation (after its retries) is recorded in C1 and the replay
 goes on; a harness failure stops it (`failed`).
+
+`--workers N` replays the questions in N processes, as `bench run --workers` answers them (the
+question is process state in `hooks`): worker k takes every N-th question from the k-th, and the
+workers' C1 files are merged into `calls.jsonl` in the order of the questions, as one process
+writes them. The first question that fails stops every worker. The number of workers changes no
+output, so it is recorded (`workers`) but is not part of the configuration's identity.
 """
 import hashlib
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from bench import barrier, data, paths
 from bench.agent import hooks
-from bench.agent.runner import _prepare_chess, check_engines, few_shot_for, finish, open_run, used_key_envs
+from bench.agent.runner import (_in_workers, _merge_workers, _prepare_chess, check_engines, few_shot_for, finish,
+                                open_run, used_key_envs, worker_parts)
 from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES, read_calls, validate_calls
 from bench.contracts.config import config_sha256, engine_spec, load_config
 from bench.provenance import scrub
@@ -110,12 +119,18 @@ def readers(config: Dict[str, Any]) -> Callable[[Dict[str, Any]], Callable[[], A
     return reader
 
 
+def new_outcome() -> Dict[str, Any]:
+    return {"harness_errors": {}, "model_failures": {}, "replayed": []}
+
+
 def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, arm: Optional[str] = None,
-           call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None) -> Path:
+           call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None, workers: int = 1) -> Path:
     config = load_config(config_path)
     hooks.configure(config)
     if (engine is None) == (arm is None):
         raise data.DataError("a replay needs --engine or --arm, one of the two")
+    if workers < 1:
+        raise data.DataError("--workers must be at least 1")
     source = _source(source_run_id)
     split = source["split"]
     barrier.ensure_split_allowed(split, config)  # the source run's split
@@ -148,20 +163,32 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
     few_shot, recorded = few_shot_for(config, engines)
     _prepare_chess(config, paths.bird_root(config))
     reader = readers(config)
-    resend = [(record, reader(record)) for record in records]  # every record readable before anything runs
+    for record in records:  # every record readable before anything runs
+        reader(record)
 
     question_ids = sorted({r["question_id"] for r in records}, key=int)
     fields = {"source_run_id": source_run_id, "source_config_sha256": source["config_sha256"],
               "source_calls_sha256": hashlib.sha256(calls_path.read_bytes()).hexdigest(),
               "engine": engine, "arm": arm, "call_sites": sorted(call_sites) if call_sites else None,
-              "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded}
+              "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded,
+              "workers": workers}  # as in an agent run, not the configuration's identity
     label = arm or re.sub(r"[^A-Za-z0-9_.-]+", "_", engine)
     run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields,
                                           used_key_envs(config, engines, retrieval=False))
-    outcome = {"harness_errors": {}, "model_failures": {}, "replayed": set()}
+    outcome = new_outcome()
     stopped_by = None
     try:
-        _execute(config, manifest["run_id"], run_dir, arm, engine, resend, question_ids, few_shot, allowed, outcome)
+        by_question: Dict[str, List[Dict[str, Any]]] = {q: [] for q in question_ids}
+        for record in records:
+            by_question[record["question_id"]].append(record)
+        dataset = list(by_question.items())
+        kwargs = {"config": config, "run_id": manifest["run_id"], "run_dir": run_dir, "arm": arm, "engine": engine,
+                  "few_shot": few_shot, "allowed_call_sites": allowed}
+        if workers == 1:
+            _execute(dataset=dataset, outcome=outcome, reader=reader, **kwargs)
+        else:
+            _in_workers(_execute, kwargs, worker_parts(dataset, workers), outcome, new=new_outcome,
+                        merge=partial(_merge, question_ids))
     except BaseException as e:  # recorded in the manifest, then re-raised
         stopped_by = scrub(f"{type(e).__name__}: {e}")
         raise
@@ -173,37 +200,76 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
         def status(c1_errors, changed):
             if outcome["harness_errors"] or c1_errors or empty:
                 return "failed"
-            return "done" if outcome["replayed"] == set(question_ids) else "interrupted"
+            return "done" if set(outcome["replayed"]) == set(question_ids) else "interrupted"
         finish(manifest, run_dir, config, [], outcome, stopped_by, status,
                {"n_questions_replayed": len(outcome["replayed"]), "model_failures": outcome["model_failures"]},
                problems=empty)
     return run_dir
 
 
-def _execute(config, run_id, run_dir, arm, engine, resend, question_ids, few_shot, allowed, outcome) -> None:
+def _execute(config, run_id, run_dir, arm, engine, dataset, few_shot, allowed_call_sites, outcome,
+             reader=None, part="", stop=None) -> None:
     """Question by question (the question is process state in `hooks`); the invocations of one
-    question in parallel, at most `agent.max_workers` at once, as the agent's own steps are."""
-    by_question: Dict[str, List] = {q: [] for q in question_ids}
-    for record, call in resend:
-        by_question[record["question_id"]].append((record, call))
-    hooks.start_run(run_id, arm, run_dir / "calls.jsonl", engine=engine, few_shot=few_shot, allowed_call_sites=allowed)
+    question in parallel, at most `agent.max_workers` at once, as the agent's own steps are. `dataset`
+    is [(question_id, its source records)]; C1 goes to run_dir/calls<part>.jsonl (`part` is `.w<k>`
+    for worker k, which builds its own `reader`: CHESS's agents do not cross processes). `stop` is the
+    flag the workers share: a question that fails sets it, and no question starts once it is set; a
+    question running when it was set from outside had its calls refused, and is not replayed."""
+    if reader is None:
+        _prepare_chess(config, paths.bird_root(config))
+        reader = readers(config)
+    hooks.start_run(run_id, arm, run_dir / f"calls{part}.jsonl", engine=engine, few_shot=few_shot,
+                    allowed_call_sites=allowed_call_sites, stop=stop)
     try:
-        for question_id, invocations in by_question.items():
+        for question_id, records in dataset:
+            if stop is not None and stop.is_set():
+                break
             hooks.set_question(question_id)
-            with ThreadPoolExecutor(max_workers=max(1, min(len(invocations), hooks.max_workers()))) as pool:
-                results = list(pool.map(_attempt, [call for _, call in invocations]))
-            for (record, _), failure in zip(invocations, results):
+            calls = [reader(record) for record in records]
+            with ThreadPoolExecutor(max_workers=max(1, min(len(calls), hooks.max_workers()))) as pool:
+                results = list(pool.map(_attempt, calls))
+            for record, failure in zip(records, results):
                 if failure is not None:
                     site = record["call_site"]
                     outcome["model_failures"][site] = outcome["model_failures"].get(site, 0) + 1
             harness_errors = hooks.take_harness_errors()
             if harness_errors:
                 outcome["harness_errors"][question_id] = harness_errors
+                if stop is not None:
+                    stop.set()
                 break  # a failed replay spends nothing more
-            outcome["replayed"].add(question_id)
+            if stop is not None and stop.is_set():
+                break
+            outcome["replayed"].append(question_id)
     finally:
         outcome["unregistered_call_sites"] = hooks.unregistered_call_sites()
         hooks.end_run()
+
+
+def _combine(outcome: Dict[str, Any], reported: Dict[str, Any]) -> None:
+    outcome["harness_errors"].update(reported["harness_errors"])
+    for site, n in reported["model_failures"].items():
+        outcome["model_failures"][site] = outcome["model_failures"].get(site, 0) + n
+    outcome["replayed"] += reported["replayed"]
+
+
+def _merge(question_ids: List[str], run_dir: Path, processes: List[Any], outcome: Dict[str, Any]) -> List[str]:
+    """The workers' outcomes and C1 files merged as an agent run's are, then `calls.jsonl` rewritten
+    in the order of the questions (a question's lines in the order they were written), so it does not
+    depend on the number of workers. A line that does not parse (a killed worker's last) goes last."""
+    stopped = _merge_workers(run_dir, processes, outcome, combine=_combine)
+    calls_path = run_dir / "calls.jsonl"
+    by_question: Dict[Any, List[str]] = {q: [] for q in question_ids}
+    for line in calls_path.read_text().splitlines(keepends=True):
+        try:
+            question_id = json.loads(line)["question_id"]
+        except (ValueError, TypeError, KeyError):
+            question_id = None
+        by_question.setdefault(question_id if question_id in by_question else None, []).append(line)
+    ordered = calls_path.with_name("calls.jsonl.ordered")
+    ordered.write_text("".join(line for lines in by_question.values() for line in lines))
+    os.replace(ordered, calls_path)
+    return stopped
 
 
 def _attempt(call: Callable[[], Any]) -> Optional[str]:
