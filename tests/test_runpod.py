@@ -3,6 +3,7 @@ terminate, volumes, the catalog's choice of data center, retries and errors), th
 the serving pod (`bench serve --on runpod up`), the load test and P-4's reference on pods, and the config
 patch, with every pod's shell run on this machine (tests/fixtures/fake_runpod.py). No network."""
 import copy
+import hashlib
 import importlib.util
 import json
 import re
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # runpod_apps/ 
 
 from bench import cli, paths  # noqa: E402
 from bench.contracts import facts  # noqa: E402
+from bench.provenance import git_state  # noqa: E402
 from fixtures.fake_runpod import FakeRunPod, LocalShell  # noqa: E402
 from modal_apps import common  # noqa: E402
 from runpod_apps import api as rapi  # noqa: E402
@@ -706,6 +708,9 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
         assert m["client"]["kind"] == "pod" and m["client"]["description"] == f"cpu pod cpu5c {world.config['loadtest']['client']['cpu']}"
         assert m["client"]["pod_id"] and m["client"]["pod_id"] != m["client"]["server_pod_id"]
         assert not {"cpu_sample", "loopback_calibration"} & set(m)
+        # the code the client pod ran AIPerf with: uploaded to it, this checkout's
+        assert m["pod_code_sha256"] == hashlib.sha256(rp.code_archive()).hexdigest() and m["pod_code_uploaded"] is True
+        assert m["pod_code_commit"] == git_state(rp.REPO)["commit"]
     direct, through = world.calibrated  # once per sweep: on the server against vLLM's port, then through the tunnel
     assert direct["base_url"] == "http://127.0.0.1:8000/v1" and through["base_url"] == f"http://127.0.0.1:{world.port}/v1"
     assert direct["concurrency"] == [1, max(world.config["loadtest"]["concurrency"])] and direct["model"] == TINY_NAME
@@ -768,7 +773,9 @@ def cpuset_job(world, taskset="/usr/bin/taskset", allowed="0-251"):
             "cgroup": {"cpuset_effective": allowed, "cpu_max": "1600000 100000", "cpu_limit": 16.0},
             "server_pids": [101, 102], "server_affinity": [allowed],
             "choice": colocated.choose_cores(cpus, {101: cpus, 102: cpus}), "taskset": taskset,
-            "hostname": "a100-host", "pod_id": "serving"}))
+            "hostname": "a100-host", "pod_id": "serving",
+            "server_isolated": {"threads_changed": 40, "before": [allowed], "away_from": "248-251"},
+            "server_affinity_after": ["0-247"]}))
         return 0
     return run
 
@@ -805,10 +812,13 @@ def test_the_colocated_client_runs_aiperf_on_the_serving_pod_pinned_on_the_loopb
     world = runpod_repo
     server = colocated_world(world, monkeypatch)
     (server.pod_dir / "bench/code/runpod_apps/colocated.py").unlink()  # a pod brought up before this client
+    (server.pod_dir / "bench/code.json").unlink()  # and before the code's record
     engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
     source = _source_run("agent-B4-calib-src", calls=[dict(c, engine=engine) for c in SOURCE])
     run_dirs = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1, 4], client="colocated")
     assert (server.pod_dir / "bench/code/runpod_apps/colocated.py").is_file()  # the code uploaded to it first
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    assert json.loads((server.pod_dir / "bench/code.json").read_text())["sha256"] == sha
     # no client pod, no tunnel, no key authorized: everything on the serving pod
     assert world.fake.created("loadtest") == [] and world.ssh == []
     assert [p["name"].rsplit("-", 1)[0] for p in world.fake.pods.values()] == [f"slm-bench-serve-{TINY_NAME}"]
@@ -833,13 +843,48 @@ def test_the_colocated_client_runs_aiperf_on_the_serving_pod_pinned_on_the_loopb
         assert client["pod_id"] == State().serving(TINY_NAME)["id"] and client["reaches_server"] == "loopback http://127.0.0.1:8000"
         assert client["pinned_cores"] == [248, 249, 250, 251] and client["server_pinned"] is False
         assert "not pinned" in client["cores_rule"] and client["nproc"] == 252
+        assert client["server_isolated"]["away_from"] == "248-251" and client["server_affinity_after"] == ["0-247"]
         assert client["cgroup"] == {"cpuset_effective": "0-251", "cpu_max": "1600000 100000", "cpu_limit": 16.0}
         assert m["loopback_calibration"]["overhead_ms"] == {"1": 0.0, str(max(world.config["loadtest"]["concurrency"])): 0.0}
         assert "tunnel_calibration" not in m
         sample = m["cpu_sample"]  # measured in the job around AIPerf's run (this machine: what it can read)
-        assert {"wall_s", "aiperf", "server", "container", "pinned_cores_host_busy", "method"} <= set(sample)
-        assert sample["aiperf"]["cpu_s"] >= 0
+        assert {"wall_s", "aiperf", "server", "container", "pinned_cores_host_busy", "method", "throttling"} <= set(sample)
+        assert sample["aiperf"]["cpu_s"] >= 0 and "contention_check" not in sample
+        # the criterion, per level (here no cgroup or server to read: no proof, so it fails; the sweep still ends)
+        assert m["contention_check"]["pass"] is False and m["contention_check"]["thresholds"]["CONTAINER_SHARE_MAX"] == 0.75
         assert "from-the-secret" not in (d / "aiperf.log").read_text() and m["secrets_redacted_in"] == ["aiperf.log"]
+        assert m["pod_code_sha256"] == sha and m["pod_code_uploaded"] is True
+        assert m["pod_code_commit"] == git_state(rp.REPO)["commit"] and m["pod_code_dirty"] == git_state(rp.REPO)["dirty"]
+
+
+def test_the_colocated_client_replaces_older_code_on_the_serving_pod_and_keeps_the_same(runpod_repo, monkeypatch):
+    from bench import loadtest
+
+    world = runpod_repo
+    server = colocated_world(world, monkeypatch)
+    uploads = []
+    original = rp.Provider.put_code
+    monkeypatch.setattr(rp.Provider, "put_code", lambda self, remote, archive: uploads.append(1) or original(self, remote, archive))
+    stale = server.pod_dir / "bench/code/runpod_apps/colocated.py"
+    stale.write_text("# an older version of the client, without what this checkout has\n")
+    record = server.pod_dir / "bench/code.json"
+    old = {"sha256": "0" * 64, "commit": "1" * 40, "dirty": False}
+    record.write_text(json.dumps(old))  # the pod holds older code that has the client's file
+    engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
+    source = _source_run("agent-B4-calib-src", calls=[dict(c, engine=engine) for c in SOURCE])
+    first, = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1], client="colocated")
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    assert len(uploads) == 1 and stale.read_text() == (rp.REPO / "runpod_apps/colocated.py").read_text()
+    m = json.loads((first / "manifest.json").read_text())
+    assert m["pod_code_sha256"] == sha != old["sha256"] and m["pod_code_commit"] == git_state(rp.REPO)["commit"]
+    assert m["pod_code_uploaded"] is True
+    # the pod now holds this checkout's code: the next sweep uploads nothing and records the same code
+    held = json.loads(record.read_text())
+    record.write_text(json.dumps({**held, "commit": "2" * 40}))  # the same archive, uploaded from another commit
+    second, = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1], client="colocated")
+    assert len(uploads) == 1
+    m = json.loads((second / "manifest.json").read_text())
+    assert (m["pod_code_sha256"], m["pod_code_commit"], m["pod_code_uploaded"]) == (sha, "2" * 40, False)
 
 
 def test_the_colocated_client_needs_taskset_and_leaves_no_pod(runpod_repo, monkeypatch):

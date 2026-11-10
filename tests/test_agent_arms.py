@@ -116,6 +116,31 @@ def test_the_examples_are_seeded(monkeypatch, repo):
     assert len(seeds) > 1
 
 
+def test_the_prefix_must_hash_to_its_pin(monkeypatch, repo):
+    """runs/ is not published: the prefix's bytes are pinned in the configuration (arms.B1.few_shot.sha256),
+    computable from any manifest's few_shot_sha256, and a rebuild that differs is refused."""
+    source = teacher_run(monkeypatch, repo)
+    set_config(repo, B1={"few_shot": {"k": 2, "source_run": source}})
+    _, manifest, _ = run(monkeypatch, repo, "B1", ("3",))
+    pin = few_shot.prefix_sha256(manifest["few_shot_sha256"])
+    config = yaml.safe_load(repo.read_text())
+    prefix, _ = few_shot.build(config)
+    assert pin == few_shot.prefix_sha256(few_shot.digests(prefix))
+    with pytest.raises(hooks.HarnessError, match="is not set: .* the test split needs"):
+        few_shot.check_pinned(config, prefix, require=True)
+    config["arms"]["B1"]["few_shot"]["sha256"] = pin
+    assert few_shot.build(config)[0] == prefix
+    few_shot.check_pinned(config, prefix, require=True)
+    config["arms"]["B1"]["few_shot"]["sha256"] = "0" * 64
+    with pytest.raises(hooks.HarnessError, match="not to arms.B1.few_shot.sha256"):
+        few_shot.build(config)
+    config["arms"]["B1"]["few_shot"]["k"] = 0  # no bytes from runs/: nothing to pin
+    few_shot.check_pinned(config, few_shot.build(config)[0], require=True)
+    set_config(repo, B1={"few_shot": {"k": 2, "source_run": source, "sha256": "0" * 64}})
+    with pytest.raises(hooks.HarnessError, match="not to arms.B1.few_shot.sha256"):
+        run(monkeypatch, repo, "B1", ("3",))
+
+
 def test_agent_examples_come_from_the_same_step(monkeypatch, repo):
     source = teacher_run(monkeypatch, repo)
     config = yaml.safe_load(repo.read_text())
@@ -290,6 +315,26 @@ def test_b3_runs_every_call_on_the_chosen_base(monkeypatch, repo):
     assert {(c["engine"], c["model"], c["model_role"], c["endpoint"], c["cluster"]) for c in calls} == {
         ("slm:qwen3-8b", "qwen3-8b", "slm", "vllm", None)}
     assert not (run_dir / "routes.jsonl").exists()  # nothing embedded: no router time to record
+    assert manifest["served"] == {"qwen3-8b": {"checked": False, "why": "its endpoint is not the local end of a "
+                                               "RunPod tunnel (runpod.local_ports): its server cannot be read"}}
+
+
+def test_a_server_that_fails_its_check_leaves_no_run(monkeypatch, repo):
+    """bench.agent.served refuses before the run exists: no run directory, no call."""
+    from bench.agent import served
+    choice, _ = facts(paths.ROOT)
+    set_config(repo, B3={"choice": rel(choice)})
+    asked = []
+
+    def refuse(config, engines, split):
+        asked.append((engines, split))
+        raise served.data.DataError("refusing to run on the server of qwen3-8b")
+    monkeypatch.setattr(served, "check_served", refuse)
+    before = set(paths.RUNS.iterdir()) if paths.RUNS.exists() else set()
+    with pytest.raises(served.data.DataError, match="refusing to run on the server"):
+        run(monkeypatch, repo, "B3", ("1",))
+    assert asked == [(["slm:qwen3-8b"], "train")]
+    assert (set(paths.RUNS.iterdir()) if paths.RUNS.exists() else set()) == before
 
 
 def test_b4_serves_each_call_with_the_adapter_of_its_cluster(monkeypatch, repo):

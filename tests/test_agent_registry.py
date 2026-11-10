@@ -4,6 +4,7 @@ anything runs and its manifest when it ends, never anything else; it runs only w
 of train and calib are registered and committed, and a call site outside them aborts it."""
 import hashlib
 import json
+import os
 import subprocess
 
 import pytest
@@ -13,6 +14,7 @@ import httpx  # noqa: E402
 import openai  # noqa: E402
 
 from bench import barrier, paths  # noqa: E402
+from bench.data import DataError  # noqa: E402
 from bench.agent import hooks, registry, runner  # noqa: E402
 from bench.contracts.calls import CALL_SITES, read_calls  # noqa: E402
 from bench.contracts.config import config_sha256  # noqa: E402
@@ -101,7 +103,7 @@ def test_the_intent_is_committed_before_anything_runs_and_the_manifest_after(rep
                 raise OSError(f"cannot read {root}/secret/prompt.txt")  # unrecognised: fails the run
             return super().invoke(messages)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     intent, manifest_rel = f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"
     assert seen_while_running == [[intent, manifest_rel]]  # a run that dies from here on leaves its manifest `running`
     started = json.loads(git(root, "show", f"HEAD~1:{manifest_rel}"))
@@ -133,7 +135,7 @@ def test_the_intent_is_on_origin_before_the_first_question(repo, monkeypatch):
                 on_origin.append(git(origin, "ls-tree", "-r", "--name-only", "main", "registry/test").split())
             return super().invoke(messages)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     assert on_origin == [[f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]]
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
 
@@ -148,7 +150,7 @@ def refused_before_spending(root, config_path, monkeypatch, match):
             return super().invoke(messages)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Counting())
     with pytest.raises(barrier.TestSplitLocked, match=match):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     assert calls == []  # not one model call
     assert not any(p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())  # and no run
     intent, started = git(root, "ls-files", "registry/test").split()
@@ -167,18 +169,18 @@ def test_a_failed_push_of_the_intent_refuses_the_run_before_any_spend(repo, monk
     assert git(origin, "ls-tree", "-r", "--name-only", "main", "registry/").split() == [registry.CALL_SITES_FILE]
     # the intent stays committed here, the record of the attempt; until it is pushed nothing else runs on test
     with pytest.raises(barrier.TestSplitLocked, match="push the registry first"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     hook.unlink()
     git(root, "push", "-q", "origin", "main")
     # published now, the refused attempt is an earlier attempt: running again from scratch states why
     with pytest.raises(barrier.TestSplitLocked, match="already attempted it"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     refused_id = intent.rsplit("/", 1)[1].rsplit(".", 2)[0]
     # it never ran, so it cannot be resumed (no run directory): a redo, once DEVIATIONS.md names it
     with pytest.raises(barrier.TestSplitLocked, match=f"DEVIATIONS.md, as published, has no line naming {refused_id}"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the intent could not be pushed")
+        runner.run_agent(str(config_path), "B0", "test", redo_reason="the intent could not be pushed")
     deviation(root, refused_id, "its intent could not be pushed")
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the intent could not be pushed")
+    run_dir = runner.run_agent(str(config_path), "B0", "test", redo_reason="the intent could not be pushed")
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["redo_reason"] == "the intent could not be pushed"
     assert manifest["redo"]["of"] == refused_id and manifest["redo"]["affects_completed"] is False
@@ -203,16 +205,46 @@ def test_a_push_that_succeeds_is_still_confirmed_by_what_a_fetch_finds(repo, mon
 def test_a_single_call_execution_on_test_is_registered_too(repo):
     root, config_path = repo
     register(root, config_path)
-    run_dir = runner.run_agent(str(config_path), "B2", "test", ids=["9"], engine="production_llm")
+    run_dir = runner.run_agent(str(config_path), "B2", "test", engine="production_llm")
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
     assert sorted(git(root, "ls-files", "registry/test").split()) == [
         f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]
 
 
+@pytest.mark.parametrize("selection", [{"ids": ["9"]}, {"limit": 1}])
+def test_part_of_the_test_split_is_refused_before_anything_is_recorded(repo, selection):
+    """A configuration has one run on test: a `done` run of part of the split would be it."""
+    root, config_path = repo
+    register(root, config_path)
+    with pytest.raises(DataError, match="--ids and --limit are refused on the test split"):
+        runner.run_agent(str(config_path), "B0", "test", **selection)
+    assert not (root / "registry" / "test").exists()
+    assert all(not p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())
+
+
+def test_the_send_modes_are_never_read_from_the_shell(repo, monkeypatch):
+    """BENCH_ANTHROPIC_BATCH / BENCH_VIA_CLAUDE_CODE left exported are cleared: only --batch and
+    --via-claude-code (K1 only) choose how the production LLM's calls are sent."""
+    root, config_path = repo
+    register(root, config_path)
+    monkeypatch.setenv("BENCH_ANTHROPIC_BATCH", "1")
+    monkeypatch.setenv("BENCH_VIA_CLAUDE_CODE", "1")
+    seen = []
+
+    class Watching(ScriptedChess):
+        def invoke(self, messages):
+            seen.append((os.environ.get("BENCH_ANTHROPIC_BATCH"), os.environ.get("BENCH_VIA_CLAUDE_CODE")))
+            return super().invoke(messages)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+    assert seen and set(seen) == {(None, None)}
+
+
 def test_a_call_site_outside_the_registered_set_aborts_the_run(repo):
     root, config_path = repo
     register(root, config_path, call_sites=[s for s in CALL_SITES if s != "select_columns"])
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "failed" and manifest["unregistered_call_sites"] == ["select_columns"]
     assert "REQ-001" in json.dumps(manifest["harness_errors"])
@@ -225,15 +257,15 @@ def test_a_call_site_outside_the_registered_set_aborts_the_run(repo):
 def test_no_registered_call_sites_no_test_run(repo):
     root, config_path = repo
     with pytest.raises(barrier.TestSplitLocked, match="does not exist"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     register(root, config_path, commit=False)
     with pytest.raises(barrier.TestSplitLocked, match="not committed"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     git(root, "add", registry.CALL_SITES_FILE)
     git(root, "commit", "-q", "-m", "register")
     (root / registry.CALL_SITES_FILE).write_text('{"call_sites": ["agent_ir"]}')
     with pytest.raises(barrier.TestSplitLocked, match="uncommitted"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     assert not (root / "registry" / "test").exists()
     assert all(not p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())
 
@@ -244,7 +276,7 @@ def test_only_done_train_and_calib_runs_register_call_sites(repo):
     registered = json.loads((root / registry.CALL_SITES_FILE).read_text())
     assert registered["call_sites"] == sorted(set(CALL_SITES) - {"revise"})  # what the run called, nothing more
     assert registered["sources"][train.name]["split"] == "train"
-    test_run = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    test_run = runner.run_agent(str(config_path), "B0", "test")
     with pytest.raises(registry.RegistryError, match="only train and calib"):
         registry.update_call_sites([test_run.name])
     manifest = json.loads((train / "manifest.json").read_text())
@@ -261,12 +293,12 @@ def test_the_registry_commits_its_file_and_nothing_else(repo):
     (root / "staged.txt").write_text("staged, not committed\n")
     git(root, "add", "staged.txt")
     with pytest.raises(barrier.TestSplitLocked, match="not clean \\(A staged.txt\\)"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     git(root, "rm", "-q", "--cached", "staged.txt")
     (root / "staged.txt").unlink()
     (root / "runs" / "scratch.txt").write_text("ignored output\n")
     before = git(root, "rev-parse", "HEAD").strip()
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     assert git(root, "diff", "--name-only", before, "HEAD").split() == [
         f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]
     assert (root / "runs" / "scratch.txt").read_text() == "ignored output\n"
@@ -280,7 +312,7 @@ def test_a_manifest_the_registry_cannot_commit_fails_the_run(repo, monkeypatch):
         raise registry.RegistryError("git commit failed: signing required")
     monkeypatch.setattr(registry, "commit_manifest", refused)
     with pytest.raises(hooks.HarnessError, match="signing required"):  # a harness error: the CLI reports it
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "failed" and "registry" in manifest["problems"][-1]
@@ -359,7 +391,7 @@ def test_a_committed_manifest_never_echoes_a_providers_key(repo, monkeypatch):
         def invoke(self, messages):
             raise openai.AuthenticationError(body, response=httpx.Response(401, request=httpx.Request("POST", "http://x")), body=None)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Refusing())
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     local = (run_dir / "manifest.json").read_text()  # no manifest keeps a credential, the local one included
     assert "sk-proj" not in local and "<redacted>" in local and "Incorrect API key provided" in local
     committed = git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json")
@@ -373,10 +405,10 @@ def test_a_test_run_waits_until_the_registry_is_pushed(repo):
     git(root, "add", "registry/note.txt")
     git(root, "commit", "-q", "-m", "unpushed registry commit")
     with pytest.raises(barrier.TestSplitLocked, match="push the registry first"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     assert not any(p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())
     git(root, "push", "-q", "origin", "main")
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
 
 
@@ -391,7 +423,7 @@ def test_a_ctrl_c_commits_the_manifest_as_interrupted(repo, monkeypatch):
             return super().invoke(messages)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Interrupting())
     with pytest.raises(KeyboardInterrupt):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
     committed = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))
     assert (committed["status"], committed["stopped_by"]) == ("interrupted", "KeyboardInterrupt: ")
@@ -410,11 +442,11 @@ def test_a_key_too_short_to_redact_keeps_a_test_run_from_starting(repo, monkeypa
     publish_prereg(root, runner.load_config(config_path))
     monkeypatch.setenv("BENCH_TEST_PROVIDER_KEY", "abc12")  # a key, and too short to redact without damage
     with pytest.raises(barrier.TestSplitLocked, match="BENCH_TEST_PROVIDER_KEY is shorter than 8"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     assert not (root / "registry" / "test").exists()
     monkeypatch.setenv("BENCH_TEST_PROVIDER_KEY", "a-long-enough-provider-key")
     monkeypatch.setenv("OPENAI_API_KEY", "1")  # set, but this run never uses it (fake embeddings): no refusal
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
 
 
@@ -429,7 +461,7 @@ def test_a_second_completed_run_of_one_configuration_is_refused_before_its_inten
         def invoke(self, messages):
             raise OSError("the network went away")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Failing())
-    failed = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    failed = runner.run_agent(str(config_path), "B0", "test")
     assert json.loads((failed / "manifest.json").read_text())["status"] == "failed"
     git(root, "push", "-q", "origin", "main")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
@@ -446,10 +478,10 @@ def test_a_second_completed_run_of_one_configuration_is_refused_before_its_inten
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Counting())
     runs_before = set(paths.RUNS.iterdir())
     with pytest.raises(barrier.TestSplitLocked, match=f"{done.name} already completed it"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     assert calls == [] and set(paths.RUNS.iterdir()) == runs_before
     assert git(root, "rev-parse", "HEAD").strip() == before  # no intent committed
-    other = runner.run_agent(str(config_path), "B2", "test", ids=["9"], engine="production_llm")
+    other = runner.run_agent(str(config_path), "B2", "test", engine="production_llm")
     assert json.loads((other / "manifest.json").read_text())["status"] == "done"
 
 
@@ -511,7 +543,7 @@ def test_a_lock_at_the_end_of_a_test_run_leaves_it_done(repo, monkeypatch):
         return real(*args)
     monkeypatch.setattr(registry, "_git", busy_once)
     monkeypatch.setattr(registry.time, "sleep", lambda s: None)
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test")
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert locked and manifest["status"] == "done" and manifest["problems"] == []
     assert json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))["status"] == "done"
@@ -527,7 +559,7 @@ class NetworkDown(ScriptedChess):
 def failed_test_run(root, config_path, monkeypatch, **kwargs):
     """A test run that fails (its harness: the network), committed and pushed as the RUNBOOK's loop does."""
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], **kwargs)
+    run_dir = runner.run_agent(str(config_path), "B0", "test", **kwargs)
     git(root, "push", "-q", "origin", "main")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
     return run_dir
@@ -596,11 +628,11 @@ def test_a_resumable_attempt_is_resumed_and_redone_only_for_a_defect_in_what_it_
     register(root, config_path)
     first = failed_test_run(root, config_path, monkeypatch)
     with pytest.raises(barrier.TestSplitLocked, match=f"{first.name} already attempted it"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     with pytest.raises(barrier.TestSplitLocked, match=f"can be resumed. Resume it with --resume-from {first.name}"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the endpoint was misconfigured")
+        runner.run_agent(str(config_path), "B0", "test", redo_reason="the endpoint was misconfigured")
     with pytest.raises(barrier.TestSplitLocked, match="has no line naming"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the endpoint was misconfigured",
+        runner.run_agent(str(config_path), "B0", "test", redo_reason="the endpoint was misconfigured",
                          redo_affects_completed=True)
     deviation(root, first.name, "the endpoint was misconfigured, which every completed question went through")
     second = failed_test_run(root, config_path, monkeypatch, redo_reason="  the endpoint\nwas misconfigured ",
@@ -624,14 +656,14 @@ def test_a_redo_reason_needs_an_earlier_attempt_on_test_and_excludes_a_resume(re
     root, config_path = repo
     register(root, config_path)
     with pytest.raises(barrier.TestSplitLocked, match="nothing to run again"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="a defect")
+        runner.run_agent(str(config_path), "B0", "test", redo_reason="a defect")
     with pytest.raises(DataError, match="for the test split"):
         runner.run_agent(str(config_path), "B0", "train", ids=["1"], redo_reason="a defect")
     source = failed_test_run(root, config_path, monkeypatch)
     with pytest.raises(DataError, match="choose one"):
         runner.run_agent(str(config_path), "B0", "test", resume_from=source.name, redo_reason="a defect")
     with pytest.raises(DataError, match="qualifies --redo-reason"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_affects_completed=True)
+        runner.run_agent(str(config_path), "B0", "test", redo_affects_completed=True)
     assert not (root / "registry" / "test" / "x").exists()
 
 
@@ -665,11 +697,11 @@ def test_a_test_execution_is_refused_on_code_changed_after_the_registration(repo
     register(root, config_path)
     (root / "bench" / "agent" / "code.py").write_text("x = 2\n")
     with pytest.raises(barrier.TestSplitLocked, match="not clean \\(M bench/agent/code.py\\)"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     git(root, "commit", "-q", "-am", "a fix after the registration")
     git(root, "push", "-q", "origin", "main")
     with pytest.raises(barrier.TestSplitLocked, match="differs from the registered commit .* bench/agent/code.py"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     assert not (root / "registry" / "test").exists()
 
 
@@ -690,7 +722,7 @@ def test_a_test_session_killed_outright_is_resumed_with_its_outputs_hashed_first
         real_write_json(path, value)
     monkeypatch.setattr(runner, "_write_json", write_json)
     with pytest.raises(Killed):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+        runner.run_agent(str(config_path), "B0", "test")
     monkeypatch.setattr(runner, "_write_json", real_write_json)
     (source,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
     published = json.loads(git(root, "show", f"origin/main:registry/test/{source.name}.manifest.json"))
@@ -699,7 +731,7 @@ def test_a_test_session_killed_outright_is_resumed_with_its_outputs_hashed_first
     assert set(hashes) == {"answers.jsonl", "calls.jsonl"}
 
     with pytest.raises(barrier.TestSplitLocked, match="already attempted it"):
-        runner.run_agent(str(config_path), "B0", "test", ids=["9"])  # a redo still needs its reason
+        runner.run_agent(str(config_path), "B0", "test")  # a redo still needs its reason
     run_dir = runner.run_agent(str(config_path), "B0", "test", resume_from=source.name)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["resumed_question_ids"] == ["9"]
@@ -718,7 +750,7 @@ def failed_replay(repo, monkeypatch):
     from bench.agent import replay
     root, config_path = repo
     register(root, config_path)
-    source = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    source = runner.run_agent(str(config_path), "B0", "test")
     git(root, "push", "-q", "origin", "main")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
     failed = replay.replay(str(config_path), source.name, engine="production_llm")
@@ -815,7 +847,7 @@ def test_an_attempt_that_cannot_be_resumed_is_redone_with_its_deviation_and_why(
     (first / "calls.jsonl").write_text("")
     refused_resume(root, config_path, first.name, "calls.jsonl does not hash")
     deviation(root, first.name, "its calls.jsonl was lost")
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="its calls.jsonl was lost")
+    run_dir = runner.run_agent(str(config_path), "B0", "test", redo_reason="its calls.jsonl was lost")
     redo = json.loads((run_dir / "manifest.json").read_text())["redo"]
     assert (redo["of"], redo["affects_completed"]) == (first.name, False)
     assert "calls.jsonl does not hash" in redo["not_resumable_because"]

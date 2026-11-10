@@ -18,6 +18,7 @@ from bench.judge.j1 import ex_summary, ex_table
 from bench.judge.j4 import noninferiority
 from fixtures.world import unit
 
+POINT = " (by point estimate, no interval)"
 VOCABULARY = ("confirms", "refutes", "inconclusive", "not testable", "descriptive", "no data", "does not refute",
               "no verdict", "meets the paper's", "cheaper even at", "utilization-dependent")
 
@@ -44,9 +45,11 @@ def data_with(tests, costs, formats=None, repair=None, per_call=None, ratios=Non
             **({"cost_ratios_sensitivity": dict(ratios or {})} if modal else {})}
 
 
-def ratio(point, low, high, base="B0", slm="B4"):
-    """V3's cost ratio at one utilization, with its 95% interval, as `report.cost_ratios` gives it."""
-    return {"base": base, "slm": slm, "ratio": point, "ci_low": low, "ci_high": high}
+def ratio(point, low, high, base="B0", slm="B4", not_worse=None):
+    """V3's cost ratio at one utilization, with its 95% interval, as `report.cost_ratios` gives it: against the
+    cheapest arm non-inferior to B0 and, in `not_worse`, against the cheapest not worse (the same by default)."""
+    found = {"base": base, "slm": slm, "ratio": point, "ci_low": low, "ci_high": high}
+    return {**found, "not_worse": not_worse or {k: found[k] for k in ("base", "ratio", "ci_low", "ci_high")}}
 
 
 def row(rows, prefix):
@@ -91,7 +94,7 @@ def test_v1_is_judged_on_b4_alone():
     assert v1({"B0|B4": j4(True), "B0|B5": j4(False, diff=-0.2)})["verdict"] == "confirms"
     assert v1({"B0|B5": j4(True)})["verdict"] == "no data"                                        # B5 alone is no evidence
     shown = v1(j4_results())
-    assert "B5" not in shown["result"] and shown["result"].startswith("B4 − B0: -1.0 pp (Δ 5.0 pp, CI [") and shown["power"] == "0.80"
+    assert "B5" not in shown["result"] and shown["result"].startswith("B4 − B0: -1.0 pp (Δ 5.0 pp, 90% CI [") and shown["power"] == "0.80"
     # without a pilot the margin is still the fixed one: a verdict, with no planned power
     no_pilot = v1(j4_results(pilot=None))
     assert no_pilot["verdict"] == "confirms" and no_pilot["power"] == "—"
@@ -166,24 +169,39 @@ def test_the_cost_ratio_is_resampled_paired_by_question():
     assert found["ratio"] == pytest.approx(3.0) and found["ci_low"] == pytest.approx(3.0) == found["ci_high"]
 
 
-def test_the_ratio_is_the_best_arm_without_training_over_the_cheapest_slm_arm():
-    """T9: per configured utilization, from J3's by_question; B2 stays in the comparator set."""
-    tests = {**j4_results(), "B0|B1": j4(False), "B0|B2-cheap": j4(True)}
-    costs = {"B0": {"": 1.0}, "B1": {"": 0.1}, "B2-cheap": {"": 0.6}, "B4": {"20%": 0.4, "50%": 0.2, "100%": 0.1},
-             "B5": {"20%": 0.3, "50%": 0.25, "100%": 0.2}}
+def test_the_ratio_is_the_best_arm_without_training_over_b4_against_both_comparators():
+    """T9: per configured utilization, from J3's by_question; B2 stays in the comparator set. V3's SLM arm is
+    B4 alone (B5, a hybrid, is A6's), against (i) the cheapest arm non-inferior to B0 and (ii) the cheapest
+    not shown worse than B0."""
+    tests = {**j4_results(), "B0|B1": j4(False), "B0|B2-cheap": j4(True), "B0|B2-production": j4(False, diff=-0.2)}
+    costs = {"B0": {"": 1.0}, "B1": {"": 0.1}, "B2-production": {"": 0.05}, "B2-cheap": {"": 0.6},
+             "B4": {"20%": 0.4, "50%": 0.2, "100%": 0.1}, "B5": {"20%": 0.3, "50%": 0.25, "100%": 0.2}}
     data = data_with(tests, costs)
     questions = ["1", "2"]
     correct = {arm: {q: True for q in questions} for arm in costs}
     priced = lambda arm: {q: {(f"standard@{u}" if u else "standard"): c / 2 for u, c in costs[arm].items()} for q in questions}  # noqa: E731
     found = report.cost_ratios(data, {arm: priced(arm) for arm in costs}, correct, seed=1, n_boot=50)
-    # B1 is cheaper but not non-inferior to B0; B2-cheap is: it is the best arm without training
-    assert {u: (r["base"], r["slm"]) for u, r in found.items()} == {"20%": ("B2-cheap", "B5"), "50%": ("B2-cheap", "B4"),
-                                                                    "100%": ("B2-cheap", "B4")}
-    assert [found[u]["ratio"] for u in ("20%", "50%", "100%")] == [pytest.approx(2.0), pytest.approx(3.0), pytest.approx(6.0)]
-    # an SLM arm that is not non-inferior to B0 is not compared
+    # B1 is cheaper but only inconclusive against B0: comparator (i) is B2-cheap, (ii) is B1; B2-production,
+    # worse than B0, is neither. B5 is cheaper than B4 at 20%, and is not V3's arm
+    assert {u: (r["base"], r["slm"], r["not_worse"]["base"]) for u, r in found.items()} == {
+        u: ("B2-cheap", "B4", "B1") for u in ("20%", "50%", "100%")}
+    assert [found[u]["ratio"] for u in ("20%", "50%", "100%")] == [pytest.approx(1.5), pytest.approx(3.0), pytest.approx(6.0)]
+    assert [found[u]["not_worse"]["ratio"] for u in ("20%", "50%", "100%")] == [
+        pytest.approx(0.25), pytest.approx(0.5), pytest.approx(1.0)]
+    # B4 not non-inferior to B0: its ratio is still computed, for the report to print as descriptive
     failing = report.cost_ratios(data_with({**tests, **j4_results(False, False)}, costs), {arm: priced(arm) for arm in costs},
                                  correct, seed=1, n_boot=50)
-    assert failing == {}
+    assert failing["20%"]["slm"] == "B4" and failing["20%"]["ratio"] == pytest.approx(1.5)
+
+
+def test_both_comparators_must_hold_for_a_confirmation_and_both_must_fail_for_a_refutation():
+    both = lambda first, second: report.both_readings(ratio(*first, not_worse={"base": "B1", "ratio": second[0],  # noqa: E731
+                                                                                "ci_low": second[1], "ci_high": second[2]}), 3)
+    assert both((4, 3.2, 5), (4, 3.1, 5)) == "meets"
+    assert both((4, 3.2, 5), (2, 1.5, 2.5)) == "cheaper"           # only as far as both go
+    assert both((4, 3.2, 5), (1.2, 0.9, 1.5)) == "inconclusive"
+    assert both((1.2, 0.9, 1.5), (0.8, 0.6, 1.0)) == "inconclusive"  # refuted against one only
+    assert both((0.9, 0.7, 1.0), (0.8, 0.6, 0.9)) == "refutes"
 
 
 def test_how_a_cost_ratio_reads():
@@ -219,7 +237,14 @@ def test_v3_confirms_at_the_lowest_utilization_and_refutes_at_the_highest():
         return row(report.claims_map(data_with(tests or j4_results(), costs, ratios=ratios)), "V3")
     met = v3(ratio(4, 3.2, 5), ratio(10, 8, 12), ratio(20, 16, 24))
     assert met["verdict"] == "meets the paper's 3× bar (even at 20% utilization)"
-    assert "20%: 4.0× (95% CI [3.2, 5.0]) B0 ÷ B4, meets the paper's 3× bar · 50%: 10.0× (95% CI [8.0, 12.0])" in met["result"]
+    assert ("20%: 4.0× (95% CI [3.2, 5.0]) B0 ÷ B4, meets the paper's 3× bar (the cheapest non-inferior and the cheapest "
+            "not worse are the same arm) · 50%: 10.0× (95% CI [8.0, 12.0])") in met["result"]
+    # a cheaper comparator not shown worse (B1, inconclusive) holds the verdict back to what holds against it too
+    split = v3(ratio(4, 3.2, 5, not_worse={"base": "B1", "ratio": 2, "ci_low": 1.5, "ci_high": 2.5}), ratio(10, 8, 12),
+               ratio(20, 16, 24))
+    assert split["verdict"] == "cheaper even at 20% utilization, below the 3× bar there"
+    assert ("20%: against the cheapest non-inferior 4.0× (95% CI [3.2, 5.0]) B0 ÷ B4, meets the paper's 3× bar; against the "
+            "cheapest not worse 2.0× (95% CI [1.5, 2.5]) B1 ÷ B4, cheaper, below the 3× bar") in split["result"]
     # 2× cheaper at the worst case: the old rule read 'refutes' (below 3×); it supports 'more economical'.
     # The bar is met only if met at the lowest utilization: here it is met at 100%, and the verdict is the 20% one
     assert v3(ratio(2, 1.5, 2.5), ratio(5, 4, 6), ratio(10, 8, 12))["verdict"] == \
@@ -245,14 +270,18 @@ def test_v3_confirms_at_the_lowest_utilization_and_refutes_at_the_highest():
         "inconclusive (at 20% utilization: the interval holds 1; at 100%: meets the 3× bar)"
     assert v3(ratio(1.1, 0.8, 1.4), ratio(1.2, 0.9, 1.5), ratio(1.3, 0.95, 1.6))["verdict"] == \
         "inconclusive (at 20% utilization: the interval holds 1; at 100%: the interval holds 1)"
-    # no SLM arm non-inferior to B0: no ratio, and the comparisons say why
-    failing = v3(None, None, None, tests=j4_results(False, False))
-    assert failing["verdict"] == "inconclusive (planned power 0.80, 0.80) (no SLM arm is non-inferior to B0)"
-    both_worse = {"B0|B4": j4(False, diff=-0.2), "B0|B5": j4(False, diff=-0.2)}  # decided, not inconclusive: V1 and A6 refute
-    assert v3(None, None, None, tests=both_worse)["verdict"] == "not testable (every SLM arm is worse than B0)"
+    # B4 not non-inferior to B0: not testable, whatever B5 does, and B4's ratio is printed as descriptive
+    failing = v3(ratio(4, 3.2, 5), None, ratio(20, 16, 24), tests=j4_results(False, True))
+    assert failing["verdict"] == "not testable (no all-SLM arm is non-inferior to B0: B4 is inconclusive)"
+    assert failing["power"] == "0.80" and "per utilization, descriptive (B4 is not non-inferior to B0): 20%: 4.0×" in failing["result"]
+    both_worse = {"B0|B4": j4(False, diff=-0.2), "B0|B5": j4(True)}
+    assert v3(None, None, None, tests=both_worse)["verdict"] == "not testable (no all-SLM arm is non-inferior to B0: B4 is worse)"
     capped = data_with(both_worse, {"B0": {"": 1.0}, "B4": {"20%": 0.25, "100%": 0.05}})
     capped["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)  # nor does an upper-bound cost make it inconclusive
-    assert row(report.claims_map(capped), "V3")["verdict"] == "not testable (every SLM arm is worse than B0)"
+    assert row(report.claims_map(capped), "V3")["verdict"] == "not testable (no all-SLM arm is non-inferior to B0: B4 is worse)"
+    # a B5 that passes cannot carry V3: with B4 absent, there is no all-SLM arm to price
+    b5_only = data_with(j4_results(), {"B0": {"": 1.0}, "B5": {"20%": 0.1, "100%": 0.01}}, ratios={})
+    assert row(report.claims_map(b5_only), "V3")["verdict"] == "no data"
     assert row(report.claims_map(data_with(j4_results(), {"B0": {"": 1.0}})), "V3")["verdict"] == "no data"
 
 
@@ -261,7 +290,7 @@ def test_a_b5_without_slm_calls_is_no_slm_arm():
     the SLM arm."""
     costs = {"B0": {"": 1.0}, "B1": {"": 0.5}, "B5": {"": 0.9}}
     data = data_with(j4_results(), costs)
-    assert report.slm_arms(data) == [] and report.best_slm(data, "20%") == (None, None)
+    assert report.slm_arms(data) == []
     assert row(report.claims_map(data), "V3")["verdict"] == "no data"
     assert row(report.claims_map(data), "AV2")["verdict"] == "no data"
     costs["B4"] = {"20%": 0.4, "50%": 0.2, "100%": 0.1}
@@ -271,19 +300,20 @@ def test_a_b5_without_slm_calls_is_no_slm_arm():
 def test_a6_takes_b5_against_b0_under_the_utilization_bracket():
     """T7 and T10: B5 against B0 is A6's; it confirms only if B5 is cheaper at the lowest utilization (and
     non-inferior), and refutes only if B5 is not cheaper at the highest."""
-    tests = {**j4_results(), "B0|B1": j4(False)}  # B1 is not non-inferior to B0: the best arm without training is B0, $1
+    tests = {**j4_results(), "B0|B1": j4(False, diff=-0.2)}  # B1 is worse than B0: the best arm without training is B0, $1
 
     def a6(b5, tests=tests, **more):
         return row(report.claims_map(data_with(tests, {"B0": {"": 1.0}, "B1": {"": 0.2}, "B5": b5}, **more)), "A6")
     cheap = a6({"20%": 0.4, "50%": 0.2, "100%": 0.05})
-    assert cheap["verdict"] == "confirms (B5 is cheaper even at 20% utilization, and non-inferior to B0)"
-    assert cheap["result"] == ("B5 − B0: -1.0 pp (Δ 5.0 pp, CI [+0.0 pp, +4.0 pp]), non-inferior; cost per correct query: B5 $0.4 "
-                               "at 20% utilization and $0.05 at 100%, against $1 of the best arm without training (B0)")
-    assert a6({"20%": 2.0, "50%": 1.6, "100%": 1.5})["verdict"] == "refutes (B5 is not cheaper even at 100% utilization)"
+    assert cheap["verdict"] == "confirms (B5 is cheaper even at 20% utilization, and non-inferior to B0) (by point estimate, no interval)"
+    assert cheap["result"] == ("B5 − B0: -1.0 pp (Δ 5.0 pp, 90% CI [+0.0 pp, +4.0 pp]), non-inferior; cost per correct query: B5 $0.4 "
+                               "at 20% utilization and $0.05 at 100%, against $1 of the best arm without training (B0: the cheapest non-inferior "
+                               "to B0 and not worse)")
+    assert a6({"20%": 2.0, "50%": 1.6, "100%": 1.5})["verdict"] == "refutes (B5 is not cheaper even at 100% utilization) (by point estimate, no interval)"
     assert a6({"20%": 2.0, "50%": 1.6, "100%": 1.0})["verdict"].startswith("refutes")  # the same cost is not cheaper
     # cheaper at 100% only: $0.4/u meets $1 at u* = 40% (the old rule read 'refutes' at 20% and 'confirms' at 100%)
-    assert a6({"20%": 2.0, "50%": 0.8, "100%": 0.4})["verdict"] == "utilization-dependent (tipping point u* ≈ 40%)"
-    assert a6({"20%": 1.0, "50%": 0.4, "100%": 0.2})["verdict"] == "utilization-dependent (tipping point u* ≈ 20%)"  # the same cost at 20%
+    assert a6({"20%": 2.0, "50%": 0.8, "100%": 0.4})["verdict"] == "utilization-dependent (tipping point u* ≈ 40%) (by point estimate, no interval)"
+    assert a6({"20%": 1.0, "50%": 0.4, "100%": 0.2})["verdict"] == "utilization-dependent (tipping point u* ≈ 20%) (by point estimate, no interval)"  # the same cost at 20%
     # cheaper everywhere, but not shown non-inferior to B0: no confirmation
     assert a6({"20%": 0.4, "100%": 0.05}, tests=j4_results(ok5=False))["verdict"] == "inconclusive (planned power 0.80)"
     # B5 against B0 is this row's (T7): a B5 that is worse than B0 refutes it, however cheap
@@ -299,6 +329,49 @@ def test_a6_takes_b5_against_b0_under_the_utilization_bracket():
     assert llm_only["verdict"] == "not testable (B5's execution made no SLM call)"
     assert a6({"20%": 0.4, "100%": 0.05}, tests=j4_results(ok4=False))["verdict"].startswith("confirms")  # B4 is V1's, not A6's
     assert row(report.claims_map(data_with(tests, {"B0": {"": 1.0}})), "A6")["verdict"] == "no data"
+    # two comparators: B1 inconclusive (not worse) at $0.2 and B0 non-inferior at $1. A confirmation must beat both,
+    # a refutation fail against both; otherwise the comparators disagree and the row is inconclusive
+    split = {**j4_results(), "B0|B1": j4(False)}
+    beats_both = a6({"20%": 0.1, "100%": 0.05}, tests=split)
+    assert beats_both["verdict"].startswith("confirms") and ("against $1 of the cheapest arm without training non-inferior "
+                                                             "to B0 (B0) and $0.2 of the cheapest not worse than B0 (B1)") in beats_both["result"]
+    assert a6({"20%": 0.4, "100%": 0.05}, tests=split)["verdict"] == (
+        "inconclusive (the comparators disagree: B5 at $0.4 (20%) and $0.05 (100%) against B0 at $1 and B1 at $0.2)" + POINT)
+    assert a6({"20%": 2.0, "100%": 0.5}, tests=split)["verdict"].startswith("inconclusive (the comparators disagree")
+    assert a6({"20%": 2.0, "100%": 1.0}, tests=split)["verdict"].startswith("refutes (B5 is not cheaper even at 100%")
+    assert a6({"20%": 2.0, "100%": 0.1}, tests=split)["verdict"].startswith("utilization-dependent")
+    # B5's share of calls, tokens and cost per engine: where a hybrid's savings come from
+    shared = data_with(tests, {"B0": {"": 1.0}, "B5": {"20%": 0.4, "100%": 0.05}})
+    shared["arms"]["B5"]["engine_shares"] = {
+        "slm": {"calls": 0.6, "tokens": 0.5, "cost": {"20%": 0.3, "100%": 0.05}},
+        "cheap_alt": {"calls": 0.4, "tokens": 0.5, "cost": {"20%": 0.7, "100%": 0.95}}}
+    assert ("; B5's share per engine (calls, tokens, cost): cheap_alt 40.0%, 50.0%, 70.0% at 20%, 95.0% at 100%; "
+            "slm 60.0%, 50.0%, 30.0% at 20%, 5.0% at 100%; cost per correct query") in row(report.claims_map(shared), "A6")["result"]
+
+
+def test_b5s_share_per_engine_is_priced_by_j3s_own_functions(monkeypatch):
+    """A6 prints where B5's calls, tokens and cost went, per engine role, priced as J3 prices them: two teacher
+    calls at $0.0024 (1,000 input tokens at $2/M, 50 output at $8/M), one cheap call at $0.00023, one SLM call at
+    $0.010 at 20% utilization and $0.002 at 100%."""
+    from fixtures.fake import call
+    calls = [call("b5", "1", "select_tables", "a"), call("b5", "1", "select_tables", "b"),
+             call("b5", "2", "select_tables", "c", role="cheap_alt", engine="cheap_alt", model="cheap-model"),
+             call("b5", "2", "select_tables", "d", role="slm", engine="qwen+lora:c0", model="qwen")]
+    prices = {"as_of": "2026-09-30", "table": {
+        "teacher-model": {"provider": "provider-x", "input_per_mtok": 2.0, "cached_input_per_mtok": 0.5, "output_per_mtok": 8.0},
+        "cheap-model": {"provider": "provider-x", "input_per_mtok": 0.2, "cached_input_per_mtok": 0.2, "output_per_mtok": 0.6}}}
+    monkeypatch.setattr(report, "calls_of", lambda run_id: calls)
+    monkeypatch.setattr(report.j3, "slm_cost_per_request", lambda j8, found, arm: (
+        {"qwen+lora:c0": {"20%": 0.010, "100%": 0.002, "20%@sensitivity": 0.02, "100%@sensitivity": 0.004}}, {}))
+    shares = report.engine_shares("b5", "j8", prices)
+    assert {role: (s["calls"], s["tokens"]) for role, s in shares.items()} == {
+        "production_llm": (0.5, 0.5), "cheap_alt": (0.25, 0.25), "slm": (0.25, 0.25)}
+    total = {"20%": 2 * 0.0024 + 0.00023 + 0.010, "100%": 2 * 0.0024 + 0.00023 + 0.002}
+    assert set(shares["slm"]["cost"]) == {"20%", "100%"}  # standard prices only
+    for u, slm in (("20%", 0.010), ("100%", 0.002)):
+        assert shares["slm"]["cost"][u] == pytest.approx(slm / total[u])
+        assert shares["production_llm"]["cost"][u] == pytest.approx(0.0048 / total[u])
+        assert sum(s["cost"][u] for s in shares.values()) == pytest.approx(1.0)
 
 
 def test_a_b5_that_allocated_nothing_to_an_slm_is_not_testable():
@@ -317,12 +390,12 @@ def test_av2_wins_only_if_b1_is_no_dearer_at_the_highest_utilization():
     """T10: the SLM arm costs $0.1/u here. B1 refutes the paper only if it costs no more at 100% too."""
     b4 = {"20%": 0.5, "50%": 0.2, "100%": 0.1}
     av2 = lambda b1: row(report.claims_map(data_with(j4_results(), {"B0": {"": 1.0}, "B1": {"": b1}, "B4": b4})), "AV2")["verdict"]  # noqa: E731
-    assert av2(0.05) == "refutes the paper (AV2 wins: B1 costs no more even at 100% utilization)"
-    assert av2(0.1) == "refutes the paper (AV2 wins: B1 costs no more even at 100% utilization)"
-    assert av2(0.6) == "does not refute (the SLM arm is cheaper even at 20% utilization)"
+    assert av2(0.05) == "refutes the paper (AV2 wins: B1 costs no more even at 100% utilization) (by point estimate, no interval)"
+    assert av2(0.1) == "refutes the paper (AV2 wins: B1 costs no more even at 100% utilization) (by point estimate, no interval)"
+    assert av2(0.6) == "does not refute (the SLM arm is cheaper even at 20% utilization) (by point estimate, no interval)"
     # B1 at $0.2: cheaper than the SLM arm at 20% ($0.5), dearer at 100% ($0.1); the old rule read 'AV2 wins' at 20%
-    assert av2(0.2) == "utilization-dependent (tipping point u* ≈ 50%)"
-    assert av2(0.5) == "utilization-dependent (tipping point u* ≈ 20%)"  # the same cost at 20% is not cheaper
+    assert av2(0.2) == "utilization-dependent (tipping point u* ≈ 50%) (by point estimate, no interval)"
+    assert av2(0.5) == "utilization-dependent (tipping point u* ≈ 20%) (by point estimate, no interval)"  # the same cost at 20% is not cheaper
     assert row(report.claims_map(data_with(j4_results(), {"B0": {"": 1.0}, "B4": b4})), "AV2")["verdict"] == "no data"
 
 
@@ -336,18 +409,18 @@ def test_a5_refutes_only_beyond_the_tolerance_on_a_call_site_with_enough_calls()
     """T11: B4 more than thresholds.format_tolerance_pp (1) below B0, on a call site with at least
     allocation.min_calls (100) invocations in both arms."""
     a5 = lambda b0, b4: row(report.claims_map(data_with({}, {}, {"B0": b0, "B4": b4})), "A5")  # noqa: E731
-    assert a5({"a": validity(900, 1000)}, {"a": validity(1000, 1000)})["verdict"] == "confirms"
-    assert a5({"a": validity(1000, 1000)}, {"a": validity(999, 1000)})["verdict"] == "confirms"  # 0.1 pp below: the old rule refuted
-    assert a5({"a": validity(1000, 1000)}, {"a": validity(990, 1000)})["verdict"] == "confirms"  # exactly 1 pp: not more than it
+    assert a5({"a": validity(900, 1000)}, {"a": validity(1000, 1000)})["verdict"] == "confirms (by point estimate, no interval)"
+    assert a5({"a": validity(1000, 1000)}, {"a": validity(999, 1000)})["verdict"] == "confirms (by point estimate, no interval)"  # 0.1 pp below: the old rule refuted
+    assert a5({"a": validity(1000, 1000)}, {"a": validity(990, 1000)})["verdict"] == "confirms (by point estimate, no interval)"  # exactly 1 pp: not more than it
     beyond = a5({"a": validity(1000, 1000), "b": validity(500, 500)}, {"a": validity(989, 1000), "b": validity(500, 500)})
-    assert beyond["verdict"] == "refutes" and beyond["result"] == "B4 more than 1 pp below B0 on a (98.9% vs 100.0%)"
+    assert beyond["verdict"] == "refutes (by point estimate, no interval)" and beyond["result"] == "B4 more than 1 pp below B0 on a (98.9% vs 100.0%)"
     # a call site with fewer than min_calls invocations in either arm is listed and does not count
     thin = a5({"a": validity(1000, 1000), "b": validity(100, 100)}, {"a": validity(1000, 1000), "b": validity(50, 99)})
-    assert thin["verdict"] == "confirms" and thin["result"] == (
+    assert thin["verdict"] == "confirms (by point estimate, no interval)" and thin["result"] == (
         "B4 within 1 pp of B0, or above, on all 1 call sites counted; not counted (fewer than 100 invocations in an arm): "
         "b (50.5% vs 100.0%)")
     enough = a5({"b": validity(100, 100)}, {"b": validity(50, 100)})
-    assert enough["verdict"] == "refutes"  # the floor itself counts
+    assert enough["verdict"] == "refutes" + POINT  # the floor itself counts
     assert a5({"b": validity(100, 100)}, {"b": validity(50, 99)})["verdict"] == "no data (no call site with 100 invocations in both arms)"
     assert a5({"a": validity(10, 10)}, {"z": validity(10, 10)})["verdict"] == "no data"
 
@@ -456,14 +529,16 @@ def test_every_j4_comparison_is_printed():
     tests = {"B0|B1": j4(True), "B0|B2-production": j4(False, diff=-0.2), "B0|B2-cheap": j4(False, diff=-0.02, pilot=None),
              "B0|B3": {**j4(False, diff=-0.02, pilot=0.0), "planned_power": 1.0}, "B3|B4": j4(True, diff=0.1)}
     page = report.render(render_data(tests=tests))
-    section = page.split("## J4 comparisons: non-inferiority at the fixed margin\n\n", 1)[1].split("\n\n", 1)[0]
-    assert section.splitlines()[0] == "| pair | n | diff (Δ) | CI | outcome | planned power |"
+    rule, section = page.split("## J4 comparisons: non-inferiority at the fixed margin\n\n", 1)[1].split("\n\n", 2)[:2]
+    assert "one-sided 95% upper bound is below −Δ" in rule and "two-sided 90% interval" in rule
+    assert section.splitlines()[0] == ("| pair | n | diff (Δ) | two-sided 90% CI (one-sided 95% bounds) | outcome | "
+                                       f"{report.POWER_HEADER} |")
     assert section.splitlines()[2:] == [
-        "| B4 against B3 | 498 | +10.0 pp (Δ 5.0 pp) | CI [+0.0 pp, +15.0 pp] | non-inferior | 0.80 |",
-        "| B1 against B0 | 498 | -1.0 pp (Δ 5.0 pp) | CI [+0.0 pp, +4.0 pp] | non-inferior | 0.80 |",
-        "| B2-production against B0 | 498 | -20.0 pp (Δ 5.0 pp) | CI [-9.0 pp, -15.0 pp] | worse | 0.80 |",
-        "| B2-cheap against B0 | 498 | -2.0 pp (Δ 5.0 pp) | CI [-9.0 pp, +3.0 pp] | inconclusive | — |",
-        "| B3 against B0 | 498 | -2.0 pp (Δ 5.0 pp) | CI [-9.0 pp, +3.0 pp] | inconclusive | — |"]
+        "| B4 against B3 | 498 | +10.0 pp (Δ 5.0 pp) | 90% CI [+0.0 pp, +15.0 pp] | non-inferior | 0.80 |",
+        "| B1 against B0 | 498 | -1.0 pp (Δ 5.0 pp) | 90% CI [+0.0 pp, +4.0 pp] | non-inferior | 0.80 |",
+        "| B2-production against B0 | 498 | -20.0 pp (Δ 5.0 pp) | 90% CI [-9.0 pp, -15.0 pp] | worse | 0.80 |",
+        "| B2-cheap against B0 | 498 | -2.0 pp (Δ 5.0 pp) | 90% CI [-9.0 pp, +3.0 pp] | inconclusive | — |",
+        "| B3 against B0 | 498 | -2.0 pp (Δ 5.0 pp) | 90% CI [-9.0 pp, +3.0 pp] | inconclusive | — |"]
     assert "## J4 comparisons" not in report.render(render_data())
 
 
@@ -557,9 +632,11 @@ RATIOS = {"20%": ratio(10, 8, 12), "50%": ratio(25, 20, 30), "100%": ratio(50, 4
 def test_cost_verdicts_carry_their_labels_and_an_upper_bound_is_inconclusive():
     costs = {"B0": {"": 1.0}, "B4": {"20%": 0.1, "100%": 0.02}, "B5": {"20%": 0.05, "100%": 0.01}}
     data = data_with(j4_results(), costs, ratios=RATIOS)
-    data["arms"]["B5"]["slm_cost_basis"] = "extrapolated from per-adapter load tests"
+    data["arms"]["B5"]["slm_cost_basis"] = "extrapolated from per-adapter load tests"  # B5 is not V3's: no label
+    assert row(report.claims_map(data), "V3")["verdict"] == "meets the paper's 3× bar (even at 20% utilization)"
+    data["arms"]["B4"]["slm_cost_basis"] = "extrapolated from per-adapter load tests"
     assert row(report.claims_map(data), "V3")["verdict"] == \
-        "meets the paper's 3× bar (even at 20% utilization) [costs: extrapolated from per-adapter load tests (B5)]"
+        "meets the paper's 3× bar (even at 20% utilization) [costs: extrapolated from per-adapter load tests (B4)]"
     assert "delta_pp" not in data  # every test carries its own margin
     data["arms"]["B0"].update(upper_bound=True, cache_not_reported=7)
     v3 = row(report.claims_map(data), "V3")["verdict"]
@@ -676,8 +753,21 @@ def test_a_test_report_is_bound_to_the_registry(tmp_path, monkeypatch):
     no_b0 = {a: v for a, v in arms.items() if a != "B0"}
     with pytest.raises(JudgmentError, match="per-call evaluation's teacher's run b0 is not a done entry"):
         bind(rows[1:], arms=no_b0)  # the teacher is bound even when the plan has no B0 arm
-    _, several_teacher = bind(rows + [("b0-again", "agent", "B0", "done", {})], arms=no_b0)
+    _, several_teacher = bind(rows + [("b0-again", "agent", "B0", "done", {})])
     assert several_teacher == ["b0", "b0-again"]
+    # every arm the test ran is in the report: a plan that leaves one out is refused (a comparator left out
+    # would change which arm is cheapest); one that did not finish, or ran under an earlier registration, is not asked for
+    with pytest.raises(JudgmentError, match=r"leaves out arms with a done test run under the registration in force: B0 \(b0\)"):
+        bind(arms=no_b0, reads={})
+    with pytest.raises(JudgmentError, match=r"leaves out .*: B2 \(b2c\);"):  # B2 is named by its engine, which this one lacks
+        bind(rows + [("b2c", "agent", "B2", "done", {})], reads={})
+    b2 = registry_of(*rows, ("b2c", "agent", "B2", "done", {}), ("b1-old", "agent", "B1", "done", {}), ("b1-x", "agent", "B1", "failed", {}))
+    b2["runs"][-3]["engine"] = "cheap_alt"
+    b2["runs"][-2]["prereg_hash"] = "an-earlier-registration"
+    with pytest.raises(JudgmentError, match=r"leaves out arms .*: B2-cheap \(b2c\);"):
+        report._registry_bindings("test", {a: dict(v) for a, v in arms.items()}, b2, judged, per_call, {}, expected, "h")
+    report._registry_bindings("test", {**{a: dict(v) for a, v in arms.items()}, "B2-cheap": {"run_id": "b2c"}}, b2, judged,
+                              per_call, {}, expected, "h")
     late_zeroshot = {**per_call, "j6": {"qwen": {"replay_eval": {"run_id": "eval-pilot-late"},
                                                   "teacher_eval": {"run_id": "eval-pilot-early"}}}}
     with pytest.raises(JudgmentError, match="J6's zero-shot replay_eval"):  # the K4 and repair pilots too
@@ -700,18 +790,26 @@ def test_the_a4_row_states_b5s_own_outcome():
     assert row(report.claims_map(data), "A4")["result"].endswith("B5 against B0: worse")
 
 
-def test_av2_counts_an_upper_bound_on_the_losing_trained_arm():
-    costs = {"B0": {"": 1.0}, "B1": {"": 0.5}, "B4": {"20%": 0.1, "100%": 0.05}, "B5": {"20%": 0.3, "100%": 0.2}}
+def test_av2_is_judged_on_b4_alone_with_b5_beside_it():
+    """AV2, like V3, on the all-SLM arm B4: B5, a hybrid, is printed beside it and decides nothing, not even
+    by its cost labels."""
+    costs = {"B0": {"": 1.0}, "B1": {"": 0.5}, "B4": {"20%": 0.6, "100%": 0.5}, "B5": {"20%": 0.1, "100%": 0.05}}
     data = data_with(j4_results(), costs)
-    assert row(report.claims_map(data), "AV2")["verdict"] == "does not refute (the SLM arm is cheaper even at 20% utilization)"
-    data["arms"]["B5"].update(upper_bound=True, cache_not_reported=2)  # B4 is the cheaper: B5 loses
+    av2 = row(report.claims_map(data), "AV2")
+    assert av2["verdict"] == "refutes the paper (AV2 wins: B1 costs no more even at 100% utilization) (by point estimate, no interval)"
+    assert av2["result"] == ("B1 $0.5 against B4 (the all-SLM arm) $0.6 at 20% utilization and $0.5 at 100%, per correct query; "
+                             "marginal cost only (training cost and hours are reported descriptively); B5, a hybrid, beside it, "
+                             "deciding nothing: $0.1 at 20%, $0.05 at 100%")
+    data["arms"]["B5"].update(upper_bound=True, cache_not_reported=2)
+    assert row(report.claims_map(data), "AV2")["verdict"].startswith("refutes the paper")
+    data["arms"]["B4"].update(upper_bound=True, cache_not_reported=2)
     assert row(report.claims_map(data), "AV2")["verdict"].startswith("inconclusive (rests on an upper-bound cost)")
 
 
 def test_rows_on_an_arm_with_several_runs_give_no_verdict():
     formats = {"B0": {"a": validity(900, 1000)}, "B4": {"a": validity(1000, 1000)}}
     data = data_with({"B0|B4": j4(True)}, {"B0": {"": 1.0}, "B4": {"20%": 0.1, "100%": 0.05}}, formats)
-    assert row(report.claims_map(data), "A5")["verdict"] == "confirms"
+    assert row(report.claims_map(data), "A5")["verdict"] == "confirms (by point estimate, no interval)"
     data["arms"]["B0"]["several_runs"] = ["b0-a", "b0-b"]
     for claim in ("A5", "AV1"):
         assert row(report.claims_map(data), claim)["verdict"] == \
@@ -812,7 +910,7 @@ def test_the_report_opens_the_map_with_its_scope_and_prints_the_deviations():
             "registry": registry_of(("b4", "agent", "B4", "done", {}), ("b4-again", "agent", "B4", "failed", {}))}
     data["registry"]["runs"][0]["prereg_hash"] = "an-earlier-registration"
     page = report.render(data)
-    assert page.index("## The SPEC §5 map") < page.index(report.SCOPE) < page.index("| claim | result | verdict | planned power |")
+    assert page.index("## The SPEC §5 map") < page.index(report.SCOPE) < page.index(f"| claim | result | verdict | {report.POWER_HEADER} |") < page.index(report.MULTIPLICITY)
     assert "## Replaceable fraction (B5)\n\nNot testable (B5 allocated nothing to an SLM).\n" in page
     assert "| b4 | agent | B4 | superseded by re-registration |" in page
     assert "| b4-again | agent | B4 | not completed (failed) |" in page
@@ -1674,7 +1772,7 @@ def test_a_cost_confirmation_must_also_hold_at_modals_price():
                                            modal=False)), "V3")["verdict"] == \
         "inconclusive (at 20% utilization: meets the 3× bar at the provider's price, no data at Modal's)"
 
-    tests = {**j4_results(), "B0|B1": j4(False)}
+    tests = {**j4_results(), "B0|B1": j4(False, diff=-0.2)}
 
     def a6(modal):
         data = data_with(tests, {"B0": {"": 1.0}, "B1": {"": 0.2}, "B5": {"20%": 0.4, "100%": 0.05}})

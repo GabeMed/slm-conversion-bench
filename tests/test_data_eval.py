@@ -186,6 +186,16 @@ def test_rows_compare_as_sets_and_missing_prediction_is_wrong(db):
     assert results[1]["pred_error"] == "no prediction"
 
 
+def test_each_result_records_the_seconds_of_its_gold_and_its_prediction(db):
+    """The timeout is wall clock: how close each execution came to it is in the result."""
+    gold = {"1": {"db_id": "t", "SQL": "SELECT v FROM t"}, "2": {"db_id": "t", "SQL": "SELECT 1"}}
+    endless = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
+    first, second = score({"1": endless, "2": None}, gold, lambda _: db, 0.2, "2026-09-30")
+    assert first["pred_error"] == "timeout" and 0.2 <= first["pred_seconds"] < 5
+    assert isinstance(first["gold_seconds"], float) and 0 <= first["gold_seconds"] < 0.2
+    assert second["pred_seconds"] is None and second["gold_seconds"] >= 0  # no prediction ran
+
+
 def test_timeout_and_read_only(db):
     endless = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
     assert execute(db, endless, 0.2, "2026-09-30") == (None, "timeout", False)
