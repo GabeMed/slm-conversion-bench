@@ -161,13 +161,13 @@ bench judge j3 --run <B0 calib> --eval <its eval>
 | B0 on test | 498 | production LLM |
 | B5 on test, worst case (every cluster stays on the LLM) | 498 | production LLM |
 | B2-production on test | 498, one call each | production LLM |
-| B1 on test, the calib replay, the two B1 pilot replays | 498, 200, 50 + 50 | cheap alternative |
+| B1 on test, the calib replay, the two B1 pilot runs | 498, 200, 50 + 50 | cheap alternative |
 | B2-cheap on test | 498, one call each | cheap alternative |
 
-- **Cost:** USD per question × questions, per engine; K1 through `--via-claude-code` makes no API call (D25). For B2 use its smoke
+- **Cost:** USD per question × questions, per engine, K1 included (D25). For B2 use its smoke
   run's cost per question. The total API spend must stay under the budget (Before Day 1, item 2).
 - **Time:** the pilot run's wall time per question (`finished_at` − `started_at`, ÷ 200) × the
-  questions left, at the same `--workers`. Through `--via-claude-code`, K1 runs at its own pace (step 6), not the pilot's.
+  questions left, at the same `--workers`.
 - **Cache:** the share of `usage.cached_input` in the input tokens. If it is zero, the provider is
   not caching: fix that before K1, since it changes every cost of the report.
 
@@ -211,20 +211,19 @@ git commit -m "The call sites observed on train and calib"
 
 Accept K1 with at least 90% of the questions answered end to end (`predictions.json`).
 
-**The registered run sends K1 through Claude Code (SPEC D25)**: add `--via-claude-code` to the
-`bench run` above. It needs the provider's permission for that use. Only K1 may: its
-answers become training data and no judgment reads its cost or latency. The manifest records the
-CLI's version in `via_claude_code`.
+**The registered run sends K1 through the paid API (SPEC D25)**, like calibration and test: the
+`bench run` above, nothing more. No judgment reads its cost or latency.
 
-- **In `bash`, with the API key loaded** (`source ~/.config/slm-bench/env`): the harness checks it is
-  set, and the wrapper drops it from every `claude` process, so no call goes to the paid API.
-- **`--workers 4`.** Speed is not the limit: 4 workers spent a whole usage window in about 25 minutes.
-- **The Claude account's usage limit pauses the run**, which tries again every 10 minutes and goes on when
-  the window reopens (stderr prints each pause). About 5,300 calls fit in a window, so K1 (about 88,000
-  calls) takes about 17 windows: several days. It is one run; Ctrl-C stops it as any run.
-- **The same limit covers every other use of that Claude account.** Run K1 when it is not otherwise needed.
-- **Check after the first window:** every `calls.jsonl` line `finish_reason: stop`, and the share of
-  `parsed_ok: false` on `agent_ss` near the probes' (1 in 94, SPEC §11.3).
+- **The provider's rate limit pauses the run**: rate-limited calls are retried, and their errors are
+  counted per call site in the manifest (`errors_by_call_site`). If it stops, resume it with `--resume-from` (step 4): it is
+  one run however many sessions it takes, and the manifest lists each in `sessions`.
+- **More than one API key** may share the load across sessions; each must be billed per token.
+- **Check after the first session:** every `calls.jsonl` line `finish_reason: stop`, and the share of
+  `parsed_ok: false` on the agent call sites.
+
+`--via-claude-code` sends K1 through Claude Code on a subscription instead (SPEC §11.3). It needs the
+provider's permission for that use, the manifest records the CLI's version in `via_claude_code`, and
+the registered K1 did not use it.
 
 **The fallback is the Message Batches API at half price** (`--batch` instead). Each
 CHESS step waits for its batch, 2–8 minutes a step, so it needs many `--workers`; run a small `--ids` set
@@ -235,11 +234,14 @@ first. Cache reads inside a batch are best-effort.
 Set `arms.B1.few_shot.source_run` to `<B0 train>`. Then, on the pilot questions:
 
 ```sh
-bench replay <B0 calib> --engine cheap_alt --ids "${PILOT[@]}" --config configs/b1-k0.yaml
-bench replay <B0 calib> --engine cheap_alt --ids "${PILOT[@]}" --config configs/b1-k3.yaml
-bench eval <each of the two> --per-call
-bench judge b1k --k0 <k0 replay>=<its eval> --k3 <k3 replay>=<its eval> --teacher-eval <B0 per-call eval>
+bench run --arm B1 --split calib --ids "${PILOT[@]}" --workers 8 --config configs/b1-k0.yaml
+bench run --arm B1 --split calib --ids "${PILOT[@]}" --workers 8 --config configs/b1-k3.yaml
+bench eval <each of the two>
+bench judge b1k --k0 <k0 run>=<its eval> --k3 <k3 run>=<its eval>
 ```
+
+The rule reads B1's own agent executions end to end, not replays of the teacher's (SPEC D23,
+`prereg/DEVIATIONS.md` 2026-11-10).
 
 Write the `k` of the printed `choice.json` into `arms.B1.few_shot.k`. `bench prereg` and the report
 both refuse a k the rule did not choose.
@@ -255,6 +257,8 @@ bench datasets --curated <curate run> --j5 <J5 result>
 ```
 
 - The curate manifest's `counts.cap` shows what the cap per question and call site left out.
+- The column filter and the agent call sites skip the deduplication and the cap (SPEC S2, D21): `bench datasets`
+  draws their rows from K1 and records them under `routed_sites` in `train/datasets/manifest.json`.
 - J5 prints the centroids fact. Write its path into `arms.B4.centroids` and `arms.B5.centroids`.
 - More than 10 clusters do not train at once on Modal's Starter plan (10 GPUs): train in two waves.
 

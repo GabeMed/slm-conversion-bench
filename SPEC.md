@@ -3,7 +3,7 @@
 **Execução empírica de "Small Language Models are the Future of Agentic AI"**
 (Belcak et al., NVIDIA Research, arXiv 2506.02153, v3 de 22/09/2026)
 
-Versão 2.3, de 21/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A v2.2 troca o professor open-weight por um LLM fechado de nível de produção, por custo, antes do Estágio 0 (seção 11.2). A v2.3 manda as chamadas do K1 pela assinatura do autor, com autorização verbal do fornecedor só para este projeto, também antes do Estágio 0 (seção 11.3). A seção 11 diz o que mudou e por quê.
+Versão 2.4, de 10/11/2026. A v2 é de 30/09/2026 e substitui a v1, que continua preservada em `SPEC-v1.md`. A v2.1 aplica as correções de uma auditoria de validade feita antes de qualquer execução paga (seção 11.1). A v2.2 troca o professor open-weight por um LLM fechado de nível de produção, por custo, antes do Estágio 0 (seção 11.2). A v2.3 manda as chamadas do K1 pela assinatura do autor, com autorização verbal do fornecedor só para este projeto, também antes do Estágio 0 (seção 11.3). A v2.4, depois do Estágio 0 (23/10/2026) e antes do pré-registro, alinha a spec às mudanças declaradas em `prereg/DEVIATIONS.md`: o K1 pela API paga, as linhas de treino do filtro de colunas e dos call sites do agente, a unidade da regra do k do B1, o piso de chamadas do Apêndice B, a regra das rejeições do modelo e o parser da escolha de ferramenta (seção 11.4). A seção 11 diz o que mudou e por quê.
 
 ## Como ler este documento
 
@@ -110,7 +110,9 @@ Versão 2.3, de 21/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 - nenhum fallback automático para outro modelo;
 - re-tentativas por erro de parse limitadas e **contadas no custo**;
 - a escolha da próxima ferramenta **logada como call site próprio**;
-- parâmetros de geração adaptados ao que cada modelo aceita, **registrados na configuração**.
+- parâmetros de geração adaptados ao que cada modelo aceita, **registrados na configuração**;
+- o parser da escolha de ferramenta aceita também o nome da ferramenta em JSON, seguido de argumentos ou fechado pela tag de raciocínio (patch 16), com o mesmo prompt, em todos os braços; texto livre, tags vazias e ferramentas desconhecidas continuam falhando;
+- **uma requisição recusada pelo motor só é falha do modelo** (pontuada, a pergunta errada) quando o motor diz que o prompt é grande demais, ou que ele sozinho não cabe no contexto; qualquer outra recusa, inclusive a de um prompt que cabe mas não deixa espaço para `max_tokens`, é do harness: a execução falha e nada é pontuado. A regra é a mesma em todos os braços e motores.
 
 **Reproduz.** O teste que o Apêndice B não fez: num agente real, quais chamadas um SLM especializado assume.
 
@@ -124,7 +126,7 @@ Versão 2.3, de 21/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 - **LLM de produção = professor.** O LLM generalista que o agente usa.
   - É um **LLM fechado de nível de produção**, acessado pela API paga do próprio fornecedor: o modelo intermediário da linha, que equipes costumam pôr em produção pelo custo, não o topo de fronteira.
   - Os termos do provedor e a permissão com que o autor treina com as saídas ficam registrados na configuração, com link e data. A responsabilidade por eles é de quem roda o experimento.
-  - No K1, as mesmas chamadas vão pelo Claude Code, na assinatura do autor, com autorização verbal do fornecedor só para este projeto (D25). A calibração e o teste usam a API paga.
+  - O K1, a calibração e o teste usam a API paga (D25). A autorização verbal do fornecedor para rodar o K1 pela assinatura do autor (v2.3) não foi usada.
   - Critério de escolha: o custo do núcleo inteiro cabe no orçamento com o modelo intermediário e não com o topo da linha, medido em sondagens pagas antes do Estágio 0 (seção 11.2). A configuração registra qual foi.
   - **O que isso muda na leitura.** A pergunta passa a ser se um SLM substitui o modelo que uma equipe de fato põe em produção. Um professor mais fraco baixa o teto do que o SLM aprende e torna a comparação de qualidade mais fácil; um LLM mais barato torna a de custo mais difícil. O relatório diz as duas coisas.
 - **Alternativa barata sem treino.** Um generalista open-weight mais barato que o LLM de produção, com o **mesmo orçamento de otimização**: prompt com exemplos (few-shot) e cache.
@@ -191,7 +193,11 @@ Versão 2.3, de 21/10/2026. A v2 é de 30/09/2026 e substitui a v1, que continua
 - **mascaramento de dados sensíveis,** executado, com o nº de detecções reportado;
 - **filtro de sucesso** com um sinal disponível em produção, nunca o gabarito: o SQL executa sem erro, o resultado não é vazio e o formato é válido;
 - **deduplicação** exata e por quase-duplicata;
-- **volume que cabe no treino:** depois do filtro e da deduplicação, cada par (pergunta, call site) mantém no máximo N invocações. É uma amostra **uniforme** com seed, que preserva a distribuição das decisões do professor. N é fixado na configuração antes do registro, e o preflight confere que o maior adapter treina dentro da janela da noite. A cobertura antes e depois do corte é reportada: linhas por call site e, no filtro de colunas, tabelas e colunas cobertas por banco e a proporção sim/não. Sem esse corte, o filtro de colunas sozinho levaria de 55 a 113 GPU-horas.
+- **volume que cabe no treino:** depois do filtro e da deduplicação, cada par (pergunta, call site) mantém no máximo N invocações. É uma amostra **uniforme** com seed, que preserva a distribuição das decisões do professor. N é fixado na configuração antes do registro, e o preflight confere que o maior adapter treina dentro da janela da noite. A cobertura antes e depois do corte é reportada: linhas por call site e, no filtro de colunas, tabelas e colunas cobertas por banco e a proporção sim/não;
+- **o filtro de colunas e os call sites do agente** (escolha da próxima ferramenta) **não passam pela deduplicação nem pelo corte por pergunta.** Neles, os dois tiravam o treino da distribuição do professor: o prompt do agente não depende da pergunta, e a deduplicação exata deixava uma linha por par distinto (prompt, resposta), o que treinava nas respostas raras; o corte pesava perguntas, não chamadas, num call site que roda uma vez por coluna do banco. As linhas saem das tentativas finais do K1 que passaram no parse, mascaradas:
+  - todas as invocações dos call sites do agente;
+  - no filtro de colunas, uma amostra **uniforme por chamada** de 12.000 linhas, dentro da regra de bolso, com a seed `seeds.curation_sample`, registrada com a regra no manifesto dos datasets. Sem um corte, o filtro de colunas sozinho levaria de 55 a 113 GPU-horas;
+  - cada linha vai para o cluster do centróide mais próximo do seu prompt, a atribuição que o roteador faz em tempo de execução (S3).
 
 **Desvio.** A paráfrase de entidades e números **não é aplicada**. Em text-to-SQL, os valores e nomes fazem parte da resposta correta, e parafraseá-los quebraria a tarefa. Registrado como achado sobre o S2 em tarefas estruturadas.
 
@@ -274,7 +280,7 @@ Cada linha foi fixada antes de qualquer resultado. "Confirma" e "refuta" usam a 
 |---|---|---|---|---|
 | **V1 / A1:** SLMs bastam para as chamadas de agentes (p.3–4) | **ponta a ponta** (n = 498): **B4 × B0**, e o contraste B3 × B4; **por call site** (6.2) só nos clusters com gabarito (geração e reparo). O B5 × B0 vai para a linha do A6 | B4 não-inferior a B0 ponta a ponta | B4 abaixo de −Δ ponta a ponta | um agente, um domínio (SQL), *code agency*, os mesmos bancos no treino e no teste; nos clusters sem gabarito não há alegação por cluster, só a concordância com o professor como proxy. O V1 se julga no B4 porque a seleção do B5 na calibração tem pouco poder: um B5 que mandasse quase tudo ao LLM passaria sem nenhum SLM |
 | **A4 / A11:** as chamadas são estreitas e as subtarefas simples (p.5, p.7) | fração substituível por **chamada, token e custo** | fração alta também por token e custo | fração alta só por chamada (as baratas) e baixa por custo | idem |
-| **Apêndice B:** o LLM fica com "unstructured error resolution" (p.16) | **avaliação por call site** no cluster de reparo: o EX do SQL reparado pelo SLM × pelo LLM, com o mesmo contexto | o SLM perde no reparo | o SLM é não-inferior no reparo (a partição é conservadora) | um call site de reparo, **decidido só pelo reparo**; a rotina aparece como concordância com o professor, proxy sem efeito no veredito (D15); sem poder, "inconclusivo, com o poder" |
+| **Apêndice B:** o LLM fica com "unstructured error resolution" (p.16) | **avaliação por call site** no cluster de reparo: o EX do SQL reparado pelo SLM × pelo LLM, com o mesmo contexto | o SLM perde no reparo | o SLM é não-inferior no reparo (a partição é conservadora) | um call site de reparo, **decidido só pelo reparo**; a rotina aparece como concordância com o professor, proxy sem efeito no veredito (D15); sem poder, "inconclusivo, com o poder"; com menos de `min_calls` chamadas de reparo, "inconclusivo" por desenho (D17) |
 | **A5:** formato único com SLM treinado é preferível (p.6) | validade de formato por call site: B4 × B0 | B4 ≥ B0 − 1 p.p. em todo call site, sem truque de decoding | B4 mais de 1 p.p. abaixo do B0 num call site com chamadas suficientes (`min_calls`) nos dois braços | os formatos deste agente; abaixo de `min_calls`, descritivo |
 | **A6:** sistemas heterogêneos (p.6) | B5 × B4 × B0 × B1 | B5 não-inferior a B0 e mais barato que o melhor sem treino, **na menor utilização** (o pior caso do SLM) | B5 não vence o melhor braço sem treino **nem na maior utilização** | política por cluster desenhada por nós; o paper diz "can be" e admite sistema só de SLMs (Fig. 1). Fora das duas bordas, "depende da utilização", com o ponto de virada. Se o B5 não alocou nada a um SLM, "não testável" |
 | **A7:** os logs do agente viram dados (p.6) | B4 treinado nos logs curados do professor (+ extensão 2) | logs ≈ gabarito | gabarito ≫ logs | professor aberto |
@@ -435,12 +441,11 @@ Cada uma com a ação de corte correspondente:
 - **O pré-registro vem depois do S6 e antes de qualquer pergunta do teste.**
   - Ele registra a configuração final, e ela nomeia o que os braços usam: a escolha do S4, os centróides, os adaptadores e a alocação. Tudo isso só existe depois do treino.
   - Os exemplos do B1 saem dos logs de treino, então a escolha do seu k (6.4) também vem depois do K1.
-  - As regras de veredito estão publicadas e carimbadas desde o Estágio 0. Entre o Estágio 0 e o pré-registro só mudam esses fatos e os valores que uma regra já fixada calcula, e a diferença entre os dois commits é pública.
+  - As regras de veredito estão publicadas e carimbadas desde o Estágio 0. Entre o Estágio 0 e o pré-registro só mudam esses fatos, os valores que uma regra já fixada calcula e as mudanças declaradas em `prereg/DEVIATIONS.md` (seção 11.4), e a diferença entre os dois commits é pública.
 - **Os dias não precisam ser consecutivos** (D26). O projeto pode pausar entre fases enquanto o orçamento da fase seguinte não está garantido: depois do piloto e da projeção, antes do K1, e antes do teste. A ordem desta tabela e o pré-registro antes da primeira pergunta do teste não mudam.
-- **O K1 roda pela assinatura do autor** (D25): as mesmas chamadas do professor, enviadas pelo Claude Code em modo headless, com autorização verbal da Anthropic só para este projeto. Só o K1, porque nenhum veredito lê o custo nem a latência dele; a calibração e o teste rodam pela API paga, como um agente real.
-  - O Claude Code acrescenta a cada chamada um contexto fixo que não se desliga: cerca de 530 tokens, com uma linha de identidade, o ambiente, a data e o e-mail da conta. O log guarda só o prompt do CHESS, que é o que os SLMs aprendem. A seção 11.3 mede o efeito.
-  - O limite de uso da assinatura pausa o K1, que continua sozinho quando a janela reabre. O K1 pode levar dias; é uma execução só.
-  - A API de lotes, pela metade do preço, fica como alternativa se a autorização acabar.
+- **O K1 roda pela API paga** (D25), como a calibração e o teste: as mesmas chamadas do professor, com os mesmos parâmetros, e o log de cada uma com o `usage` da API. Nenhum veredito lê o custo nem a latência dele.
+  - Uma execução fora do teste que para por uma falha de infraestrutura (como o saldo da conta esgotado) continua numa execução nova, que copia as perguntas que a de origem completou e responde as outras; as chamadas da origem em perguntas não terminadas são descartadas, e o manifesto registra a origem e cada sessão. É uma execução só, por quantas sessões levar. No teste, a retomada e o refazer seguem a 6.1.
+  - O registrado rodou assim: 834 perguntas do treino, 82.403 chamadas registradas, sete sessões em 09/11/2026, sem a API de lotes.
 - **Se o tempo ou o orçamento apertarem,** cortam-se as extensões na ordem inversa da lista, e depois a volta de re-treino do S6 (declarada; o K4 roda sem ela).
 - **Nunca se cortam:**
   - K2 (a comparação com o caminho sem treino);
@@ -526,7 +531,7 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D3 | Protocolo fixado antes, **com** margem de não-inferioridade pré-registrada (6.4 e D16). Curvas e fronteiras continuam sendo reportadas |
 | D4 | Papéis abstratos, com a escolha concreta na configuração |
 | D5 | O raciocínio interno do professor fica fora dos logs |
-| D6 | LLM de produção = professor: um LLM fechado de nível de produção, pela API paga do fornecedor (o K1, pela assinatura do autor: D25); os termos do provedor e a permissão do autor para treinar com as saídas ficam registrados na configuração, com link e data (autor, 14/10/2026; até a v2.1, um open-weight) |
+| D6 | LLM de produção = professor: um LLM fechado de nível de produção, pela API paga do fornecedor, o K1 inclusive (D25); os termos do provedor e a permissão do autor para treinar com as saídas ficam registrados na configuração, com link e data (autor, 14/10/2026; até a v2.1, um open-weight) |
 | D7 | Esquema de log neutro entre provedores, com modelo e versão em cada registro |
 | D8 | A contribuição de cada passo é medida contra alternativas nomeadas (seção 5 e extensões), nunca "tirando o passo" |
 | D9 | Resultados estratificados por dificuldade, com todas as categorias reportadas |
@@ -537,15 +542,15 @@ Os textos finais (relatório, posts) são escritos pelo autor. As sessões de de
 | D14 | O teste é o Arcwise-Plat-SQL com 498 perguntas, usado como está no arquivo; as ids 119 e 120 ficam fora de treino e de teste; não comparável com o EX publicado no Mini-Dev (autor, 30/09/2026) |
 | D15 | Nos clusters sem gabarito por chamada, o B5 escolhe pela concordância com o professor (a barra da D17), declarada como proxy; as alegações nesses clusters são só ponta a ponta (autor, 30/09/2026) |
 | D16 | Margem de não-inferioridade fixa, Δ = 5 p.p. (2,5 p.p. na seleção); o piloto só dá o poder planejado (autor, 01/10/2026) |
-| D17 | A barra de concordância é min(95%, concordância do professor consigo mesmo − 2 p.p.), por call site; o Apêndice B se decide só pelo reparo (autor, 01/10/2026) |
+| D17 | A barra de concordância é min(95%, concordância do professor consigo mesmo − 2 p.p.), por call site; o Apêndice B se decide só pelo reparo, e com menos de `min_calls` chamadas de reparo é "inconclusivo" por desenho (autor, 01/10/2026; o piso, 10/11/2026) |
 | D18 | O V1 se julga no B4; o B5 pertence ao A6 (autor, 01/10/2026) |
 | D19 | Custo: razão com IC, três leituras (atinge 3×, mais barato abaixo de 3×, não é mais barato), confirmação a 20% de utilização e refutação a 100%, preço do container inteiro, e o limite de p95 pela regra da 6.6 (autor, 01/10/2026) |
 | D20 | Cada LLM via API roda como o fornecedor o entrega, com o raciocínio explícito na configuração; provedor, quantização e checkpoint fixados; uma resposta cortada por limite de tokens é registrada como tal (autor, 01/10/2026) |
-| D21 | Volume de treino limitado por (pergunta, call site), por amostra uniforme com seed, com a cobertura reportada (autor, 01/10/2026) |
+| D21 | Volume de treino limitado por (pergunta, call site), por amostra uniforme com seed, com a cobertura reportada; no filtro de colunas e nos call sites do agente, sem deduplicação nem corte por pergunta: todas as invocações do agente e uma amostra uniforme por chamada do filtro de colunas, cada linha no cluster do centróide mais próximo (autor, 01/10/2026; esses call sites, 10/11/2026) |
 | D22 | Registro do teste: só execuções concluídas contam; registrar de novo exige defeito documentado; Estágio 0 e carimbo de tempo independente (autor, 01/10/2026) |
-| D23 | O few-shot adicional do B1 (k ∈ {0, 3}) é escolhido no piloto por uma regra fixada antes: k = 3 só se melhorar o EX por chamada com IC acima de zero (autor, 01/10/2026) |
+| D23 | O few-shot adicional do B1 (k ∈ {0, 3}) é escolhido no piloto por uma regra fixada antes: k = 3 só se o limite inferior unilateral de 95% de EX_k3 − EX_k0 (bootstrap pareado, a pergunta como unidade) ficar acima de zero, com o EX ponta a ponta nas perguntas do piloto, de duas execuções do próprio B1 no agente, uma com k = 0 e outra com k = 3 (autor, 01/10/2026; a unidade, 10/11/2026: antes, o EX por chamada nos call sites com gabarito de duas réplicas da execução do professor) |
 | D24 | Objetivo e restrição: o objetivo é validar a tese do paper; a restrição é o orçamento. Toda correção é a menor que fecha o achado (autor, 01/10/2026) |
-| D25 | Só o K1 roda fora da API paga: pelo Claude Code, na assinatura do autor, com autorização verbal do fornecedor só para este projeto; o custo e a latência dele não são medidos e o manifesto registra a versão do CLI. A calibração, que dá o SLO, e o teste rodam pela API paga, como um agente real. A API de lotes fica como alternativa (autor, 14/10/2026; a assinatura, 21/10/2026) |
+| D25 | O K1 roda pela API paga, como a calibração, que dá o SLO, e o teste, numa execução só, retomada por sessões se uma falha de infraestrutura a parar; o manifesto registra cada sessão. Nenhum veredito lê o custo nem a latência do K1. A autorização verbal do fornecedor para o K1 pela assinatura do autor (v2.3) não foi usada (autor, 14/10/2026; a assinatura, 21/10/2026; a API paga, 09/11/2026) |
 | D26 | O núcleo roda nas fases de 7.3, na ordem dela, em dias não necessariamente consecutivos: o projeto pausa entre fases enquanto o orçamento da seguinte não está garantido (autor, 14/10/2026) |
 
 ### Decisões em configuração, fechadas antes da leitura zero-shot do piloto
@@ -628,6 +633,39 @@ O fornecedor negou créditos de API e autorizou verbalmente, só para este proje
 | O orçamento não cobria o K1 nem pela metade do preço | 7.3 e D25: o K1 pela assinatura do autor |
 | O Claude Code acrescenta contexto a cada chamada | 7.3 e esta seção: medido, e o log guarda só o prompt do CHESS |
 | O limite de uso da assinatura interrompe execuções longas | 7.3: o K1 pausa e continua sozinho |
+
+### 11.4 O que mudou depois do Estágio 0 (v2.4, 10/11/2026)
+
+O Estágio 0 (23/10/2026) publicou a configuração e as regras de veredito. Depois dele, cada mudança que pode alterar um resultado ou a leitura dele é declarada em `prereg/DEVIATIONS.md`, com a data, o motivo, o momento da decisão e a direção do efeito. É lá que a ciência de cada mudança está registrada. Esta versão só alinha o texto da spec a essas linhas: não acrescenta regra. Tudo vem antes do pré-registro, e a diferença contra o commit do Estágio 0 continua pública.
+
+**Mudanças no texto desta versão:**
+- **O K1 pela API paga** (seção 3, 7.3, D6 e D25; desvio de 09/11/2026). O K1 rodou pela API paga, não pela assinatura: 834 perguntas do treino e 82.403 chamadas, numa execução só retomada em sete sessões. A autorização da v2.3 não foi usada. Os logs que os SLMs aprendem, portanto, não têm o contexto de ~530 tokens que o Claude Code acrescentava (seção 11.3), e chegaram ao modelo pelo mesmo caminho da calibração e do teste.
+- **A retomada de uma execução** (7.3 e D25; desvio de 09/11/2026). Uma execução parada por falha de infraestrutura continua numa execução nova, que copia as perguntas completadas e descarta as chamadas das que não terminaram. Três execuções que os resultados leem foram retomadas assim: o K1, o piloto do B3 na calibração e o piloto do B0 na calibração, que dá o SLO; o p95 do SLO junta as duas sessões. No teste, a retomada e o refazer são os da 6.1, que o PR do D3 reescreve.
+- **As linhas de treino do filtro de colunas e dos call sites do agente** (S2 e D21; desvio de 10/11/2026). Sem deduplicação nem corte por pergunta: todas as invocações do agente e uma amostra uniforme por chamada do filtro de colunas, cada linha no cluster do centróide mais próximo. A deduplicação e o corte eram acréscimos deste projeto, não o método do paper, e nesses call sites treinavam numa distribuição diferente da do professor. A curadoria, o clustering e os centróides não mudam. Decidido depois de ler a calibração do modelo base e o piloto do B3, antes de avaliar qualquer adaptador desses clusters; muda os dados de treino dos braços treinados (B4, B5) e tende a favorecê-los. Substitui a regra de 415 linhas por frequência (passo, resposta), declarada antes no mesmo dia e nunca usada num treino oficial.
+- **A unidade da regra do k do B1** (D23; desvio de 10/11/2026). A regra mantém a forma, mas passa do EX por chamada em duas réplicas da execução do professor ao EX ponta a ponta nas perguntas do piloto, de duas execuções do próprio B1. Decidida depois de ler o piloto: uma réplica dá a cada chamada o contexto do professor e não vê o agente parar antes do SQL. A mudança fortalece o B1, o braço sem treino, e torna mais difíceis os vereditos do SLM contra ele.
+- **O piso de chamadas do Apêndice B** (seção 5 e D17; desvio de 10/11/2026). Com menos de `min_calls` chamadas de reparo, o veredito é "inconclusivo" por desenho, o mesmo piso que o A5 e a seleção já usam. O professor quase não repara nesta carga (5 chamadas na calibração, 6 no K1). Decidido depois de conhecer o resultado dessas 5 chamadas, antes de qualquer execução no teste; o piso impede que elas decidam contra o SLM e, por isso, favorece os braços com SLM no Apêndice B.
+- **As rejeições do modelo** (seção 2; desvio de 09/11/2026). No Estágio 0, todo erro 400 ou 413 do motor era falha do modelo, exceto o de saldo. Agora só o 413, ou o 400 que diz que o prompt sozinho não cabe no contexto, é do modelo; os outros, inclusive o de um prompt que cabe mas não deixa espaço para `max_tokens`, são do harness. Nenhuma chamada registrada muda de classe.
+- **O parser da escolha de ferramenta** (seção 2; desvio de 10/11/2026, patch 16). O prompt e as outras regras não mudam, em todos os braços. O piloto do B0 e o K1 rodaram com o parser estrito: 1 das 2.198 chamadas de escolha de ferramenta do piloto e 3 das 9.167 do K1 passariam com o patch.
+
+**Mudanças declaradas em `prereg/DEVIATIONS.md` que já estão no texto ou não o mudam:**
+- **O teste de carga, o limite de latência e o preço do SLM** (6.6, reescrita junto com a mudança; desvio de 10/11/2026). Um limite de p95 por varredura, reponderado para o mix de call sites dela; cada motor no tráfego do seu próprio braço; o B4 como implantado; cada nível com as suas chamadas, estratificadas, e o cache de prefixo vazio; o tempo do roteador somado; um motor sem nível dentro do limite é resultado; e a condição do preço do provedor registrado. Antes dela, o teste de carga já embaralhava as chamadas com `seeds.loadtest_shuffle` antes de fatiar os níveis (desvio de 10/11/2026).
+- **Provedor de treino e de serving, e a GPU de referência** (09/11/2026). Os adaptadores treinam num serviço de fine-tuning gerenciado, em vez do provedor de GPU registrado, e o serving roda em outro provedor, com o mesmo servidor de inferência, os mesmos pesos e a mesma GPU. A GPU de referência passou a uma A100 80GB antes da leitura zero-shot do piloto, por disponibilidade. A acurácia dos braços com SLM depende desses adaptadores; o custo e o p95 do SLM são medidos na A100. A spec não nomeia a GPU nem os provedores (regra de nível): a configuração os registra.
+- **A amostra dos exemplos do B1** (10/11/2026). Cada passo do agente recebe exemplos do mesmo passo, sorteados com `seeds.few_shot`. A execução do piloto com k = 3 anterior à correção foi substituída.
+- **As recusas do código de análise** (10/11/2026). O código de análise e o do pré-registro recusam uma escolha do k do B1 fora da regra de hoje, uma réplica da alternativa barata sem o few-shot do B1, e um pré-registro em que algum fato que a configuração nomeia (a escolha do S4, os centróides, os adaptadores, a alocação) falte ou não esteja no git. Nenhum resultado guardado muda.
+- **As falhas no teste** (6.1). As regras de retomada e de refazer uma execução no teste, e o código que pode rodar nele, entram na 6.1 com o PR do D3 e a sua linha de desvio; esta versão não muda a 6.1.
+
+**Nota de 10/11/2026 sobre a primeira linha de `prereg/DEVIATIONS.md`.** A linha de 09/11/2026 diz que o serving roda ao preço da L40S no novo provedor. A linha seguinte, do mesmo dia, trocou a GPU de referência para a A100 80GB antes de qualquer medição de custo: o custo do SLM usa o preço do provedor de serving para a A100, e o do provedor registrado para a mesma GPU entra pela regra do preço da 6.6, não o da L40S. As duas linhas ficam como foram escritas; esta nota corrige a leitura da primeira.
+
+| Problema depois do Estágio 0 | Onde está a correção na v2.4 |
+|---|---|
+| A spec mandava o K1 pela assinatura, e ele rodou pela API paga | seção 3, 7.3, D6, D25 e esta seção |
+| A spec não dizia como uma execução parada continua | 7.3, D25 e esta seção (no teste, a 6.1) |
+| A deduplicação e o corte por pergunta tiravam o treino do filtro de colunas e do agente da distribuição do professor | S2, D21 e esta seção |
+| A regra do k do B1, por chamada sobre réplicas, não via o agente parar antes do SQL | D23 e esta seção |
+| O veredito do Apêndice B não tinha piso de chamadas de reparo, e o professor quase não repara | seção 5, D17 e esta seção |
+| A spec não dizia quando uma recusa do motor é do modelo, nem que o parser aceita a ferramenta em JSON | seção 2 e esta seção |
+| O cabeçalho e a seção 11 não citavam a reescrita da 6.6 | esta seção |
+| A primeira linha dos desvios fala do preço da L40S | esta seção (nota de 10/11/2026) |
 
 ---
 
