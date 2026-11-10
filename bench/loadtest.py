@@ -46,7 +46,9 @@ levels. Every level is its own run:
 so the client sits in the same cloud as the server; `--on runpod` in a RunPod CPU pod in the serving pod's
 data center (`runpod_apps/loadtest.py`), through its own SSH tunnel to the server, or, with `--client
 colocated` (an opt-in fallback for a data center with no CPU pod), on the serving pod itself, pinned to 4
-cores, on the loopback.
+cores, on the loopback. Each co-located level records `contention_check` (runpod_apps/colocated.py's
+no-contention criterion); a sweep with a level that fails it is still completed and written, and `bench
+loadtest` then exits 3, printing `CONTENTION: level N ... failed <which>`.
 
 **One client kind per base and configuration** (`check_one_client`): the manifest records the client
 (`client.kind`: local, modal, pod or colocated, and what it ran on), and a sweep whose kind differs from a done
@@ -633,7 +635,9 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 if remote and result.get("client"):  # RunPod: what the client ran on
                     manifest["client"] = result["client"]
                 if result.get("cpu_sample") is not None:  # co-located: AIPerf's and the server's CPU over the level
-                    manifest["cpu_sample"] = result["cpu_sample"]
+                    sample = dict(result["cpu_sample"])
+                    manifest["contention_check"] = sample.pop("contention_check", None)
+                    manifest["cpu_sample"] = sample
             except Exception as e:
                 manifest["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
                 raise
@@ -644,6 +648,21 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
             if status != "done":
                 raise LoadtestError(f"AIPerf failed at concurrency {level} (runs/{run_id}/aiperf.out)")
     return run_dirs
+
+
+CONTENTION_EXIT = 3  # `bench loadtest`'s exit code when a co-located level failed the no-contention criterion
+
+
+def contention_failures(run_dirs: List[Path]) -> List[str]:
+    """One line per level whose manifest records a failed no-contention check (the co-located client's)."""
+    lines = []
+    for run_dir in run_dirs:
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        check = manifest.get("contention_check")
+        if check is not None and not check.get("pass"):
+            lines.append(f"CONTENTION: level {manifest['level_index'] + 1} (concurrency {manifest['concurrency']}, "
+                         f"runs/{manifest['run_id']}) failed {'; '.join(check.get('failed') or ['?'])}")
+    return lines
 
 
 def cli(args) -> int:
@@ -667,4 +686,7 @@ def cli(args) -> int:
         return 2
     for run_dir in run_dirs:
         print(run_dir.relative_to(paths.ROOT))
-    return 0
+    failures = contention_failures(run_dirs)  # the sweep is complete and written; the exit says it is not clean
+    for line in failures:
+        print(line, file=sys.stderr)
+    return CONTENTION_EXIT if failures else 0
