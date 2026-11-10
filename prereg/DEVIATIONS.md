@@ -82,6 +82,34 @@ Changes after Stage 0 that can change a result or its interpretation.
   before any c0 or c3 adapter was evaluated (c3 was trained once, as a speed measurement on the earlier file,
   outside the registry and never evaluated). It changes the trained arms' (B4, B5) training data and tends to
   favour them, which is why it is declared
+- 2026-11-10 · on 2026-11-10 07:25 UTC the #29 rule's datasets were regenerated once by mistake in a working copy
+  (the code path, not a decision), never read by any training or evaluation, and replaced by D1's
+- 2026-11-09 · `bench run --resume-from` added after Stage 0 (f2f1630, 14:53 UTC): an agent execution that stopped
+  on an infrastructure failure continues as a new execution that copies the questions the source completed and
+  answers the others; the source's calls on unfinished questions are discarded, and the manifest records
+  `resumed_from` (source run_id, commit, dirty, config_sha256, discarded calls) and `sessions`. Three executions
+  that results read were resumed:
+  - K1 (agent-B0-train-20261109T214533.609401Z, commit 805fad8, dirty): source
+    agent-B0-train-20261109T214505.204680Z (failed after 18 s, dirty), 8 calls on 8 questions discarded, none
+    billed (0 tokens); 550 of its 834 questions copied, through a chain of 7 sessions on commits 855890e and 805fad8
+  - B3's calibration pilot (agent-B3-calib-20261110T051808.826362Z, commit 517f70d, dirty): source
+    agent-B3-calib-20261110T050758.509113Z (failed, dirty), 29 calls on 1 question (1518) discarded; 49 of its
+    50 questions copied
+  - B0's calibration pilot, cost.slo_from (agent-B0-calib-20261109T151141.039667Z, commit 855890e, clean):
+    source agent-B0-calib-20261109T141525.618762Z (failed, commit 5f98818, clean), 207 calls on 8 questions
+    discarded; 67 of its 200 questions copied. The SLO's p95 (J8's `slo`: latency_ms of first attempts) is
+    3,803 ms over 16,140 calls pooled; 4,209 ms over the source session's 5,071 calls; 3,348 ms over the
+    resumed session's 11,069. The cap is 17,000 ms, so the SLO is the pooled p95: the pooled SLO is 455 ms
+    looser than the resumed session's alone and 406 ms stricter than the source session's alone.
+  Direction: neutral for accuracy (only failed sessions' unfinished questions are re-answered); J8's SLO is the
+  pooled p95, between the two sessions' p95s
+- 2026-11-09 · K1 (agent-B0-train-20261109T214533.609401Z) ran through the paid Anthropic API at the standard
+  price (manifest batch false, via_claude_code null), not through Claude Code as SPEC D25 registers
+  (SPEC.md:127, 437, 545; the Message Batches API was D25's fallback). The teacher's path is now the one
+  calibration and test use: the same API, without Claude Code's fixed ~530-token context, so the training data
+  are the teacher's own calls. K1's cost is now a real API cost, which §6.8's payback can count, and the calls
+  ran under the API's terms, not the subscription's. Direction: neutral for the verdicts; it removes the
+  context mismatch §11.3 was to measure
 - 2026-11-09 · the model-rejection rule narrowed after Stage 0 (9f2a972, 17:33 UTC; b65a3d4, 17:43 UTC;
   bench/agent/rejections.py, bench/agent/hooks.py classify, patch 5b). At Stage 0 any HTTP 400 or 413 from the
   engine was the model's failure (scored, the question wrong), except Anthropic's "credit balance" 400. Now only a

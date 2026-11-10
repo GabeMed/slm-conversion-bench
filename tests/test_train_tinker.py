@@ -4,6 +4,7 @@ hyper-parameter it cannot honour), and the whole command against a fake SDK and 
 TINKER_API_KEY, no torch)."""
 import json
 import math
+import re
 import sys
 import types
 from pathlib import Path
@@ -51,17 +52,25 @@ class Future:
         return self.value
 
 
-def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None, close_error=None, step_error=None):
-    """The parts of `tinker` bench/train_tinker.py uses, recording every call in `calls`."""
+def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None, close_error=None, step_error=None,
+             fail_at=None, first_run=1):
+    """The parts of `tinker` bench/train_tinker.py uses, recording every call in `calls`. `fail_at`: the n-th
+    forward_backward (1-based) raises, as an interruption would; training runs are named run-<first_run>, ..."""
+    runs = iter(range(first_run, first_run + 100))
 
     class TrainingClient:
+        def __init__(self):
+            self.model_id = f"run-{next(runs)}"
+
         def get_info(self):
-            return types.SimpleNamespace(model_id="run-1", lora_rank=rank)
+            return types.SimpleNamespace(model_id=self.model_id, lora_rank=rank)
 
         def forward_backward(self, datums, loss_fn):
             calls["forward_backward"].append((datums, loss_fn))
             if step_error:
                 raise step_error
+            if fail_at is not None and len(calls["forward_backward"]) == fail_at:
+                raise ConnectionError("interrupted")
             loss = -sum(w * -1.0 for d in datums for w in d.loss_fn_inputs["weights"])  # logprob -1 per token
             return Future(types.SimpleNamespace(metrics={"loss:sum": loss}))
 
@@ -69,9 +78,13 @@ def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None,
             calls["optim_step"].append(params)
             return Future(None)
 
+        def save_state(self, name, ttl_seconds=None):
+            calls.setdefault("save_state", []).append((name, ttl_seconds))
+            return Future(types.SimpleNamespace(path=f"tinker://{self.model_id}/weights/{name}"))
+
         def save_weights_external(self, name, ttl_seconds=None):
             calls["save_weights_external"].append((name, ttl_seconds))
-            return Future(types.SimpleNamespace(path=f"tinker://run-1/external_weights/{name}"))
+            return Future(types.SimpleNamespace(path=f"tinker://{self.model_id}/external_weights/{name}"))
 
     class ServiceClient:
         def __init__(self, user_metadata=None):
@@ -79,10 +92,16 @@ def fake_sdk(calls, version="0.39.0", offered=("tiny/Tinker-Qwen3",), rank=None,
 
         def create_rest_client(self):
             models = [types.SimpleNamespace(model_name=m, trainable=True, max_context_length=32768) for m in offered]
-            return types.SimpleNamespace(get_server_capabilities=lambda: Future(types.SimpleNamespace(supported_models=models)))
+            return types.SimpleNamespace(
+                get_server_capabilities=lambda: Future(types.SimpleNamespace(supported_models=models)),
+                delete_checkpoint_from_tinker_path=lambda path: calls.setdefault("delete", []).append(path) or Future(None))
 
         def create_lora_training_client(self, base_model, **lora):
             calls["create_lora_training_client"].append({"base_model": base_model, **lora})
+            return Future(TrainingClient())
+
+        def create_training_client_from_state_with_optimizer(self, path, user_metadata=None):
+            calls.setdefault("from_state", []).append(path)
             return Future(TrainingClient())
 
         def close(self, status):
@@ -119,7 +138,8 @@ def fake_export(calls, alpha=16, modules=("q_proj", "k_proj", "v_proj", "o_proj"
 def tinker(monkeypatch):
     """A fake SDK, tokenizer and export in place; returns the calls they record."""
     calls = {k: [] for k in ("ServiceClient", "create_lora_training_client", "forward_backward", "optim_step",
-                             "save_weights_external", "close", "export", "base_snapshot")}
+                             "save_weights_external", "close", "export", "base_snapshot", "save_state",
+                             "from_state", "delete")}
     monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(calls))
     monkeypatch.setattr(tt, "_tokenizer", lambda plan: FakeTokenizer())
     monkeypatch.setattr(tt, "base_snapshot", lambda plan: calls["base_snapshot"].append(plan["base"]) or "/hf/base")
@@ -134,9 +154,9 @@ def full_repo(tmp_path, monkeypatch):
     return config_path, save(config, config_path)
 
 
-def train(config_path, settings_path, cluster="c0"):
+def train(config_path, settings_path, cluster="c0", *extra):
     return cli.main(["train", "--config", str(config_path), "--cluster", cluster, "--on", "tinker",
-                     "--tinker-config", str(settings_path)])
+                     "--tinker-config", str(settings_path), *extra])
 
 
 # ---------------------------------------------------------------- rows to datums
@@ -653,3 +673,192 @@ def test_a_run_cut_short_is_a_probe_kept_apart_and_never_registered(tmp_path, mo
     save(config, full)
     assert train(full, settings(tmp_path)) == 0 and (adapters / "c0" / "manifest.json").is_file()
     assert train(config_path, settings(tmp_path)) == 0 and "nothing was trained" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- resume: periodic states, --resume, refusals
+
+def resume_records():
+    root = paths.ROOT / "train" / "adapters" / ".tinker"
+    return sorted(root.glob("*.resume.json")) if root.is_dir() else []
+
+
+def new_calls():
+    return {k: [] for k in ("ServiceClient", "create_lora_training_client", "forward_backward", "optim_step",
+                            "save_weights_external", "close", "export", "save_state", "from_state", "delete")}
+
+
+def interrupt(tmp_path, monkeypatch, tinker, capsys, save_every="2", fail_at=4):
+    """A full run (4 steps) that saves a state every `save_every` steps and is interrupted at the `fail_at`-th step."""
+    config_path, config = full_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(tinker, fail_at=fail_at))
+    with pytest.raises(ConnectionError, match="interrupted"):
+        train(config_path, settings(tmp_path), "c0", "--save-every", save_every)
+    capsys.readouterr()
+    return config_path, config
+
+
+@pytest.mark.parametrize("every, saved", [("1", [1, 2, 3]), ("2", [2]), ("3", [3]), ("4", []), ("0", [])])
+def test_states_are_saved_every_n_steps_and_only_the_latest_is_kept(tmp_path, monkeypatch, tinker, every, saved):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    seen = []  # the resume record as each state was deleted: the newer state is on disk first
+    sdk = fake_sdk(tinker)
+    rest = sdk.ServiceClient.create_rest_client
+
+    def watching(self):
+        client = rest(self)
+        delete = client.delete_checkpoint_from_tinker_path
+        client.delete_checkpoint_from_tinker_path = lambda path: (
+            seen.append((path, [s["path"] for s in json.loads(resume_records()[0].read_text())["states"]])), delete(path))[1]
+        return client
+
+    monkeypatch.setattr(sdk.ServiceClient, "create_rest_client", watching)
+    monkeypatch.setattr(tt, "_sdk", lambda: sdk)
+    tinker.update(save_state=[], delete=[])
+    assert train(config_path, settings(tmp_path), "c0", "--save-every", every) == 0
+    names = [f"c0-{json.loads((paths.ROOT / 'train/adapters/c0/manifest.json').read_text())['tinker_key'][:12]}-step{n:06d}"
+             for n in saved]
+    assert tinker["save_state"] == [(n, tt.STATE_TTL_S) for n in names]  # never after the last step: the export is
+    paths_saved = [f"tinker://run-1/weights/{n}" for n in names]
+    assert tinker["delete"] == paths_saved  # each replaced by the next, the last once the adapter is exported
+    for i, (path, on_disk) in enumerate(seen[:-1] if saved else []):
+        assert path == paths_saved[i] and paths_saved[i + 1] in on_disk
+    manifest = json.loads((paths.ROOT / "train" / "adapters" / "c0" / "manifest.json").read_text())
+    resume = manifest["stats"]["resume"]
+    assert resume["save_every"] == int(every) and not resume["resumed"] and resume["steps_replayed"] == 0
+    assert [s["step"] for s in resume["states"]] == saved and resume["caveats"] == {}
+    assert [s["from_step"] for s in resume["segments"]] == [0] and resume["segments"][0]["training_run"] == "run-1"
+    assert manifest["stats"]["global_step"] == 4 and not resume_records() and not pending_records()
+
+
+def test_the_default_cadence_is_every_100_steps(tmp_path, monkeypatch, tinker):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    assert train(config_path, settings(tmp_path)) == 0
+    manifest = json.loads((paths.ROOT / "train" / "adapters" / "c0" / "manifest.json").read_text())
+    assert tt.SAVE_EVERY == 100 and manifest["stats"]["resume"]["save_every"] == 100
+    assert tinker["save_state"] == []  # 4 steps: no state before the export
+
+
+def test_an_interrupted_run_resumes_after_its_state_at_the_same_step_order_and_learning_rate(
+        tmp_path, monkeypatch, tinker, capsys):
+    config_path, config = interrupt(tmp_path, monkeypatch, tinker, capsys)  # a state at step 2, cut at step 4
+    first = {k: list(v) for k, v in tinker.items()}
+    [record_path] = resume_records()
+    record = json.loads(record_path.read_text())
+    assert [s["step"] for s in record["states"]] == [2] and record["reached_step"] == 3 and len(record["losses"]) == 3
+    state = record["states"][0]["path"]
+
+    # without --resume, the run refuses to pay again for the steps saved
+    again = new_calls()
+    monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(again, first_run=2))
+    assert train(config_path, settings(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert "saved its state at step 2" in err and "pass --resume" in err and not again["ServiceClient"]
+
+    assert train(config_path, settings(tmp_path), "c0", "--resume", "--save-every", "2") == 0
+    out = capsys.readouterr()
+    assert again["from_state"] == [state] and not again["create_lora_training_client"]
+    assert "resuming at step 3/4" in out.err and "(1 steps after it are trained again)" in out.err
+    # the steps after the state, as the interrupted run took them (rows and tokens), at their global learning rate
+    sched = tt.schedule(4, config["train"]["sft"])
+    assert [p["learning_rate"] for p in again["optim_step"]] == [tt.learning_rate(s, sched, 2e-4) for s in (2, 3)]
+    assert [[d.model_input for d in ds] for ds, _ in again["forward_backward"]] == \
+        [[d.model_input for d in ds] for ds, _ in first["forward_backward"][2:4]]
+    assert again["save_state"] == []  # step 4 is the last: the export follows
+    assert again["delete"] == [state]  # deleted once the adapter is exported
+
+    manifest = json.loads((paths.ROOT / "train" / "adapters" / "c0" / "manifest.json").read_text())
+    stats, resume = manifest["stats"], manifest["stats"]["resume"]
+    assert stats["global_step"] == 4 and stats["examples_seen"] == 8 and stats["train_loss"] == pytest.approx(1)
+    assert stats["tokens_seen"] == sum(len(d.model_input) for ds, _ in first["forward_backward"][:2] for d in ds) + \
+        sum(len(d.model_input) for ds, _ in again["forward_backward"] for d in ds)
+    assert stats["training_run"] == "run-2" and stats["external_weights"].startswith("tinker://run-2/")
+    assert resume["resumed"] and resume["resumed_from_steps"] == [2] and resume["steps_replayed"] == 1
+    assert [(s["from_step"], s["training_run"], s["state"]) for s in resume["segments"]] == \
+        [(0, "run-1", None), (2, "run-2", state)]
+    assert all("commit" in s for s in resume["segments"])
+    assert [(s["step"], s["path"]) for s in resume["states"]] == [(2, state)]
+    assert set(resume["caveats"]) == set(tt.RESUME_CAVEATS)
+    assert manifest["started_at"] == record["started_at"]  # the run began with the interrupted segment
+    assert "resumed at steps [2] (1 steps trained twice)" in out.out
+    assert not resume_records() and not pending_records()
+
+
+def resume_with(tmp_path, monkeypatch, config_path, settings_path=None):
+    calls = new_calls()
+    monkeypatch.setattr(tt, "_sdk", lambda: fake_sdk(calls, first_run=2))
+    code = train(config_path, settings_path or settings(tmp_path), "c0", "--resume")
+    return code, calls
+
+
+@pytest.mark.parametrize("change, match", [
+    ("dataset", "dataset_sha256"),
+    ("learning_rate", "plan_sha256"),
+    ("optimizer", r"the Tinker run \(optimizer\)"),
+    ("config", "config_sha256"),
+    ("tokens", "encoded_sha256"),
+])
+def test_resume_refuses_anything_that_differs_from_the_interrupted_run(tmp_path, monkeypatch, tinker, capsys,
+                                                                        change, match):
+    config_path, config = interrupt(tmp_path, monkeypatch, tinker, capsys)
+    settings_path = None
+    if change == "dataset":
+        from test_train_fixtures import write_dataset
+
+        write_dataset("c0", list(reversed(rows("c0"))))
+    elif change == "learning_rate":
+        config["train"]["sft"]["learning_rate"] = 1e-4
+        save(config, config_path)
+    elif change == "optimizer":
+        settings_path = settings(tmp_path, optimizer={"beta1": 0.9, "beta2": 0.95, "eps": 1e-8, "weight_decay": 0.0,
+                                                      "grad_clip_norm": 1.0})
+    elif change == "config":  # outside the plan: config.yaml as a whole must be the interrupted run's
+        config["modal"]["volumes"]["adapters"] = "another-volume"
+        save(config, config_path)
+    else:  # the same plan tokenized otherwise (another tokenizer or code)
+        class Other(FakeTokenizer):
+            def apply_chat_template(self, messages, *a, **k):
+                ids = super().apply_chat_template(messages, *a, **k)
+                return {"input_ids": [7] + ids["input_ids"]}
+
+        monkeypatch.setattr(tt, "_tokenizer", lambda plan: Other())
+    code, calls = resume_with(tmp_path, monkeypatch, config_path, settings_path)
+    err = capsys.readouterr().err
+    assert code == 2 and re.search(match, err) and "nothing is resumed" in err, err
+    assert not calls["ServiceClient"] and len(resume_records()) == 1  # nothing paid, the record kept
+
+
+def test_resume_refuses_a_run_with_nothing_to_resume(tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    code, calls = resume_with(tmp_path, monkeypatch, config_path)
+    assert code == 2 and "no interrupted run of c0 is recorded" in capsys.readouterr().err
+    assert not calls["ServiceClient"]
+
+
+def test_resume_refuses_an_expired_state(tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = interrupt(tmp_path, monkeypatch, tinker, capsys)
+    [record_path] = resume_records()
+    record = json.loads(record_path.read_text())
+    record["states"][-1]["expires_at"] = "2026-01-01T00:00:00+00:00"
+    record_path.write_text(json.dumps(record))
+    code, calls = resume_with(tmp_path, monkeypatch, config_path)
+    err = capsys.readouterr().err
+    assert code == 2 and "expired on Tinker at 2026-01-01" in err and "delete" in err and not calls["ServiceClient"]
+
+
+def test_a_state_saved_before_the_first_step_failed_is_not_needed_and_nothing_is_recorded(
+        tmp_path, monkeypatch, tinker, capsys):
+    interrupt(tmp_path, monkeypatch, tinker, capsys, save_every="2", fail_at=2)  # cut before the first state
+    assert not resume_records()
+
+
+def test_resume_and_save_every_are_for_tinker_only(tmp_path, monkeypatch, capsys):
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    for extra in (["--resume"], ["--save-every", "5"]):
+        assert cli.main(["train", "--config", str(config_path), "--cluster", "c0", "--on", "modal", *extra]) == 2
+        assert "for --on tinker only" in capsys.readouterr().err
+
+
+def test_a_negative_cadence_is_refused(tmp_path, monkeypatch, tinker, capsys):
+    config_path, _ = full_repo(tmp_path, monkeypatch)
+    assert train(config_path, settings(tmp_path), "c0", "--save-every", "-1") == 2
+    assert "--save-every must be a whole number" in capsys.readouterr().err and not tinker["ServiceClient"]

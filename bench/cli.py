@@ -88,6 +88,12 @@ def main(argv=None) -> int:
                         "Thinking Machines' Tinker, Qwen3-8B only (bench/train_tinker.py)")
     p.add_argument("--tinker-config", default="configs/train-tinker.yaml",
                    help="--on tinker only: what Tinker needs besides config.yaml's train section")
+    p.add_argument("--resume", action="store_true",
+                   help="--on tinker only: continue an interrupted run from its latest saved state (same plan, "
+                        "config, data and step order, or it refuses)")
+    p.add_argument("--save-every", type=int, metavar="STEPS",
+                   help="--on tinker only: save the run's state on Tinker every STEPS optimizer steps, for --resume "
+                        "(0: never; default 100, ~36 min of a full run)")
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")
@@ -158,6 +164,9 @@ def main(argv=None) -> int:
             sys.path.insert(0, str(paths.ROOT))
             from runpod_apps import serve
             return serve.cli(args)
+        elif args.command == "train" and (args.resume or args.save_every is not None):
+            print("bench train: --resume and --save-every are for --on tinker only", file=sys.stderr)
+            return 2
         elif args.command in ("train", "loadtest", "preflight"):  # F3: each reports its own errors
             from bench import loadtest, preflight, train
             return {"train": train.cli, "loadtest": loadtest.cli, "preflight": preflight.cli}[args.command](args)
