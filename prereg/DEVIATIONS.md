@@ -398,3 +398,15 @@ Changes after Stage 0 that can change a result or its interpretation.
   requests in steady state is not counted); (2) against the SLM; (3) against the SLM: it corrects a bias in its
   favour (the limit was inflated by a harness wait); (4) none; (5) against the SLM (a confirmation needs more,
   and Modal's price can only rise)
+- 2026-11-10 · an exploratory arm registered before the test, with no verdict: B5 on a single-cluster swap (SPEC §3
+  extension 1; SPEC 6.1, "one cluster swapped, live"), c0 on its adapter and c1, c2, c3 on the production LLM, run as
+  `bench run --arm B5 --allocation exploratory`. Its allocation is a hand-written fact
+  (judgments/exploratory/2989ed9e…/allocation.json, on J5's centroids b98b66cd… and S5's adapters 437f885c…), named by
+  a new key, arms.B5.exploratory_allocation, registered and tracked as the arms' other facts are; `bench prereg`
+  accepts it only as exactly that swap on arms.B5's centroids and adapters, a test run of it is refused if it is J7's
+  own allocation, and `bench verify` asks no J7 result of it. The registry keys it apart from B5 (its manifest records
+  allocation: exploratory; a resume keeps its source's allocation), so B5's own run stays the one completed run of
+  its configuration; the report names it as the plan's b5_exploratory, refuses it under arms and refuses a test plan
+  that leaves it out, and lists its n, EX and cost outside every J4 comparison and the SPEC §5 map. The registered B5
+  still follows J7's allocation alone. Direction: none on any verdict. Frozen code changed: bench/contracts/router.py,
+  bench/report.py; config.yaml: arms.B5.exploratory_allocation
