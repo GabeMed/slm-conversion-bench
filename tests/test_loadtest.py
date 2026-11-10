@@ -235,6 +235,7 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setenv("T_MODAL_SECRET", "ms-live")
     monkeypatch.setattr(loadtest, "local_aiperf", lambda: __import__("sys").executable)  # a file that exists
     config["loadtest"].update({"concurrency": [1, 4], "request_count": 5, "warmup_request_count": 2})
+    config["seeds"].pop("loadtest_shuffle", None)  # the file order, unless a test sets the seed
     yield config_path, save(config, config_path), server
     server.close()
 

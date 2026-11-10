@@ -154,6 +154,7 @@ seeds:                         # distinct values, so a seed read for another's p
   bootstrap: 20260932
   few_shot: 20260933           # B1's examples (arms.B1.few_shot)
   curation_sample: 20260934    # S2's cap (curation.max_per_question_call_site)
+  loadtest_shuffle: 20260935   # the load test's payload order before the levels are sliced (bench/loadtest.py)
 
 splits:
   calib_size: 200
