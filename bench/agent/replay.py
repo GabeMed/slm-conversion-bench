@@ -23,6 +23,9 @@ output, so it is recorded (`workers`) but is not part of the configuration's ide
 `--resume-from <replay run_id>` makes a new replay that copies the invocations a replay stopped by an
 infrastructure failure had completed and sends only the others (`bench.agent.resume`): the same
 source, engine or arm, configuration, few-shot prefix, call sites and questions, else it is refused.
+On test it follows the rule of `bench run --resume-from` there (`resume.check_test_source`), and
+`--redo-reason` runs again from scratch a replay whose latest attempt cannot be resumed, or whose
+defect affects what it completed (`runner.open_run`).
 """
 import hashlib
 import json
@@ -129,7 +132,8 @@ def new_outcome() -> Dict[str, Any]:
 
 def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, arm: Optional[str] = None,
            call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None, workers: int = 1,
-           resume_from: Optional[str] = None) -> Path:
+           resume_from: Optional[str] = None, redo_reason: Optional[str] = None,
+           redo_affects_completed: bool = False) -> Path:
     config = load_config(config_path)
     hooks.configure(config)
     if (engine is None) == (arm is None):
@@ -182,13 +186,15 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
               "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded,
               "workers": workers}  # as in an agent run, not the configuration's identity
     if failed is not None:
+        fields["unregistered_source_hashes"] = resume.unregistered_source_hashes(failed)  # before anything is read
         expected = {key: fields[key] for key in resume.REPLAY_IDENTITY if key != "split"}
         resume.check_same(failed, {"split": split, **json.loads(json.dumps(expected)), "config_sha256": config_sha256(config)})
         plan = resume.plan_replay(failed, resume.read_calls_of(failed), [identity(r) for r in records],
                                   config["retries"]["parse_max_attempts"])  # before the run exists: a refusal leaves none
     label = arm or re.sub(r"[^A-Za-z0-9_.-]+", "_", engine)
     run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields,
-                                          used_key_envs(config, engines, retrieval=False))
+                                          used_key_envs(config, engines, retrieval=False), resume_source=failed,
+                                          redo_reason=redo_reason, redo_affects_completed=redo_affects_completed)
     outcome = new_outcome()
     copied: set = set()
     if failed is not None:

@@ -2,6 +2,7 @@
 and the execution uses exactly what was registered (configuration, splits, SPEC, data manifest)."""
 import hashlib
 import json
+import re
 import subprocess
 
 import pytest
@@ -179,3 +180,166 @@ def test_no_remote_no_test(tmp_path):
 def test_other_splits_are_never_locked(tmp_path):
     ensure_split_allowed("train", None, tmp_path)
     ensure_split_allowed("calib", None, tmp_path)
+
+
+# ---------------------------------------------------------------- an execution on test runs the registered code
+
+def git_out(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout
+
+
+@pytest.fixture
+def coded(repo):
+    """The repository with execution code and a .gitignore, registered at HEAD as `bench prereg` does."""
+    from bench.barrier import execution_code
+    (repo / ".gitignore").write_text("runs/\n")
+    (repo / "bench" / "agent").mkdir(parents=True)
+    (repo / "bench" / "agent" / "runner.py").write_text("x = 1\n")
+    (repo / "vendor" / "chess").mkdir(parents=True)
+    (repo / "vendor" / "chess" / "agent.py").write_text("y = 1\n")
+    (repo / "bench" / "judge").mkdir()
+    (repo / "bench" / "judge" / "j4.py").write_text("z = 1\n")  # analysis code: not the execution code's
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "code")
+    registered = {"commit": git_out(repo, "rev-parse", "HEAD").strip(), "execution_code": execution_code(repo)}
+    register(repo, **registered)
+    return repo, registered
+
+
+def test_the_execution_code_is_everything_but_the_analysis_code_by_exclusion(coded):
+    """Every file of bench/ outside the analysis code (a new one included), CHESS, the apps and the
+    environments: nothing is left out by a list."""
+    from bench.barrier import execution_code
+    repo, registered = coded
+    assert sorted(registered["execution_code"]) == ["bench/agent/runner.py", "vendor/chess/agent.py"]
+    assert registered["execution_code"]["vendor/chess/agent.py"] == sha(repo / "vendor" / "chess" / "agent.py")
+    for rel in ("bench/new_module.py", "bench/train.py", "bench/cli.py", "modal_apps/train.py", "runpod_apps/serve.py",
+                "env/agent/requirements.lock", "pyproject.toml", "uv.lock",
+                "bench/judge/j9.py", "bench/contracts/router.py", "bench/report.py", "SPEC.md", "scripts/x.py"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n")
+    git(repo, "add", "-A")
+    assert sorted(execution_code(repo)) == sorted([
+        "bench/agent/runner.py", "vendor/chess/agent.py", "bench/new_module.py", "bench/train.py", "bench/cli.py",
+        "modal_apps/train.py", "runpod_apps/serve.py", "env/agent/requirements.lock", "pyproject.toml", "uv.lock"])
+
+
+def test_the_real_execution_code_covers_bench_outside_the_analysis_code():
+    from bench.barrier import execution_code
+    code = execution_code(paths.ROOT)
+    assert {"bench/train.py", "bench/cli.py", "bench/barrier.py", "bench/provenance.py", "bench/prereg.py",
+            "bench/agent/runner.py", "pyproject.toml", "env/agent/requirements.lock"} <= set(code)
+    assert any(rel.startswith("vendor/chess/") for rel in code) and any(rel.startswith("runpod_apps/") for rel in code)
+    assert not any(rel.startswith(("bench/judge/", "bench/contracts/")) or rel in ("bench/evaluate.py", "bench/report.py",
+                   "bench/data.py", "bench/paths.py") for rel in code)
+
+
+def test_a_clean_checkout_of_the_registered_code_runs_records_after_it_included(coded):
+    from bench.barrier import code_in_force, ensure_execution_allowed
+    repo, registered = coded
+    assert code_in_force(registered, repo) == ""
+    (repo / "registry" / "test").mkdir(parents=True)  # what test executions commit after the registration
+    (repo / "registry" / "test" / "a.intent.json").write_text("{}\n")
+    (repo / "prereg" / "DEVIATIONS.md").write_text("- a line\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "records")
+    (repo / "runs").mkdir()
+    (repo / "runs" / "out.json").write_text("{}\n")  # ignored: what executions write
+    assert code_in_force(registered, repo) == ""
+    git(repo, "push", "-q", "origin", "main")
+    assert ensure_execution_allowed(CONFIG, repo) == (repo / "prereg" / "HASH").read_text().strip()
+
+
+@pytest.mark.parametrize("change, expected", [
+    (lambda repo: (repo / "bench" / "agent" / "runner.py").write_text("x = 2\n"), "not clean \\(M bench/agent/runner.py\\)"),
+    (lambda repo: (repo / "notes.txt").write_text("n\n"), "not clean \\(\\?\\? notes.txt\\)"),
+    (lambda repo: ((repo / "judgments").mkdir(), (repo / "judgments" / "j.json").write_text("{}")),
+     "not clean \\(\\?\\? judgments/"),  # a judgment the registered commit does not hold
+])
+def test_a_dirty_tree_is_refused(coded, change, expected):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    change(repo)
+    assert re.search(expected, code_in_force(registered, repo))
+
+
+def test_code_committed_after_the_registration_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    (repo / "bench" / "judge" / "j4.py").write_text("z = 2\n")
+    git(repo, "commit", "-q", "-am", "a later fix")
+    assert "differs from the registered commit" in code_in_force(registered, repo)
+    assert "bench/judge/j4.py" in code_in_force(registered, repo)
+
+
+def test_a_commit_that_does_not_descend_from_the_registered_one_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    assert "is not in this repository" in code_in_force({**registered, "commit": "0" * 40}, repo)
+    assert "is not in this repository" in code_in_force({**registered, "commit": None}, repo)
+    git(repo, "checkout", "-q", "--orphan", "other")
+    git(repo, "commit", "-q", "-m", "same files, other history")
+    assert "does not descend" in code_in_force(registered, repo)
+
+
+def test_the_execution_code_must_be_registered_and_match(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    assert "records no execution code" in code_in_force({"commit": registered["commit"]}, repo)
+    tampered = {**registered["execution_code"], "vendor/chess/agent.py": "0" * 64}
+    assert "execution code differs" in code_in_force({**registered, "execution_code": tampered}, repo)
+    assert "vendor/chess/agent.py" in code_in_force({**registered, "execution_code": tampered}, repo)
+
+
+def test_python_that_gitignore_hides_under_the_execution_code_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    (repo / ".gitignore").write_text("runs/\nbench/agent/hidden.py\n")
+    git(repo, "commit", "-q", "-am", "ignore it")
+    registered = {**registered, "commit": git_out(repo, "rev-parse", "HEAD").strip()}
+    (repo / "bench" / "agent" / "hidden.py").write_text("import os\n")
+    assert "ignored by git would run: bench/agent/hidden.py" in code_in_force(registered, repo)
+
+
+def test_a_user_level_excludes_file_does_not_make_a_tree_clean(coded, tmp_path):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    excludes = tmp_path / "global-excludes"
+    excludes.write_text("notes.txt\n")
+    git(repo, "config", "core.excludesFile", str(excludes))
+    (repo / "notes.txt").write_text("n\n")
+    assert git_out(repo, "status", "--porcelain") == ""  # git itself hides it
+    assert "not clean (?? notes.txt)" in code_in_force(registered, repo)
+
+
+def test_a_clone_local_exclude_entry_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("# comments and blank lines are fine\n\n")
+    assert code_in_force(registered, repo) == ""
+    exclude.write_text("# a comment\nscratch/\n")
+    assert "info/exclude hides files from git status (scratch/)" in code_in_force(registered, repo)
+
+
+def test_a_worktree_s_exclude_file_is_found(coded, tmp_path):
+    from bench.barrier import local_excludes
+    repo, _ = coded
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "--detach", str(worktree))
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "exclude").write_text("hidden/\n")  # shared by the worktrees of a clone
+    assert local_excludes(worktree) == ["hidden/"]
+
+
+def test_a_reading_needs_the_registered_tree_but_may_write_judgments(coded):
+    from bench.barrier import READING_RECORDS, registered_tree
+    repo, registered = coded
+    (repo / "judgments").mkdir()
+    (repo / "judgments" / "j3.json").write_text("{}")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "judgments after the test")
+    assert registered_tree(registered, repo, READING_RECORDS) == ""
+    (repo / "bench" / "agent" / "runner.py").write_text("x = 3\n")
+    git(repo, "commit", "-q", "-am", "code after the registration")
+    assert "bench/agent/runner.py" in registered_tree(registered, repo, READING_RECORDS)

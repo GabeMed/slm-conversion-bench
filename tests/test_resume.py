@@ -123,7 +123,8 @@ def test_a_resume_is_refused_unless_it_is_the_same_run_on_a_resumable_source(fai
     source_id = source_dir.name
     before = runs_now()
 
-    with pytest.raises(DataError, match="refused on test"):
+    from bench.barrier import TestSplitLocked
+    with pytest.raises(TestSplitLocked):  # on test, the barrier first (the rule there: test_resume_on_test)
         runner.run_agent(str(config_path), "B0", "test", resume_from=source_id)
     with pytest.raises(DataError, match="arm is 'B0', this run's is 'B2'"):
         runner.run_agent(str(config_path), "B2", "train", engine="production_llm", resume_from=source_id)
@@ -142,7 +143,7 @@ def test_a_resume_is_refused_unless_it_is_the_same_run_on_a_resumable_source(fai
     assert runs_now() == before  # a refusal leaves no run
 
     done = runner.run_agent(str(config_path), "B0", "train", resume_from=source_id)
-    with pytest.raises(DataError, match="'done': only a failed or interrupted run is resumed"):
+    with pytest.raises(DataError, match="'done': only a failed, interrupted or killed run is resumed"):
         runner.run_agent(str(config_path), "B0", "train", resume_from=done.name)
 
 
@@ -152,6 +153,95 @@ def test_the_cli_resumes(failed, capsys):
                      "--resume-from", source_dir.name]) == 0
     run_dir = paths.RUNS / capsys.readouterr().out.strip().splitlines()[-1].rsplit("/", 1)[-1]
     assert json.loads((run_dir / "manifest.json").read_text())["resumed_from"]["run_id"] == source_dir.name
+
+
+# ---------------------------------------------------------------- a session killed outright (SIGKILL)
+
+class Killed(BaseException):
+    """Stands for SIGKILL: nothing after it runs in the process."""
+
+
+def killed_run(config_path, monkeypatch, workers=1):
+    """An agent run killed after its questions ended or failed and before it could close anything: its
+    manifest stays `running`, predictions.json never written, its lock released by the dying process."""
+    import os
+    real_write_json = runner._write_json
+
+    def write_json(path, value):
+        if path.name == "predictions.json":  # the first thing the run's `finally` does: the kill came first
+            fd = runner._SESSION_LOCKS.pop(path.parent)
+            os.close(fd)  # the operating system releases a dead process's lock
+            raise Killed()
+        real_write_json(path, value)
+    monkeypatch.setattr(runner, "_write_json", write_json)
+    with pytest.raises(Killed):
+        runner.run_agent(str(config_path), "B0", "train", workers=workers)
+    monkeypatch.setattr(runner, "_write_json", real_write_json)
+    (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-train")
+                  and json.loads((p / "manifest.json").read_text())["status"] == "running"]
+    return run_dir
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_killed_run_is_resumed_from_what_its_session_journaled(tmp_path, monkeypatch, workers):
+    server = FakeChess(refuse=marker("4"))
+    config_path = make_worker_repo(tmp_path, monkeypatch, server)
+    source_dir = killed_run(config_path, monkeypatch, workers)
+    source = json.loads((source_dir / "manifest.json").read_text())
+    assert source["status"] == "running" and not (source_dir / "predictions.json").exists()
+    assert not (source_dir / runner.SESSION_LOCK).exists() or runner.session_alive(source_dir) is False
+    calls_files = sorted(p.name for p in source_dir.glob("calls*.jsonl"))
+    with open(source_dir / calls_files[-1], "a") as fh:
+        fh.write('{"run_id": "cut off by the ki')  # the line being written when the process died
+    from bench.data import sha256_file
+    before = {p.name: sha256_file(p) for p in source_dir.glob("*.jsonl")}
+    server.refuse, server.prompts[:] = None, []
+
+    run_dir = runner.run_agent(str(config_path), "B0", "train", workers=workers, resume_from=source["run_id"])
+    manifest, calls, predictions = read_run(run_dir)
+    assert manifest["status"] == "done" and list(predictions) == QUESTIONS
+    answered = sorted(manifest["resumed_question_ids"], key=int)
+    assert answered and "4" not in answered and set(answered) | asked(server, QUESTIONS) == set(QUESTIONS)
+    assert not set(answered) & asked(server, QUESTIONS)  # what the dead session answered is not asked again
+    assert manifest["unregistered_source_hashes"] == before  # computed before anything was read
+    assert manifest["sessions"][0]["killed"] is True and manifest["sessions"][0]["finished_at"]
+    assert validate_calls(calls) == [] and not list(run_dir.glob("answers*.jsonl"))
+
+
+def test_a_running_source_whose_session_holds_its_lock_or_left_none_is_not_resumed(failed):
+    server, config_path, source_dir = failed
+    import fcntl
+    import os
+    path = source_dir / "manifest.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "status": "running"}))
+    with pytest.raises(DataError, match="left no session lock"):
+        runner.run_agent(str(config_path), "B0", "train", resume_from=source_dir.name)
+    fd = os.open(source_dir / runner.SESSION_LOCK, os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)  # a session alive (here, this process) holds it
+    try:
+        with pytest.raises(DataError, match="still running"):
+            runner.run_agent(str(config_path), "B0", "train", resume_from=source_dir.name)
+    finally:
+        os.close(fd)
+
+
+def test_a_sigkilled_process_releases_its_session_lock(tmp_path):
+    """The lock is the operating system's: a process killed with SIGKILL holds it no more."""
+    import signal
+    import subprocess
+    import sys
+    (tmp_path / runner.SESSION_LOCK).touch()
+    holder = subprocess.Popen([sys.executable, "-c", (
+        "import fcntl, os, sys, time; fd = os.open(sys.argv[1], os.O_RDWR); fcntl.flock(fd, fcntl.LOCK_EX); "
+        "print('held', flush=True); time.sleep(60)"), str(tmp_path / runner.SESSION_LOCK)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        assert runner.session_alive(tmp_path) is True
+        holder.send_signal(signal.SIGKILL)
+        holder.wait(timeout=10)
+        assert runner.session_alive(tmp_path) is False
+    finally:
+        holder.kill()
 
 
 def test_the_router_times_of_the_complete_questions_are_copied_and_their_absence_recorded(tmp_path, monkeypatch):
@@ -169,3 +259,22 @@ def test_the_router_times_of_the_complete_questions_are_copied_and_their_absence
     (source / "routes.jsonl").unlink()  # a routed run from before routes.jsonl existed
     assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B5"}, new, {"1"}) == {"copied": 0, "missing": True}
     assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B3"}, new, {"1"}) is None
+
+
+def test_a_killed_routed_sources_router_times_are_read_from_every_worker_file(tmp_path, monkeypatch):
+    """A killed B4 or B5 session never merged its workers' routes.w<k>.jsonl: they are read as its C1 lines are,
+    a last line cut off by the kill dropped, and hashed with them before anything is read."""
+    from bench.agent import resume
+
+    monkeypatch.setattr(paths, "RUNS", tmp_path / "runs")
+    source = tmp_path / "runs" / "agent-B4-killed"
+    source.mkdir(parents=True)
+    row = lambda q: json.dumps({"question_id": q, "call_site": "agent_ir", "invocation_key": "ir", "embed_ms": 1.0})  # noqa: E731
+    (source / "routes.w0.jsonl").write_text(row("1") + "\n" + row("3") + "\n")
+    (source / "routes.w1.jsonl").write_text(row("2") + "\n" + '{"question_id": "4", "cut')
+    new = tmp_path / "runs" / "agent-B4-new"
+    new.mkdir()
+    killed = {"run_id": "agent-B4-killed", "arm": "B4", "status": "running"}
+    assert resume.copy_routes(killed, new, {"1", "2"}) == {"copied": 2, "missing": False}
+    assert sorted(json.loads(line)["question_id"] for line in (new / "routes.jsonl").read_text().splitlines()) == ["1", "2"]
+    assert set(resume.unregistered_source_hashes(killed)) == {"routes.w0.jsonl", "routes.w1.jsonl"}

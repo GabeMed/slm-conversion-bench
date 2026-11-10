@@ -1,10 +1,20 @@
 """`bench run --resume-from <run_id>`: a new run that keeps what an agent run answered before it
 stopped on an infrastructure failure, and answers only the questions left.
 
-The source must be an agent run that ended `failed` or `interrupted`, on train or calib (resuming on
-test is a decision to take before pre-registration, so it is refused), with the same type, arm,
-split, engine, facts, few-shot prefix, batch mode and configuration (`config_sha256`, byte for byte;
-the commit may differ and both are recorded), on the same splits and data manifest.
+The source must be an agent run that ended `failed` or `interrupted`, with the same type, arm,
+split, engine, facts, few-shot prefix, batch mode and configuration (`config_sha256`, byte for byte),
+on the same splits and data manifest. On train and calib the commit may differ (both are recorded).
+
+On test the rule is fixed before the registration and stricter (`check_test_source`): the source is
+the latest attempt of its configuration in the published registry, whose manifest there is the one
+read here; it ran under the pre-registration in force, with the same configuration, on a clean tree
+at the registered code (its commit holds the registered commit's tree outside prereg/ and registry/);
+and the outputs it copies still hash to what its manifest recorded when it ended (`predictions_sha256`,
+`calls_sha256`). This session must itself be clean and at the registered code
+(`barrier.ensure_execution_allowed`). Anything else is refused: the configuration is then run again
+from its first question, which on test needs a stated defect (`--redo-reason`, `runner.open_run`) and
+its line in prereg/DEVIATIONS.md; and a resumable attempt is resumed, never redone, unless the defect
+affects questions it completed (`--redo-affects-completed`).
 
 A question of the source is complete when it has a prediction and neither raised (`failures`) nor
 met a harness error (`harness_errors`): the runner removes the prediction of a question that was in
@@ -18,6 +28,13 @@ are not copied: they are counted (calls, usage) under `resumed_from.discarded`, 
 stays visible. The router's times of the complete questions (routes.jsonl, B4 and B5) are copied the same
 way; a routed source without that file is recorded under `resumed_from.routes` as missing them. CHESS's own outputs of the complete questions are copied under
 chess/resumed/<source run_id>/ (inspection only: nothing downstream reads chess/).
+
+A source killed outright (SIGKILL, a lost machine) never closed its manifest: it still says `running`.
+It is resumed once its session's lock is free (`runner.hold_session`): its completed questions are those
+its session journaled as they ended (answers*.jsonl, `runner.journal_writer`), with their C1 lines from
+calls.jsonl and each worker's calls.w<k>.jsonl (a last line cut off by the kill is dropped). No manifest
+recorded the sha256 of those outputs, so they are computed before anything is read or copied and
+recorded in the new manifest, and on test in its intent, as `unregistered_source_hashes`.
 
 The new run's manifest has the usual fields, `started_at`/`finished_at` being this session's (as its
 run_id), plus `resumed_from` (the source's run_id, commit, dirty, config_sha256, status, times,
@@ -37,31 +54,149 @@ from typing import Any, Dict, List, Optional, Tuple
 from bench import data, paths
 
 RESUMABLE = ("failed", "interrupted")
+KILLED = "running"  # a manifest still `running` whose session no longer holds its lock: killed outright
+# What a killed source's manifest, as the registry published it when it started, must share with the
+# local one (the local one gained the resume's own fields since, if it was itself resumed).
+STARTED_IDENTITY = ("run_id", "type", "arm", "engine", "split", "status", "prereg_hash", "commit", "dirty",
+                    "config_sha256", "started_at", "question_ids")
 USAGE_FIELDS = ("input", "cached_input", "output", "reasoning", "cache_write")
 
 
-def refuse_on_test(split: str) -> None:
-    if split == "test":
-        raise data.DataError("--resume-from is refused on test: resuming a test run is a decision to take "
-                             "before pre-registration, not after a failure")
+def check_test_source(source: Dict[str, Any], prereg_hash: str, attempts: List[Dict[str, Any]],
+                      published: Optional[Dict[str, Any]]) -> None:
+    """The rule for resuming on test (the module's docstring), once the barrier has found this session
+    clean and at the registered code. `attempts` are the configuration's attempts in the published
+    registry (`registry.attempts_of`), `published` the source's manifest there."""
+    from bench import barrier
+    run_id = source["run_id"]
+
+    def refuse(why: str) -> None:
+        raise barrier.TestSplitLocked(f"refusing to resume {run_id} on the test split: {why}; resuming it is "
+                                      f"impossible, so the configuration is run again from its first question "
+                                      f"(--redo-reason, with its line in prereg/DEVIATIONS.md)")
+    if published is None:
+        refuse("the published registry holds no manifest of it")
+    killed = source.get("status") == KILLED
+    keys = STARTED_IDENTITY if killed else set(published) | set(source)
+    differ = sorted(key for key in keys if published.get(key) != source.get(key))
+    if differ:
+        refuse(f"its manifest differs from the one the registry published ({', '.join(differ[:5])})")
+    if source.get("prereg_hash") != prereg_hash:
+        refuse(f"it ran under pre-registration {source.get('prereg_hash')}, not the one in force ({prereg_hash})")
+    if source.get("dirty") is not False:
+        refuse("it ran on a working tree that was not clean")
+    registered = barrier.registered_commit()
+    if not isinstance(source.get("commit"), str) or registered is None or \
+            not barrier.same_code(source["commit"], registered):
+        refuse(f"it ran at commit {source.get('commit')!r}, not at the registered code")
+    if not attempts or attempts[-1]["run_id"] != run_id:
+        refuse(f"it is not the latest attempt of its configuration ({attempts[-1]['run_id'] if attempts else 'none'} is)")
+    if killed:  # no hash was recorded when it ended: they are recorded now, before anything runs
+        return
+    run_dir = paths.RUNS / run_id
+    for key, name in (("predictions_sha256", "predictions.json"), ("calls_sha256", "calls.jsonl")):
+        now = data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
+        if key not in source or now != source[key]:
+            refuse(f"its {name} does not hash to what its manifest recorded when it ended ({key})")
+
+
+def why_not_resumable(run_id: str, prereg_hash: str, attempts: List[Dict[str, Any]],
+                      published: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why the attempt `run_id` cannot be resumed on test, or None when it can: its run directory and
+    manifest are here, it is failed, interrupted or killed (its lock free), and `check_test_source`
+    accepts it (the published record, the registration, a clean tree at the registered code, the latest
+    attempt, outputs that still hash to what was recorded). What `runner.open_run` reads before it lets
+    a configuration be redone from its first question."""
+    from bench import barrier
+    path = paths.RUNS / run_id / "manifest.json"
+    if not path.is_file():
+        return f"{run_id} has no run directory here (runs/{run_id}/manifest.json)"
+    try:
+        source = json.loads(path.read_text())
+        check_resumable(source, str(source.get("type")))
+        check_test_source(source, prereg_hash, attempts, published)
+    except (data.DataError, barrier.TestSplitLocked, ValueError) as e:
+        return str(e)
+    return None
 
 
 def load_source(source_run_id: str, split: str) -> Dict[str, Any]:
     """The source's manifest, after the checks that need nothing of the new run."""
-    refuse_on_test(split)
     path = paths.RUNS / source_run_id / "manifest.json"
     if not path.is_file():
         raise data.DataError(f"no run {source_run_id}")
     source = json.loads(path.read_text())
     if source.get("type") != "agent":
         raise data.DataError(f"{source_run_id} is a {source.get('type')!r} run: only an agent run is resumed")
-    if source.get("status") not in RESUMABLE:
-        raise data.DataError(f"{source_run_id} is {source.get('status')!r}: only a failed or interrupted run is "
-                             f"resumed")
-    if source.get("split") == "test":
-        raise data.DataError(f"{source_run_id} is on test: resuming a test run is a decision to take before "
-                             f"pre-registration")
+    check_resumable(source, "run")
     return source
+
+
+def check_resumable(source: Dict[str, Any], what: str) -> None:
+    """Failed, interrupted, or killed: still `running`, with its session's lock free (the process that
+    held it is gone). A session that still holds it, or left none, is refused."""
+    run_id, status = source["run_id"], source.get("status")
+    if status == KILLED:
+        from bench.agent.runner import session_alive
+        alive = session_alive(paths.RUNS / run_id)
+        if alive:
+            raise data.DataError(f"{run_id} is still running (its session holds its lock): it is not resumed")
+        if alive is None:
+            raise data.DataError(f"{run_id} is 'running' and left no session lock, so nobody can tell its session "
+                                 f"is gone: it is not resumed")
+        return
+    if status not in RESUMABLE:
+        raise data.DataError(f"{run_id} is {status!r}: only a failed, interrupted or killed {what} is resumed")
+
+
+def _whole_lines(path: Path) -> List[str]:
+    """The lines of a file a killed session was appending to: a last line cut off mid-write (no newline,
+    or not JSON) is dropped; any other line that is not JSON is refused."""
+    text = path.read_text()
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    whole = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except ValueError:
+            if i == len(lines) - 1:
+                break  # cut off by the kill
+            raise data.DataError(f"{path.name} of a killed session has a broken line {i + 1}") from None
+        whole.append(line)
+    return whole
+
+
+def _killed_files(run_dir: Path) -> List[Path]:
+    """What a killed session wrote that a resume reads: its C1 lines (calls.jsonl and each worker's), its
+    answered questions (answers*.jsonl), the router's times (routes*.jsonl, B4 and B5), and
+    predictions.json if it had come that far."""
+    def worker(path: Path) -> Tuple[int, str]:
+        found = re.search(r"\.w(\d+)\.jsonl$", path.name)
+        return (int(found.group(1)) + 1 if found else 0, path.name)
+    names = [p for pattern in ("calls*.jsonl", "answers*.jsonl", "routes*.jsonl", "predictions.json")
+             for p in run_dir.glob(pattern)]
+    return sorted(names, key=lambda p: (p.name.split(".")[0], *worker(p)))
+
+
+def unregistered_source_hashes(source: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """For a killed source, the sha256 of every output its session left, by file name, computed before
+    the resume reads or copies anything: no manifest recorded them when it ended, so the new manifest (and
+    on test the intent, published before the first question) records them, as hashes no earlier record
+    vouches for. None for a source that ended."""
+    if source.get("status") != KILLED:
+        return None
+    return {path.name: data.sha256_file(path) for path in _killed_files(paths.RUNS / source["run_id"])}
+
+
+def _killed_session_end(source: Dict[str, Any]) -> Optional[str]:
+    """When a killed session last wrote an output: the end of its working time, as well as anyone can know it."""
+    from datetime import datetime, timezone
+    times = [path.stat().st_mtime for path in _killed_files(paths.RUNS / source["run_id"])]
+    return datetime.fromtimestamp(max(times), timezone.utc).isoformat() if times else source.get("started_at")
 
 
 def check_same(source: Dict[str, Any], expected: Dict[str, Any]) -> None:
@@ -76,11 +211,30 @@ def check_same(source: Dict[str, Any], expected: Dict[str, Any]) -> None:
         raise data.DataError(f"the configuration snapshot of {source['run_id']} does not match its manifest")
 
 
-def complete_questions(source: Dict[str, Any]) -> List[str]:
-    """The source's questions that ended normally, in the run's order."""
-    predictions = json.loads((paths.RUNS / source["run_id"] / "predictions.json").read_text())
+def source_answers(source: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The source's questions that ended normally, {question_id: {"prediction", "tool_errors"}}: for a
+    source that ended, from predictions.json less the questions that failed; for a killed one, from the
+    questions its session journaled as they ended (answers*.jsonl)."""
+    run_dir = paths.RUNS / source["run_id"]
+    if source.get("status") == KILLED:
+        answers = {}
+        for path in sorted(run_dir.glob("answers*.jsonl")):
+            for line in _whole_lines(path):
+                entry = json.loads(line)
+                answers[str(entry["question_id"])] = {"prediction": entry["prediction"],
+                                                      "tool_errors": entry.get("tool_errors") or None}
+        return answers
+    predictions = json.loads((run_dir / "predictions.json").read_text())
     failed = set(source.get("failures") or {}) | set(source.get("harness_errors") or {})
-    return [q for q in source["question_ids"] if q in predictions and q not in failed]
+    tool_errors = source.get("tool_errors") or {}
+    return {q: {"prediction": predictions[q], "tool_errors": tool_errors.get(q)}
+            for q in source["question_ids"] if q in predictions and q not in failed}
+
+
+def complete_questions(source: Dict[str, Any], answers: Optional[Dict[str, Dict[str, Any]]] = None) -> List[str]:
+    """The source's questions that ended normally, in the run's order."""
+    answers = source_answers(source) if answers is None else answers
+    return [q for q in source["question_ids"] if q in answers]
 
 
 def _usage_totals(calls: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -96,7 +250,12 @@ def _usage_totals(calls: List[Dict[str, Any]]) -> Dict[str, int]:
 def read_calls_of(source: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]]]:
     """The source's C1 lines, as written and parsed, refused unless valid."""
     from bench.contracts.calls import validate_calls
-    lines = [line for line in (paths.RUNS / source["run_id"] / "calls.jsonl").read_text().splitlines() if line.strip()]
+    run_dir = paths.RUNS / source["run_id"]
+    if source.get("status") == KILLED:  # its lines, and its workers' that no merge reached
+        lines = [line for path in _killed_files(run_dir) if path.name.startswith("calls")
+                 for line in _whole_lines(path)]
+    else:
+        lines = [line for line in (run_dir / "calls.jsonl").read_text().splitlines() if line.strip()]
     try:
         calls = [json.loads(line) for line in lines]
     except ValueError as e:
@@ -108,7 +267,8 @@ def read_calls_of(source: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any
 
 
 def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict[str, Any]]], run_dir: Path,
-                complete: List[str], outcome: Dict[str, Dict]) -> Dict[str, Any]:
+                complete: List[str], outcome: Dict[str, Dict],
+                answers: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Copy the complete questions' C1 lines, predictions, tool errors and CHESS outputs into the new
     run (before it answers anything: its own lines are appended after). Returns what the source spent
     on the questions that are not complete (`discarded`)."""
@@ -118,12 +278,13 @@ def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict
     copied = [line for line, call in zip(lines, calls) if call["question_id"] in keep]
     (run_dir / "calls.jsonl").write_text("".join(line + "\n" for line in copied))
 
-    predictions = json.loads((source_dir / "predictions.json").read_text())
-    tool_errors = source.get("tool_errors") or {}
-    for q in complete:
-        outcome["predictions"][q] = predictions[q]
-        if q in tool_errors:
-            outcome["tool_errors"][q] = tool_errors[q]
+    answers = source_answers(source) if answers is None else answers
+    with open(run_dir / "answers.jsonl", "a") as journal:  # copied answers survive this session being killed too
+        for q in complete:
+            outcome["predictions"][q] = answers[q]["prediction"]
+            if answers[q]["tool_errors"]:
+                outcome["tool_errors"][q] = answers[q]["tool_errors"]
+            journal.write(json.dumps({"question_id": q, **answers[q]}, ensure_ascii=False) + "\n")
 
     chess = source_dir / "chess"
     if chess.is_dir():
@@ -142,11 +303,19 @@ def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict
 def copy_routes(source: Dict[str, Any], run_dir: Path, keep: set) -> Optional[Dict[str, Any]]:
     """The router's times of the complete questions (routes.jsonl, B4 and B5), copied as their C1 lines are.
     A source of a routed arm without that file (run before it existed) is recorded as missing them; an arm
-    that does not embed (B0, B1, B2, B3) has none to copy."""
-    found = paths.RUNS / source["run_id"] / "routes.jsonl"
-    if not found.is_file():
-        return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
-    lines = [line for line in found.read_text().splitlines() if line.strip()]
+    that does not embed (B0, B1, B2, B3) has none to copy. A killed source's are read as its C1 lines are:
+    routes.jsonl and each worker's routes.w<k>.jsonl that no merge reached, a cut-off last line dropped."""
+    run_dir_source = paths.RUNS / source["run_id"]
+    if source.get("status") == KILLED:
+        files = [path for path in _killed_files(run_dir_source) if path.name.startswith("routes")]
+        if not files:
+            return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
+        lines = [line for path in files for line in _whole_lines(path)]
+    else:
+        found = run_dir_source / "routes.jsonl"
+        if not found.is_file():
+            return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
+        lines = [line for line in found.read_text().splitlines() if line.strip()]
     copied = [line for line in lines if json.loads(line).get("question_id") in keep]
     (run_dir / "routes.jsonl").write_text("".join(line + "\n" for line in copied))
     return {"copied": len(copied), "missing": False}
@@ -154,12 +323,16 @@ def copy_routes(source: Dict[str, Any], run_dir: Path, keep: set) -> Optional[Di
 
 def _resumed_from(source: Dict[str, Any], **what: Any) -> Dict[str, Any]:
     return {**{key: source.get(key) for key in ("run_id", "commit", "dirty", "config_sha256", "status",
-                                               "started_at", "finished_at", "workers", "stopped_by")}, **what}
+                                               "started_at", "finished_at", "workers", "stopped_by", "prereg_hash",
+                                               "end_reason", "predictions_sha256", "calls_sha256")}, **what}
 
 
 def _sessions(source: Dict[str, Any]) -> List[Dict[str, Any]]:
     previous = source.get("sessions") or [{key: source.get(key) for key in ("started_at", "finished_at", "commit", "workers")}]
-    return [dict(session) for session in previous]
+    sessions = [dict(session) for session in previous]
+    if source.get("status") == KILLED:  # its last session never closed: it ended with its last output
+        sessions[-1].update({"finished_at": _killed_session_end(source), "killed": True})
+    return sessions
 
 
 def manifest_fields(source: Dict[str, Any], complete: List[str], discarded: Dict[str, Any]) -> Dict[str, Any]:
@@ -204,8 +377,8 @@ def working_seconds(manifest: Dict[str, Any]) -> Optional[float]:
 # one more call, never a wrong copy). A complete invocation's C1 lines are copied unchanged, every
 # attempt, `run_id` included, as `bench run --resume-from` copies a question's; an incomplete one's
 # are not copied and are counted under `resumed_from.discarded` (calls and usage), so its cost stays
-# visible and no judgment reads a call twice. It is refused on test, as `bench run --resume-from` is
-# (the replay's split is its source run's).
+# visible and no judgment reads a call twice. On test it follows `bench run --resume-from`'s rule there
+# (`check_test_source`; the replay's split is its source run's).
 
 REPLAY_IDENTITY = ("split", "source_run_id", "source_config_sha256", "source_calls_sha256", "engine", "arm",
                    "call_sites", "question_ids", "n_invocations", "facts", "few_shot", "few_shot_k", "few_shot_sha256")
@@ -216,17 +389,15 @@ Identity = Tuple[str, str, str]
 
 
 def load_replay_source(failed_run_id: str, split: str) -> Dict[str, Any]:
-    """The failed replay's manifest, refused on test and unless it stopped on an infrastructure failure."""
-    refuse_on_test(split)
+    """The failed replay's manifest, refused unless it stopped on an infrastructure failure (on test, the
+    rule of `check_test_source` applies on top, in `runner.open_run`)."""
     path = paths.RUNS / failed_run_id / "manifest.json"
     if not path.is_file():
         raise data.DataError(f"no run {failed_run_id}")
     source = json.loads(path.read_text())
     if source.get("type") != "replay":
         raise data.DataError(f"{failed_run_id} is a {source.get('type')!r} run: `bench replay --resume-from` resumes a replay")
-    if source.get("status") not in RESUMABLE:
-        raise data.DataError(f"{failed_run_id} is {source.get('status')!r}: only a failed or interrupted replay is resumed")
-    refuse_on_test(source.get("split"))
+    check_resumable(source, "replay")
     if source["status"] == "failed" and not source.get("harness_errors"):
         raise data.DataError(f"{failed_run_id} failed without a harness error (c1_errors {source.get('c1_errors')}, "
                              f"problems {source.get('problems')}): only an infrastructure failure is resumed")
