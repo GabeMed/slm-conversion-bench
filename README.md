@@ -27,13 +27,16 @@ runs that algorithm end to end on a real open-source agent, [CHESS](https://gith
 - whether that still holds against **the cheapest alternative that needs no training**;
 - at what **cost per correct answer**.
 
-The protocol is [`SPEC.md`](SPEC.md), fixed before any result.
+The protocol is [`SPEC.md`](SPEC.md). Its verdict rules were fixed at Stage 0, before the pilot was read, and the whole
+protocol is registered before any test result; every change after Stage 0 is a line of
+[`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md).
 
 ## Status
 
 - ✓ **Harness:** built and tested against a fake server, a small local model and CPU training.
 - ✓ **Stage 0:** the configuration and the verdict rules committed and timestamped ([`prereg/STAGE0`](prereg/STAGE0), OpenTimestamps).
-- ○ **Day 1:** the pilot, the teacher's logs, curation, clusters, the SLM's choice, LoRA training. No paid run yet.
+- ◐ **Day 1:** the pilot, the teacher's logs, curation, clusters, the SLM's choice, LoRA training. Paid runs on the
+  training and calibration splits are done; none has touched the test split.
 - ○ **Day 2:** the load test, the allocation, the pre-registration, the test split, the report.
 
 [`RUNBOOK.md`](RUNBOOK.md) is the order of the two days, command by command.
@@ -66,10 +69,10 @@ a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="Results: pending. No paid run yet; the protocol is registered at Stage 0.">
+  <img src=".github/assets/results-light.svg" width="100%" alt="Results: pending. The protocol is registered at Stage 0.">
 </picture>
 
-No paid run has happened yet, so there are no numbers. When there are, `bench report` writes `reports/<sha256>/`, and
+No test result exists yet, so there are no numbers here. When there are, `bench report` writes `reports/<sha256>/`, and
 this card is redrawn from its `report.json`:
 
 ```sh

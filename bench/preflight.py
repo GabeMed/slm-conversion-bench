@@ -134,8 +134,8 @@ def check_data(config: Dict[str, Any]) -> Dict[str, Any]:
         overlap = sorted((set(splits["train"]) | set(splits["calib"])) & (test | excluded))
         evidence["test"] = {"questions": len(test), "overlap_with_train_or_calib": overlap,
                             "excluded_in_test": sorted(test & excluded),
-                            "note": "the test gold is read only under the pre-registration (bench/barrier.py); "
-                                    "bench data pinned its sha256"}
+                            "note": "no engine sees a test question before the pre-registration (bench/barrier.py); "
+                                    "bench data executed the test's gold SQL to check it and pinned its sha256"}
         ok = (all(not evidence[s]["without_gold"] for s in ("train", "calib")) and test and not overlap
               and not (test & excluded))
         status = PASS if ok else FAIL
