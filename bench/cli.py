@@ -88,7 +88,7 @@ def main(argv=None) -> int:
     p.add_argument("--per-call", action="store_true",
                    help="score the SQL of every generate_candidate and revise invocation in the run's calls.jsonl")
     p.add_argument("--partial", action="store_true",
-                   help="score an abandoned test attempt (failed or interrupted) on the questions it completed, for "
+                   help="score an abandoned test attempt (failed, interrupted, or killed outright) on the questions it completed, for "
                         "the report's list of attempts (plan key `attempts`); never read for a verdict")
 
     p = sub.add_parser("prereg", help="write and commit prereg/manifest.json and prereg/HASH (push to publish)")
