@@ -19,6 +19,12 @@ Changes after Stage 0 that can change a result or its interpretation.
   under the strict parser: 1 of the pilot's 2,198 answered agent calls (agent_cg) and 3 of K1's 9,167 (2 agent_cg, 1
   agent_ss), each a JSON {"name": ...}, would parse under patch 16; no call the strict parser accepted changes
   its tool
+- 2026-11-10 · the load test shuffles its payload pool with seeds.loadtest_shuffle (20260935) before the warm-up
+  and the concurrency levels are sliced (bench/loadtest.py), decided before any load test ran. In the source's
+  file order the six levels (4 to 128, 500 requests each) read only the first 19% of the B0 calibration calls:
+  6 to 8 questions and 3 to 4 of the 11 databases per level, 4 databases in all, a different mix at each level;
+  shuffled, each level draws 165 to 176 questions from 10 to 11 databases. J8's rule is unchanged.
+  config.yaml: seeds.loadtest_shuffle
 - 2026-11-10 · B1's few-shot examples at the agent call sites (agent_ir, agent_ss, agent_cg) were sampled from
   any step of the teacher's invocations, and these prompts carry no state, so at its first step cheap_alt was
   shown the teacher's later steps: with k = 3 the agent never called extract_keywords and skipped the steps

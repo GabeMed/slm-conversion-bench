@@ -154,6 +154,7 @@ seeds:                         # distinct values, so a seed read for another's p
   bootstrap: 20260932
   few_shot: 20260933           # B1's examples (arms.B1.few_shot)
   curation_sample: 20260934    # S2's cap (curation.max_per_question_call_site)
+  loadtest_shuffle: 20260935   # the load test's payload order before the levels are sliced (bench/loadtest.py)
 
 splits:
   calib_size: 200
@@ -220,9 +221,9 @@ stats:                         # F2 · J4 (SPEC 6.4): margin, cap and seed are i
 arms:                          # the facts each arm uses: judgments/<J>/<sha256>/<fact>.json (bench/contracts/facts.py)
   B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
     few_shot: {k: 3, source_run: agent-B0-train-20261109T214533.609401Z}  # k teacher examples per call site from a done B0 run on train (run id); before runs
-  B3: {choice: null}           # J6 (S4)
-  B4: {choice: null, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null}                 # J6, J5 (S3), S5
-  B5: {choice: null, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
+  B3: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json}         # J6 (S4)
+  B4: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null}                 # J6, J5 (S3), S5
+  B5: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
 
 # F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
 # bench/preflight.py). Values are proposals; the author confirms them before runs.

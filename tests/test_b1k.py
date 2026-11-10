@@ -71,9 +71,11 @@ def agent_run(run_id, k, right, *, arm="B1", split="calib", questions=PILOT, eng
 
 def world(tmp_path, monkeypatch, right_k0, right_k3):
     """B1 on the pilot with k = 0 and k = 3, right end to end on the given questions. The arms' facts
-    are those before RUNBOOK step 8 (test_verify.NO_CENTROIDS): this world holds no J5."""
+    are those before RUNBOOK steps 4 and 8 (test_verify.NO_CENTROIDS): this world holds no J6 and no J5."""
     config_path, config = repo(tmp_path, monkeypatch, {"stats": {"n_boot": 500},
-                                                       "arms": {"B4": {"centroids": None}, "B5": {"centroids": None}}})
+                                                       "arms": {"B3": {"choice": None},
+                                                                "B4": {"choice": None, "centroids": None},
+                                                                "B5": {"choice": None, "centroids": None}}})
     monkeypatch.setattr(data, "pilot_ids", lambda config: list(PILOT))  # D's accessor (design §6.2)
     k0 = agent_run("agent-k0", 0, right_k0, no_sql=PILOT[40:])
     k3 = agent_run("agent-k3", 3, right_k3)

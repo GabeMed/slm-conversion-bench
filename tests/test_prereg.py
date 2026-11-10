@@ -385,7 +385,7 @@ def test_the_command_registers_and_refuses_through_the_cli(repo, monkeypatch, ca
     monkeypatch.setattr(paths, "ROOT", repo)
     assert main(["prereg", "--config", str(repo / "config.yaml")]) == 0
     out = capsys.readouterr()
-    assert (repo / "prereg" / "HASH").read_text().strip() in out.out and "arms.B3.choice" in out.err
+    assert (repo / "prereg" / "HASH").read_text().strip() in out.out and "arms.B4.adapters" in out.err  # a value still null in the shipped config
     (repo / "notes.txt").write_text("x\n")
     assert main(["prereg", "--config", str(repo / "config.yaml")]) == 2
     assert "uncommitted" in capsys.readouterr().err

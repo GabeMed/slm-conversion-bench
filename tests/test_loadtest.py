@@ -12,7 +12,7 @@ import pytest
 from bench import cli, loadtest, paths
 from bench.contracts.config import engine_spec
 from bench.loadtest import (LoadtestError, aiperf_command, aiperf_config, build_payloads, env_headers, level_slice,
-                           scrub_secrets, server_root, wait_ready)
+                           scrub_secrets, server_root, shuffle_pool, wait_ready)
 from synthetic import make_repo
 from test_train_fixtures import TINY, TINY_NAME, make_s5_repo, save
 
@@ -199,6 +199,28 @@ def test_each_level_replays_its_own_calls_after_the_warm_up():
     assert [p["i"] for p in third["payloads"]] == [8, 9, 0] and third["repeats"] is True
 
 
+def test_the_shuffle_is_the_seeds_and_without_a_seed_the_pool_keeps_the_file_order():
+    payloads = [{"i": i} for i in range(50)]
+    once, again = shuffle_pool(payloads, 20260935), shuffle_pool(payloads, 20260935)
+    assert once == again and once != payloads and sorted(p["i"] for p in once) == list(range(50))
+    assert shuffle_pool(payloads, 20260936) != once  # another seed, another order
+    assert shuffle_pool(payloads, None) == payloads and shuffle_pool(payloads, None) is not payloads
+
+
+def test_shuffled_every_level_draws_from_the_whole_pools_mix():
+    """A source as C1 writes it: each question's calls together, the questions of a database together. In file
+    order a level of 40 replays 4 or 5 questions on 1 or 2 databases; shuffled, each level holds most
+    questions, every database, and about the pool's share of each call site."""
+    pool = [{"q": q, "db": f"db{q // 8}", "site": "filter_column" if c < 8 else f"agent_{c}"}
+            for q in range(30) for c in range(10)]
+    in_file_order = [level_slice(pool, 20, level, 40)["payloads"] for level in range(6)]
+    assert all(len({p["q"] for p in chosen}) <= 5 and len({p["db"] for p in chosen}) <= 2 for chosen in in_file_order)
+    for level in range(6):
+        chosen = level_slice(shuffle_pool(pool, 20260935), 20, level, 40)["payloads"]
+        assert len({p["q"] for p in chosen}) >= 15 and len({p["db"] for p in chosen}) == 4
+        assert abs(sum(p["site"] == "filter_column" for p in chosen) / 40 - 0.8) <= 0.15
+
+
 SOURCE = [dict(CALLS[i % 2], call_id=f"00000000-0000-4000-8000-{i:012d}", invocation_key=f"k:{i}") for i in range(12)]
 
 
@@ -213,6 +235,7 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setenv("T_MODAL_SECRET", "ms-live")
     monkeypatch.setattr(loadtest, "local_aiperf", lambda: __import__("sys").executable)  # a file that exists
     config["loadtest"].update({"concurrency": [1, 4], "request_count": 5, "warmup_request_count": 2})
+    config["seeds"].pop("loadtest_shuffle", None)  # the file order, unless a test sets the seed
     yield config_path, save(config, config_path), server
     server.close()
 
@@ -255,6 +278,7 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     assert server.posted == expected[:2] * 2
     second = json.loads((run_dirs[1] / "manifest.json").read_text())
     assert (manifest["payload_offset"], second["payload_offset"], second["payloads_repeat"]) == (2, 7, False)
+    assert manifest["payload_shuffle_seed"] is None  # no seeds.loadtest_shuffle: the file order, as replayed above
     _, cmd, aiperf_yaml = calls[1]
     phases, endpoint = aiperf_yaml["benchmark"]["phases"], aiperf_yaml["benchmark"]["endpoint"]
     assert (phases["concurrency"], aiperf_yaml["benchmark"]["model"]) == (4, "c0")
@@ -265,6 +289,19 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     assert manifest["secrets_redacted_in"] == ["aiperf.log"] and "mk-live" not in (run_dirs[0] / "aiperf.log").read_text()
     assert manifest["source_arm"] == "B0" and manifest["levels"] == [1, 4] and manifest["level_index"] == 0
     assert second["sweep_id"] == manifest["sweep_id"] and second["level_index"] == 1
+
+
+def test_with_the_seed_the_warm_up_and_every_level_come_from_the_shuffled_pool(served, monkeypatch):
+    config_path, config, server = served
+    config["seeds"]["loadtest_shuffle"] = 7
+    save(config, config_path)
+    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf())
+    run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", _source_run(calls=SOURCE), "local")
+    levels = [[json.loads(line) for line in (d / "payloads.jsonl").read_text().splitlines()] for d in run_dirs]
+    expected = build_payloads(SOURCE, "c0", config["roles"]["slm_candidates"][-1]["params"], False, config["call_sites"])
+    shuffled = shuffle_pool(expected, 7)
+    assert shuffled != expected and levels == [shuffled[2:7], shuffled[7:12]] and server.posted == shuffled[:2] * 2
+    assert [json.loads((d / "manifest.json").read_text())["payload_shuffle_seed"] for d in run_dirs] == [7, 7]
 
 
 def test_a_failed_level_is_recorded_and_stops_the_sweep(served, monkeypatch):
