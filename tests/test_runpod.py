@@ -25,7 +25,7 @@ from runpod_apps import pods as rp  # noqa: E402
 from runpod_apps import serve as rserve  # noqa: E402
 from runpod_apps import settings as rs  # noqa: E402
 from runpod_apps.settings import RunPodError  # noqa: E402
-from runpod_apps.ssh import Remote  # noqa: E402
+from runpod_apps.ssh import Remote, Result, Shell  # noqa: E402
 from runpod_apps.state import State  # noqa: E402
 from test_loadtest import SOURCE, FakeServer, _source_run  # noqa: E402
 from test_train_fixtures import TINY, TINY_NAME, fake_adapter, make_s5_repo, save, served  # noqa: E402
@@ -420,6 +420,75 @@ def test_a_pod_is_recorded_before_anything_waits_on_it_and_down_all_finds_every_
     assert {g["id"] for g in result["done"]} == {pod["id"], stray["id"]} and list(world.fake.pods) == [other["id"]]
     assert result["failed"] == [] and result["warnings"] == []
     assert State().read()["pods"] == {} and {t["id"] for t in State().read()["terminated"]} >= {pod["id"]}
+
+
+class SilentSshd(Shell):
+    """A pod whose sshd never answers: every command is ssh's own failure."""
+
+    def __init__(self):
+        self.commands = []
+
+    def run(self, command, timeout_s=600):
+        self.commands.append(command)
+        return Result(255, "", "Warning: no known_hosts\nssh: connect to host 203.0.113.7 port 40000: "
+                               "Connection timed out\n")
+
+
+def clocked_provider(world, shell_for):
+    """A Provider on the fake whose sleeps advance its clock (poll every 10 s): seconds pass without waiting."""
+    now = [0.0]
+    provider = rp.Provider(world.config, api=client(world.fake), state=State(), shell_for=shell_for,
+                           sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0], poll_s=10)
+    return provider, now
+
+
+def test_a_running_pod_whose_sshd_never_answers_is_given_up_early_with_sshs_stderr_and_its_runtime(runpod_repo):
+    world = runpod_repo
+    ready_volume(world)
+    sshd = SilentSshd()
+    provider, now = clocked_provider(world, lambda pod, endpoint: sshd)
+    with pytest.raises(RunPodError) as raised:
+        rserve.up(provider, TINY_NAME)
+    message = str(raised.value)
+    assert "RUNNING for 600 s without SSH answering" in message and "1800 s startup timeout" in message
+    assert "ssh exit 255: ssh: connect to host 203.0.113.7 port 40000: Connection timed out" in message
+    assert "uptime 1800 s, ports [22->203.0.113.7:" in message
+    assert 600 < now[0] < 700 and len(sshd.commands) > 1  # well before serving.startup_timeout_s
+    assert not world.fake.pods  # the pod that did not come up is terminated
+
+
+def test_ssh_is_tried_only_once_the_runtime_shows_22_and_a_pod_that_never_maps_it_is_given_up(runpod_repo, monkeypatch):
+    world = runpod_repo
+    rserve.setup(world.provider())
+    view = world.fake._pod_view
+
+    def no_port_22(pod):
+        seen = view(pod)
+        if seen["runtime"]:
+            seen["runtime"]["ports"] = []
+        return seen
+    monkeypatch.setattr(world.fake, "_pod_view", no_port_22)
+    world.config["runpod"]["ssh_wait_after_running_s"] = 120
+    sshd = SilentSshd()
+    provider, now = clocked_provider(world, lambda pod, endpoint: sshd)
+    pod = provider.create("serve", tagged("slm-bench-serve-x", gpu={"id": "NVIDIA A100 80GB PCIe"}), "x")
+    with pytest.raises(RunPodError, match=r"RUNNING for 120 s .*port 22 not mapped yet \(uptime 1800 s, ports \[\]\)"):
+        provider.wait_ssh(pod["id"], 1800)
+    assert sshd.commands == [] and 120 < now[0] < 200
+
+
+def test_a_pod_whose_sshd_answers_is_reached_as_before_its_uptime_never_counting_against_it(runpod_repo):
+    world = runpod_repo
+    rserve.setup(world.provider())
+    world.config["runpod"]["ssh_wait_after_running_s"] = 60  # the fake reports uptime 1800: only our clock counts
+    shells = []
+    provider, now = clocked_provider(world, lambda pod, endpoint: shells.append(endpoint) or
+                                     LocalShell(world.tmp / "pods" / pod["id"], world.tmp / "volume"))
+    pod = provider.create("serve", tagged("slm-bench-serve-x", gpu={"id": "NVIDIA A100 80GB PCIe"}), "x")
+    ready = provider.wait_ssh(pod["id"], 1800)
+    assert ready["pod"]["status"] == "RUNNING" and shells == [{"host": "203.0.113.7", "port": ready["pod"]["ssh"]["direct"]["port"]}]
+    assert now[0] == 0  # RUNNING with 22 mapped at the first poll: SSH answered at once, no sleep
+    assert State().read()["pods"][pod["id"]]["ssh"] == shells[0]
 
 
 def test_down_all_terminates_the_recorded_pods_first_and_goes_on_past_any_failure(runpod_repo, capsys):
