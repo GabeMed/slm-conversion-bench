@@ -390,3 +390,49 @@ def test_adapters_trained_on_other_weights_or_template_are_refused(arms, fact_ro
         path = _write("S5", "adapters", {**adapters, **stale})[0]
         with pytest.raises(facts.FactError, match="pinned to"):
             route("B4", "select_tables", MSG, _with(config, "B4", adapters=path))
+
+
+def test_b5_routes_by_the_exploratory_allocation_only_when_asked(arms, fact_root):
+    """SPEC §3 extension 1: `--allocation exploratory` reads arms.B5.exploratory_allocation, a hand-written
+    fact checked as J7's is; the registered B5 keeps J7's (arms.B5.allocation), and no other arm has one."""
+    config, _ = arms
+    c_sha = facts.read_fact(str(fact_root / config["arms"]["B5"]["centroids"]), "centroids")[1]
+    a_sha = facts.read_fact(str(fact_root / config["arms"]["B5"]["adapters"]), "adapters")[1]
+    swap, swap_sha = _write("exploratory", "allocation", {"centroids": c_sha, "adapters": a_sha,
+                                                          "allocation": {"c0": "slm", "c1": "production_llm"}})
+    with pytest.raises(facts.FactError, match="arms.B5.exploratory_allocation is not set"):
+        route("B5", "select_tables", MSG, config, "exploratory")
+    config = _with(config, "B5", exploratory_allocation=swap)
+    filter_prompt = [{"role": "user", "content": "filter this column"}]
+    assert route("B5", "select_tables", MSG, config, "exploratory") == Route("slm:qwen3-8b+lora:c0-aa", "c0")
+    assert route("B5", "filter_column", filter_prompt, config, "exploratory") == Route("production_llm", "c1")
+    assert possible_engines("B5", config, "exploratory") == ["production_llm", "slm:qwen3-8b+lora:c0-aa"]
+    assert router.arm_facts("B5", config, "exploratory")["allocation"][1] == swap_sha
+    # the registered B5 is untouched: J7's allocation, whatever the exploratory one says
+    assert route("B5", "select_tables", MSG, config) == Route("cheap_alt", "c0")
+    assert possible_engines("B5", config) == ["cheap_alt", "production_llm", "slm:qwen3-8b+lora:c1-bb"]
+    for arm in ("B0", "B3", "B4"):
+        with pytest.raises(ValueError, match="only B5 has an allocation"):
+            route(arm, "select_tables", MSG, config, "exploratory")
+    with pytest.raises(ValueError, match="unknown allocation"):
+        possible_engines("B5", config, "c0-only")
+    stale = _write("exploratory", "allocation", {"centroids": c_sha, "adapters": "0" * 64, "allocation": {"c0": "slm"}})[0]
+    with pytest.raises(facts.FactError, match="other centroids or adapters"):
+        route("B5", "select_tables", MSG, _with(config, "B5", exploratory_allocation=stale), "exploratory")
+
+
+def test_the_shipped_exploratory_allocation_is_the_c0_swap():
+    """The registered extension 1: c0 on its adapter, every other cluster on the production LLM, decided on the
+    centroids and adapters B4 and B5 run on. The fact is rebuilt here from the configuration alone (judgments/ is in
+    no clone CI makes): the address the configuration names must be its sha256."""
+    from bench.prereg import EXPLORATORY_ALLOCATION
+    import hashlib
+    b5 = load_config(BASE)["arms"]["B5"]
+    assert EXPLORATORY_ALLOCATION == {"c0": "slm", "c1": "production_llm", "c2": "production_llm", "c3": "production_llm"}
+    payload = {"centroids": b5["centroids"].split("/")[2], "adapters": b5["adapters"].split("/")[2],
+               "allocation": EXPLORATORY_ALLOCATION}
+    facts.validate_fact("allocation", payload)
+    sha = hashlib.sha256(facts.canonical(payload)).hexdigest()
+    assert b5["exploratory_allocation"] == f"judgments/exploratory/{sha}/allocation.json"
+    assert b5["centroids"] == load_config(BASE)["arms"]["B4"]["centroids"]
+    assert b5["adapters"] == load_config(BASE)["arms"]["B4"]["adapters"]

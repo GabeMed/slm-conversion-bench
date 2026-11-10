@@ -117,15 +117,46 @@ def b1k_choice(root: Path, config: Dict[str, Any]) -> Path:
 def arm_fact_paths(root: Path, config: Dict[str, Any]) -> List[Path]:
     """The facts the configuration names for the arms (`arms.<arm>.<fact>`, as the router reads them:
     J6's choice, J5's centroids, S5's adapters, J7's allocation). Every one must be set: an arm whose fact
-    is null cannot run on test, and registering it would fix B4 or B5 as undecided."""
-    from bench.contracts.router import ARM_FACTS
+    is null cannot run on test, and registering it would fix B4 or B5 as undecided. B5's exploratory
+    allocation (`arms.B5.exploratory_allocation`, SPEC §3 extension 1, no verdict) is optional; when set, it is
+    registered as the others are, so a test run of it follows the fact registered before the test."""
+    from bench.contracts.router import ALLOCATIONS, ARM_FACTS
     arms = config.get("arms") or {}
     missing = [f"arms.{arm}.{name}" for arm, names in sorted(ARM_FACTS.items())
                for name in names if not (arms.get(arm) or {}).get(name)]
     if missing:
         raise PreregError(f"{', '.join(missing)} not set: every fact the arms follow is decided before the "
                           f"registration (the adapters by S5, the allocation by J7)")
-    return [root / arms[arm][name] for arm, names in sorted(ARM_FACTS.items()) for name in names]
+    exploratory = (arms.get("B5") or {}).get(ALLOCATIONS["exploratory"])
+    if exploratory:
+        check_exploratory_allocation(root, config)
+    return [root / arms[arm][name] for arm, names in sorted(ARM_FACTS.items()) for name in names] + \
+        ([root / exploratory] if exploratory else [])
+
+
+# SPEC §3 extension 1 as registered (SPEC 6.1, "one cluster swapped, live"): c0, the column filter, on its adapter,
+# every other cluster on the production LLM. The exploratory fact must be exactly this, on B5's centroids and adapters.
+EXPLORATORY_ALLOCATION = {"c0": "slm", "c1": "production_llm", "c2": "production_llm", "c3": "production_llm"}
+
+
+def check_exploratory_allocation(root: Path, config: Dict[str, Any]) -> None:
+    """B5's exploratory allocation (`arms.B5.exploratory_allocation`) is the declared swap and nothing else: the
+    fact its address names (content by sha256), decided on the centroids and adapters arms.B5 names (by their
+    addresses), with exactly `EXPLORATORY_ALLOCATION`."""
+    from bench.contracts.facts import FactError, read_fact
+    b5 = (config.get("arms") or {}).get("B5") or {}
+    rel = b5["exploratory_allocation"]
+    try:
+        payload, _ = read_fact(str(root / rel), "allocation")
+    except (FactError, OSError, ValueError) as e:
+        raise PreregError(f"arms.B5.exploratory_allocation ({rel}): {e}") from e
+    on = {name: Path(b5.get(name) or "").parent.name for name in ("centroids", "adapters")}
+    if (payload.get("centroids"), payload.get("adapters")) != (on["centroids"], on["adapters"]):
+        raise PreregError(f"arms.B5.exploratory_allocation ({rel}) was decided on other centroids or adapters than "
+                          f"arms.B5's ({on['centroids']}, {on['adapters']})")
+    if payload.get("allocation") != EXPLORATORY_ALLOCATION:
+        raise PreregError(f"arms.B5.exploratory_allocation ({rel}) allocates {payload.get('allocation')!r}, not the "
+                          f"declared single-cluster swap {EXPLORATORY_ALLOCATION}")
 
 
 def _check_facts_tracked(root: Path, facts: List[Path]) -> None:

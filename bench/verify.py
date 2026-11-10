@@ -14,13 +14,16 @@ computed, never of a file found on disk.
 
 What is verified:
 - the judgments the report plan names (`bench/report.py`): `j5`, `j6`, `j7`, `j8`, `per_call`,
-  `teacher_train_cost`, `b1k` (B1's few-shot k, a `choice.json`), the `cost` of every arm and every
-  `format` entry;
+  `teacher_train_cost`, `b1k` (B1's few-shot k, a `choice.json`), the `cost` of every arm and of
+  `b5_exploratory`, and every `format` entry;
 - the judgments behind the facts `config.yaml › arms` points at: a `choice` is written by J6,
   `centroids` by J5, an `allocation` by J7 (`adapters` is training's output, S5, not a judgment).
   A fact stands when **at least one** stored result that wrote it verifies, with everything that
   result built on: an older result that reached the same fact under other settings is not read by
-  anything, and does not count against it. A fact with no such result is a divergence;
+  anything, and does not count against it. A fact with no such result is a divergence. The one exception
+  is `HAND_WRITTEN`: B5's exploratory allocation (`arms.B5.exploratory_allocation`, SPEC §3 extension 1,
+  no verdict) is written by hand, with no judgment behind it; it must read as an allocation fact, and no
+  J7 result is asked of it;
 - every judgment one of those built on (a result named in `reads`), and so on.
 
 J1 and J4 are not stored: the report computes them itself.
@@ -48,6 +51,8 @@ FACT_WRITERS: Dict[str, Tuple[str, Callable[[Dict[str, Any]], Any]]] = {
     "centroids": ("J5", lambda result: (result.get("centroids") or {}).get("sha256")),
     "allocation": ("J7", lambda result: (result.get("allocation_fact") or {}).get("sha256")),
 }
+# facts the configuration names that no judgment writes: (arm, key) -> the fact they are; read, never recomputed
+HAND_WRITTEN = {("B5", "exploratory_allocation"): "allocation"}
 PLAN_KEYS = ("j5", "j6", "j7", "j8", "per_call", "teacher_train_cost", "b1k")
 REFUSALS = (JudgmentError, FactError, ConfigError, DataError, OSError)
 
@@ -75,6 +80,7 @@ def plan_results(plan: Dict[str, Any]) -> List[str]:
     """The judgment results a report plan names."""
     named = [plan[key] for key in PLAN_KEYS if plan.get(key)]
     named += [spec["cost"] for spec in (plan.get("arms") or {}).values() if spec.get("cost")]
+    named += [plan["b5_exploratory"]["cost"]] if (plan.get("b5_exploratory") or {}).get("cost") else []
     named += list((plan.get("format") or {}).values())
     return named
 
@@ -101,6 +107,12 @@ def fact_writers(config: Dict[str, Any]) -> Tuple[List[Tuple[str, str, List[Path
                 except (ValueError, AttributeError):  # not a result: it wrote nothing
                     continue
             facts.append((label, judgment, writers))
+        for (exempt_arm, key), name in HAND_WRITTEN.items():  # no judgment to recompute: it must only read as its fact
+            if exempt_arm == arm and (settings or {}).get(key):
+                try:
+                    read_fact(str(_absolute(settings[key])), name)
+                except (FactError, OSError) as e:
+                    divergences.append(f"arms.{arm}.{key} ({settings[key]}): {e}")
     return facts, divergences
 
 

@@ -25,7 +25,7 @@ PRICES = {"as_of": "2026-09-30", "table": {
 # the arms' facts before RUNBOOK step 8: the shipped configuration names J5's centroids for B4 and B5,
 # which these worlds do not hold; a test that wants an arm's fact sets it
 NO_CENTROIDS = {"B3": {"choice": None}, "B4": {"choice": None, "centroids": None},
-                "B5": {"choice": None, "centroids": None}}  # before J6 and J5: the world writes its own facts
+                "B5": {"choice": None, "centroids": None, "exploratory_allocation": None}}  # before J6 and J5: the world writes its own facts
 
 
 def without_centroids(config):
@@ -209,6 +209,27 @@ def test_the_judgments_behind_the_arms_facts_are_verified(world):
     orphan.write_text(json.dumps({"slm": "qwen3-8b"}))  # a fact edited in place
     _, divergences = verify.verify(config, only_j8)
     assert len(divergences) == 1 and "content sha256" in divergences[0] and divergences[0].startswith("arms.B3.choice")
+
+
+def test_the_exploratory_allocation_is_exempt_from_j7_but_must_read_as_an_allocation(world):
+    """B5's exploratory allocation (SPEC §3 extension 1) is written by hand: no J7 result wrote it, and none is
+    asked of it; it must still be the allocation fact its address names."""
+    config = copy.deepcopy(world["config"])
+    payload, _ = facts.read_fact(str(world["allocation"]), "allocation")
+    swap = facts.write_fact("exploratory", "allocation", {**payload, "allocation": {"c0": "slm", "c1": "production_llm"}})
+    config["arms"]["B5"]["exploratory_allocation"] = relative(swap)
+    only_j8 = {"split": "calib", "j8": world["plan"]["j8"]}
+    verified, divergences = verify.verify(config, only_j8)
+    assert divergences == [] and verified == [relative(world["results"]["j8"])]
+    # the exemption is the key's, not the fact's: named as J7's allocation, the hand-written fact has no J7 behind it
+    as_j7 = copy.deepcopy(config)
+    as_j7["arms"]["B5"]["allocation"] = relative(swap)
+    _, divergences = verify.verify(as_j7, only_j8)
+    assert divergences == [f"arms.B5.allocation ({relative(swap)}): no stored J7 result that wrote this fact verifies"]
+    swap.write_text(json.dumps({**payload, "allocation": {"c0": "slm"}}))  # edited in place
+    _, divergences = verify.verify(config, only_j8)
+    assert len(divergences) == 1 and divergences[0].startswith(f"arms.B5.exploratory_allocation ({relative(swap)})") \
+        and "content sha256" in divergences[0]
 
 
 def test_a_fact_stands_on_one_result_that_verifies_and_falls_with_none(world):

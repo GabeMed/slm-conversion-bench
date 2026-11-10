@@ -57,7 +57,7 @@ RESUMABLE = ("failed", "interrupted")
 KILLED = "running"  # a manifest still `running` whose session no longer holds its lock: killed outright
 # What a killed source's manifest, as the registry published it when it started, must share with the
 # local one (the local one gained the resume's own fields since, if it was itself resumed).
-STARTED_IDENTITY = ("run_id", "type", "arm", "engine", "split", "status", "prereg_hash", "commit", "dirty",
+STARTED_IDENTITY = ("run_id", "type", "arm", "engine", "allocation", "split", "status", "prereg_hash", "commit", "dirty",
                     "config_sha256", "started_at", "question_ids")
 USAGE_FIELDS = ("input", "cached_input", "output", "reasoning", "cache_write")
 

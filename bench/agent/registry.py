@@ -157,10 +157,11 @@ def registered_call_sites() -> Dict[str, Any]:
     return {"call_sites": call_sites, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "origin": origin}
 
 
-def done_runs_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg_hash: str, ref: str) -> List[str]:
+def done_runs_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg_hash: str, ref: str,
+                 allocation: Optional[str] = None) -> List[str]:
     """The test executions the registry at `ref` records as `done` for this configuration, keyed as the
-    report keys one (type, arm, engine, pre-registration): more than one is "several runs" there, and that
-    arm's comparisons get no verdict (SPEC 6.1)."""
+    report keys one (type, arm, engine, pre-registration, allocation: B5's exploratory one, or none):
+    more than one is "several runs" there, and that arm's comparisons get no verdict (SPEC 6.1)."""
     listed = _git("ls-tree", "-r", "--name-only", ref, TEST_DIR)
     if listed.returncode != 0:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot list {TEST_DIR} at {ref} "
@@ -174,7 +175,8 @@ def done_runs_of(run_type: str, arm: Optional[str], engine: Optional[str], prere
             raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot read {rel} at {ref}")
         ended = json.loads(shown.stdout)
         if ended.get("status") == "done" and (ended.get("type"), ended.get("arm"), ended.get("engine"),
-                                              ended.get("prereg_hash")) == (run_type, arm, engine, prereg_hash):
+                                              ended.get("prereg_hash"), ended.get("allocation")) == \
+                (run_type, arm, engine, prereg_hash, allocation):
             found.append(ended.get("run_id") or Path(rel).name.rsplit(".", 2)[0])
     return sorted(found)
 
@@ -195,7 +197,8 @@ def published_manifest(run_id: str, ref: str) -> Optional[Dict[str, Any]]:
     return _show_json(ref, f"{TEST_DIR}/{run_id}.manifest.json")
 
 
-def attempts_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg_hash: str, ref: str) -> List[Dict[str, Any]]:
+def attempts_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg_hash: str, ref: str,
+                allocation: Optional[str] = None) -> List[Dict[str, Any]]:
     """Every test execution of this configuration the registry at `ref` records, keyed as `done_runs_of`
     keys one: [{"run_id", "started_at", "status"}] by start, `status` being its manifest's, or None for
     an intent with no manifest (a run that died before it ended, started before its manifest was
@@ -212,8 +215,8 @@ def attempts_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg
         intent = _show_json(ref, rel)
         if intent is None:
             raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot read {rel} at {ref}")
-        if (intent.get("type"), intent.get("arm"), intent.get("engine"), intent.get("prereg_hash")) != \
-                (run_type, arm, engine, prereg_hash):
+        if (intent.get("type"), intent.get("arm"), intent.get("engine"), intent.get("prereg_hash"),
+                intent.get("allocation")) != (run_type, arm, engine, prereg_hash, allocation):
             continue
         run_id = intent.get("run_id") or Path(rel).name.rsplit(".", 2)[0]
         ended = published_manifest(run_id, ref)
@@ -245,7 +248,8 @@ def commit_intent(manifest: Dict[str, Any], config: Dict[str, Any], **extra: Any
     the first question. Nothing in the intent comes from a model or a provider: no redaction needed; the
     manifest is redacted as it always is."""
     rel = f"{TEST_DIR}/{manifest['run_id']}.intent.json"
-    _write(rel, {**{key: manifest.get(key) for key in INTENT_FIELDS}, **extra})
+    allocation = {"allocation": manifest["allocation"]} if manifest.get("allocation") else {}  # B5's exploratory one
+    _write(rel, {**{key: manifest.get(key) for key in INTENT_FIELDS}, **allocation, **extra})
     started = f"{TEST_DIR}/{manifest['run_id']}.manifest.json"
     (paths.ROOT / started).write_text(redact(json.dumps(manifest, indent=2, ensure_ascii=False), config) + "\n")
     _commit_all([rel, started], f"registry: intent of test execution {manifest['run_id']}")

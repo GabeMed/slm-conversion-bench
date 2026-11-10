@@ -168,10 +168,10 @@ def test_generation_sees_only_the_selected_schema(monkeypatch, repo):
 def test_a_harness_failure_inside_chess_fails_the_run(monkeypatch, repo):
     real_route = hooks.route
 
-    def route(arm, call_site, messages, config):
+    def route(arm, call_site, messages, config, allocation="registered"):
         if call_site == "filter_column":
             raise FactError("arms.B5.allocation is not set in the configuration")
-        return real_route(arm, call_site, messages, config)
+        return real_route(arm, call_site, messages, config, allocation)
     monkeypatch.setattr(hooks, "route", route)
     run_dir, manifest, _ = run(monkeypatch, repo)
     assert manifest["status"] == "failed" and "allocation" in manifest["harness_errors"]["1"][0]

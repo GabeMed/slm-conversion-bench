@@ -14,6 +14,10 @@ in the code chooses a model. `engine` resolves to a model and endpoint through
 | B4 | `slm:<choice.slm>+lora:<served name of the adapter of assign(prompt)>` |
 | B5 | `allocation[assign(prompt)]`; `slm` means B4's engine for that cluster; a cluster missing from the allocation stays with `production_llm` (SPEC S6) |
 
+B5's allocation is J7's (`arms.B5.allocation`, `allocation="registered"`), or, for the exploratory single-cluster
+swap of SPEC §3 extension 1 (`allocation="exploratory"`, `bench run --arm B5 --allocation exploratory`), the
+hand-written fact `arms.B5.exploratory_allocation`, checked as J7's is. Every other arm has no allocation.
+
 B2 (single call) does not run the agent and never reaches the router. The facts an arm uses are
 set in `config.yaml` under `arms` (bench/contracts/facts.py has their shapes).
 """
@@ -27,6 +31,8 @@ from bench.contracts.facts import FactError, read_fact
 AGENT_ARMS = ("B0", "B1", "B3", "B4", "B5")
 ARM_FACTS = {"B3": ("choice",), "B4": ("choice", "centroids", "adapters"),
              "B5": ("choice", "centroids", "adapters", "allocation")}
+# where B5 reads its allocation fact, by allocation: J7's, or the exploratory one (no judgment behind it)
+ALLOCATIONS = {"registered": "allocation", "exploratory": "exploratory_allocation"}
 
 
 class Route(NamedTuple):
@@ -34,16 +40,27 @@ class Route(NamedTuple):
     cluster: Optional[str]
 
 
-def arm_facts(arm: str, config: Dict[str, Any]) -> Dict[str, tuple]:
+def _allocation_key(arm: str, allocation: str) -> str:
+    if allocation not in ALLOCATIONS:
+        raise ValueError(f"unknown allocation {allocation!r} (one of {tuple(ALLOCATIONS)})")
+    if allocation != "registered" and arm != "B5":
+        raise ValueError(f"only B5 has an allocation; {arm} has no {allocation} one")
+    return ALLOCATIONS[allocation]
+
+
+def arm_facts(arm: str, config: Dict[str, Any], allocation: str = "registered") -> Dict[str, tuple]:
     """{fact name: (payload, sha256)} for every fact the arm uses, checked to have been decided on
     each other: the adapters on this choice and these centroids, one per centroid cluster; the
-    allocation on these centroids and adapters, over centroid clusters only."""
+    allocation on these centroids and adapters, over centroid clusters only. B5's allocation fact is
+    read from `ALLOCATIONS[allocation]`."""
     settings = (config.get("arms") or {}).get(arm) or {}
+    keys = {"allocation": _allocation_key(arm, allocation)}
     facts = {}
     for name in ARM_FACTS.get(arm, ()):
-        if not settings.get(name):
-            raise FactError(f"arms.{arm}.{name} is not set in the configuration")
-        facts[name] = read_fact(str(paths.ROOT / settings[name]), name)
+        key = keys.get(name, name)
+        if not settings.get(key):
+            raise FactError(f"arms.{arm}.{key} is not set in the configuration")
+        facts[name] = read_fact(str(paths.ROOT / settings[key]), name)
     if "adapters" in facts:
         adapters, (choice, choice_sha), (centroids, centroids_sha) = facts["adapters"][0], facts["choice"], facts["centroids"]
         if (adapters["choice"], adapters["slm"]) != (choice_sha, choice["slm"]):
@@ -75,16 +92,18 @@ def _lora(adapters: Dict[str, Any], cluster: str) -> str:
     return f"slm:{adapters['slm']}+lora:{adapter['served_name']}"
 
 
-def route(arm: str, call_site: str, prompt_messages: List[Dict[str, str]], config: Dict[str, Any]) -> Route:
+def route(arm: str, call_site: str, prompt_messages: List[Dict[str, str]], config: Dict[str, Any],
+          allocation: str = "registered") -> Route:
     if call_site not in CALL_SITES:
         raise ValueError(f"unknown call site {call_site!r}")
     if arm not in AGENT_ARMS:
         raise ValueError(f"arm {arm!r} does not run the agent")
+    _allocation_key(arm, allocation)
     if arm == "B0":
         return Route("production_llm", None)
     if arm == "B1":
         return Route("cheap_alt", None)
-    facts = arm_facts(arm, config)
+    facts = arm_facts(arm, config, allocation)
     if arm == "B3":
         return Route(f"slm:{facts['choice'][0]['slm']}", None)
     cluster = assign(prompt_messages, facts["centroids"][0])
@@ -94,15 +113,16 @@ def route(arm: str, call_site: str, prompt_messages: List[Dict[str, str]], confi
     return Route(_lora(facts["adapters"][0], cluster) if engine == "slm" else engine, cluster)
 
 
-def possible_engines(arm: str, config: Dict[str, Any]) -> List[str]:
+def possible_engines(arm: str, config: Dict[str, Any], allocation: str = "registered") -> List[str]:
     """Every engine the arm can route to, so a run can check them all before it starts."""
     if arm not in AGENT_ARMS:
         raise ValueError(f"arm {arm!r} does not run the agent")
+    _allocation_key(arm, allocation)
     if arm == "B0":
         return ["production_llm"]
     if arm == "B1":
         return ["cheap_alt"]
-    facts = arm_facts(arm, config)
+    facts = arm_facts(arm, config, allocation)
     if arm == "B3":
         return [f"slm:{facts['choice'][0]['slm']}"]
     adapters = facts["adapters"][0]

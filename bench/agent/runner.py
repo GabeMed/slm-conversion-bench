@@ -189,7 +189,8 @@ def _answer_each(hooks, outcome: Dict[str, Dict], stop: Any,
 def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: Path,
                        dataset: List[Dict[str, Any]], db_root: Path, outcome: Dict[str, Dict],
                        few_shot: Optional[Dict[str, Dict[str, List]]] = None,
-                       allowed_call_sites: Optional[List[str]] = None, part: str = "", stop: Any = None) -> None:
+                       allowed_call_sites: Optional[List[str]] = None, part: str = "", stop: Any = None,
+                       allocation: str = "registered") -> None:
     """Run the patched CHESS on each question, one after another; C1 goes to run_dir/calls<part>.jsonl
     (`part` is empty for a run in one process, `.w<k>` for worker k).
 
@@ -200,7 +201,7 @@ def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: P
     """
     hooks = _prepare_chess(config, db_root)
     hooks.start_run(run_id, arm, run_dir / f"calls{part}.jsonl", few_shot=few_shot,
-                    allowed_call_sites=allowed_call_sites, stop=stop)
+                    allowed_call_sites=allowed_call_sites, stop=stop, allocation=allocation)
     try:
         from runner.run_manager import RunManager
         RunManager.RESULT_ROOT_PATH = str(run_dir / "chess")
@@ -458,12 +459,12 @@ def check_engines(config: Dict[str, Any], engines: List[str], embeddings: bool =
         hooks.embeddings("context")
 
 
-def _check_arm(config: Dict[str, Any], arm: str) -> Dict[str, str]:
+def _check_arm(config: Dict[str, Any], arm: str, allocation: str = "registered") -> Dict[str, str]:
     """Before any work: every engine the arm can route to is buildable, the retrieval embeddings
     are, and every fact the arm uses is set and consistent. Returns {fact: sha256}."""
     from bench.contracts.router import arm_facts, possible_engines
-    check_engines(config, possible_engines(arm, config))
-    return {name: sha for name, (_, sha) in arm_facts(arm, config).items()}
+    check_engines(config, possible_engines(arm, config, allocation))
+    return {name: sha for name, (_, sha) in arm_facts(arm, config, allocation).items()}
 
 
 def few_shot_for(config: Dict[str, Any], engines: List[str],
@@ -608,7 +609,7 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
         manifest.update({"prereg_hash": barrier.ensure_execution_allowed(config),
                          "call_sites_registry_sha256": test["sha256"]})
         done = registry.done_runs_of(run_type, manifest.get("arm"), manifest.get("engine"), manifest["prereg_hash"],
-                                     test["origin"])
+                                     test["origin"], allocation=manifest.get("allocation"))
         if done:  # before the intent: a refusal here leaves no record and spends nothing
             raise barrier.TestSplitLocked(
                 f"refusing to run {run_type} {manifest.get('arm')}{'' if manifest.get('engine') is None else ' ' + manifest['engine']} "
@@ -616,7 +617,7 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
                 f"completed run leaves its comparisons without a verdict (SPEC 6.1). Go on with the next configuration; "
                 f"a defect that needs it run again needs `bench prereg --replace` first")
         attempts = registry.attempts_of(run_type, manifest.get("arm"), manifest.get("engine"), manifest["prereg_hash"],
-                                        test["origin"])
+                                        test["origin"], allocation=manifest.get("allocation"))
         what = f"{run_type} {manifest.get('arm')}{'' if manifest.get('engine') is None else ' ' + manifest['engine']}"
         if resume_source is not None:
             from bench.agent import resume
@@ -701,14 +702,38 @@ def clear_send_modes() -> None:
                   file=sys.stderr)
 
 
+def check_exploratory_is_not_b5(config: Dict[str, Any]) -> None:
+    """On test, B5's exploratory allocation must differ from J7's: the same fact (one sha256) would run B5 twice,
+    once without a verdict."""
+    from bench.contracts.facts import read_fact
+    from bench.contracts.router import ALLOCATIONS
+    b5 = (config.get("arms") or {}).get("B5") or {}
+    if not (b5.get("allocation") and b5.get(ALLOCATIONS["exploratory"])):
+        return  # the router refuses an unset one, with its own message
+    registered = read_fact(str(paths.ROOT / b5["allocation"]), "allocation")[1]
+    if read_fact(str(paths.ROOT / b5[ALLOCATIONS["exploratory"]]), "allocation")[1] == registered:
+        raise data.DataError(f"arms.B5.exploratory_allocation is J7's allocation itself ({registered}): on test it "
+                             f"would run B5 again, without a verdict. Run the registered B5 (no --allocation)")
+
+
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
               batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None,
-              redo_reason: Optional[str] = None, redo_affects_completed: bool = False) -> Path:
+              redo_reason: Optional[str] = None, redo_affects_completed: bool = False,
+              allocation: str = "registered") -> Path:
     """One agent run. With `resume_from`, a new run that copies what a failed, interrupted or killed run
     answered and answers only the questions left (`bench.agent.resume`). On test, `redo_reason` runs a
-    configuration that has an earlier attempt again from its first question (`open_run`)."""
+    configuration that has an earlier attempt again from its first question (`open_run`). `allocation`
+    is B5's: "registered" (J7's, `arms.B5.allocation`) or "exploratory" (`arms.B5.exploratory_allocation`, SPEC §3
+    extension 1, no verdict): a configuration of its own, recorded in the manifest and keyed apart in the registry."""
+    from bench.contracts.router import ALLOCATIONS
+    if allocation not in ALLOCATIONS:
+        raise data.DataError(f"--allocation must be one of {tuple(ALLOCATIONS)}")
+    if allocation != "registered" and arm != "B5":
+        raise data.DataError(f"--allocation is B5's; {arm} has none")
     config = load_config(config_path)
+    if allocation == "exploratory" and split == "test":
+        check_exploratory_is_not_b5(config)
     from bench.agent import hooks
     hooks.configure(config)
     clear_send_modes()
@@ -748,14 +773,14 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         recorded = {"few_shot": None, "few_shot_k": None, "few_shot_sha256": None}  # B2 gets no prefix
     else:
         from bench.contracts.router import possible_engines
-        facts = _check_arm(config, arm)
-        few_shot, recorded = few_shot_for(config, possible_engines(arm, config), split)
+        facts = _check_arm(config, arm, allocation)
+        few_shot, recorded = few_shot_for(config, possible_engines(arm, config, allocation), split)
     for db_id in databases:
         data.check_database(config, db_id)
     if arm != "B2":
         _check_preprocessed(config, databases)
     from bench.agent.served import check_served
-    served = check_served(config, [engine] if arm == "B2" else possible_engines(arm, config), split)
+    served = check_served(config, [engine] if arm == "B2" else possible_engines(arm, config, allocation), split)
 
     fields = {"arm": arm, "question_ids": selected, "databases": databases, "facts": facts, **recorded,
               "workers": workers, "batch": batch,  # like workers, not the configuration's identity
@@ -763,15 +788,17 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
               "served": served}  # what serves its SLM engines (bench.agent.served), or null: none
     if arm == "B2":
         fields.update({"mode": "single_call", "engine": engine})
+    if allocation != "registered":  # a configuration of its own (registry key); a registered run records none
+        fields["allocation"] = allocation
     if arm == "B2":
         key_envs = used_key_envs(config, [engine], retrieval=False)
     else:
-        key_envs = used_key_envs(config, possible_engines(arm, config), retrieval=True)
+        key_envs = used_key_envs(config, possible_engines(arm, config, allocation), retrieval=True)
     if source is not None:
         resume.check_same(source, {
             "arm": arm, "split": split, "engine": fields.get("engine"), "mode": fields.get("mode"),
             "facts": facts, "few_shot_k": recorded["few_shot_k"], "few_shot_sha256": recorded["few_shot_sha256"],
-            "batch": batch, "config_sha256": config_sha256(config),
+            "allocation": fields.get("allocation"), "batch": batch, "config_sha256": config_sha256(config),
             "splits_sha256": data.sha256_file(paths.SPLITS), "data_manifest_sha256": data.sha256_file(paths.DATA_MANIFEST)})
         if bool(source.get("via_claude_code")) != via_claude_code:
             raise data.DataError(f"{resume_from} was {'' if source.get('via_claude_code') else 'not '}sent through "
@@ -780,7 +807,8 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         answers = resume.source_answers(source)
         complete = resume.complete_questions(source, answers)
         source_calls = resume.read_calls_of(source)  # before the run exists: an invalid source leaves none
-    run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
+    label = f"B2-{engine}" if arm == "B2" else arm if allocation == "registered" else f"{arm}-{allocation}"
+    run_dir, manifest, allowed = open_run(config, config_path, "agent", label,
                                           split, fields, key_envs, resume_source=source, redo_reason=redo_reason,
                                           redo_affects_completed=redo_affects_completed)
     outcome = new_outcome()
@@ -805,7 +833,7 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         if arm == "B2":
             execute, kwargs = _execute_single_call, {**kwargs, "engine": engine}
         else:
-            execute, kwargs = _execute_questions, {**kwargs, "arm": arm, "few_shot": few_shot}
+            execute, kwargs = _execute_questions, {**kwargs, "arm": arm, "few_shot": few_shot, "allocation": allocation}
         if not dataset:  # a resumed run whose source had answered every question: nothing to answer
             pass
         elif workers == 1:

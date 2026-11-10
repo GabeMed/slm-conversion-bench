@@ -505,6 +505,27 @@ def test_done_runs_are_matched_by_type_arm_engine_and_registration(repo):
     assert registry.done_runs_of("replay", "B2", "cheap_alt", "h1", "HEAD") == ["e"]
 
 
+def test_b5_on_the_exploratory_allocation_is_a_configuration_of_its_own(repo):
+    """One completed run per configuration: a B5 run on the exploratory allocation (SPEC §3 extension 1) neither
+    counts as the registered B5's nor is counted by it, done or attempted."""
+    root, _ = repo
+    (root / registry.TEST_DIR).mkdir(parents=True)
+    b5 = {"type": "agent", "arm": "B5", "engine": None, "prereg_hash": "h1", "started_at": "2026-11-11T00:00:00"}
+    entries = {"b5": {**b5, "status": "done"}, "b5x": {**b5, "allocation": "exploratory", "status": "done"},
+               "b5x-0": {**b5, "allocation": "exploratory", "status": "failed"}}
+    for run_id, entry in entries.items():
+        (root / registry.TEST_DIR / f"{run_id}.manifest.json").write_text(json.dumps({"run_id": run_id, **entry}))
+        (root / registry.TEST_DIR / f"{run_id}.intent.json").write_text(
+            json.dumps({"run_id": run_id, **{k: v for k, v in entry.items() if k != "status"}}))
+    git(root, "add", "registry")
+    git(root, "commit", "-q", "-m", "entries")
+    assert registry.done_runs_of("agent", "B5", None, "h1", "HEAD") == ["b5"]
+    assert registry.done_runs_of("agent", "B5", None, "h1", "HEAD", allocation="exploratory") == ["b5x"]
+    assert [a["run_id"] for a in registry.attempts_of("agent", "B5", None, "h1", "HEAD")] == ["b5"]
+    assert sorted(a["run_id"] for a in registry.attempts_of("agent", "B5", None, "h1", "HEAD", allocation="exploratory")) \
+        == ["b5x", "b5x-0"]
+
+
 def test_a_registry_commit_waits_for_another_gits_lock(repo, monkeypatch):
     """A git process that holds the index for a moment (an editor, a `git status` elsewhere) must not
     fail a run that finished: the commit waits for the lock, a bounded number of times."""
@@ -851,3 +872,87 @@ def test_an_attempt_that_cannot_be_resumed_is_redone_with_its_deviation_and_why(
     redo = json.loads((run_dir / "manifest.json").read_text())["redo"]
     assert (redo["of"], redo["affects_completed"]) == (first.name, False)
     assert "calls.jsonl does not hash" in redo["not_resumable_because"]
+
+
+# ---------------------------------------------------------------- B5 on the exploratory allocation (SPEC §3 extension 1)
+
+def b5_world(root, config_path, monkeypatch, same=False):
+    """B5's facts written, named and committed, and the configuration registered again: J7's allocation (c0 on the
+    production LLM, c1 on its adapter) and the exploratory one (the swap; with `same`, J7's very payload). The
+    SLM's server is not checked (no pod here), the stand-in embedder routes column-filter prompts to c0."""
+    from bench.agent import served
+    from bench.contracts import clusters
+    from bench.contracts.facts import write_fact
+    from test_agent_arms import adapters_for, by_column_filter, facts, rel
+    import yaml
+    choice, centroids = facts(paths.ROOT)
+    adapters = adapters_for(choice, centroids, ("c0", "c1"))
+    on = {"centroids": centroids.parent.name, "adapters": adapters.parent.name}
+    registered = write_fact("J7", "allocation", {**on, "allocation": {"c0": "production_llm", "c1": "slm"}})
+    swap = write_fact("exploratory", "allocation",
+                      {**on, "allocation": {"c0": "production_llm", "c1": "slm"} if same else {"c0": "slm", "c1": "production_llm"}})
+    raw = yaml.safe_load(config_path.read_text())
+    for candidate in raw["roles"]["slm_candidates"]:
+        candidate["endpoint"]["base_url"] = "http://slm.example/v1"
+    raw["arms"]["B5"] = {"choice": rel(choice), "centroids": rel(centroids), "adapters": rel(adapters),
+                         "allocation": rel(registered), "exploratory_allocation": rel(swap)}
+    config_path.write_text(yaml.safe_dump(raw))
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "B5's facts")
+    publish_prereg(root, runner.load_config(config_path))
+    monkeypatch.setattr(clusters, "embed", by_column_filter)
+    monkeypatch.setattr(served, "check_served", lambda config, engines, split: None)
+    return registered, swap
+
+
+def test_a_resume_keeps_the_allocation_of_its_source_on_any_split(repo, monkeypatch):
+    """A resumed run is the same run: B5 on J7's allocation is never resumed as the exploratory one, nor the other
+    way, even when both facts are one payload (the allocation alone tells them apart), on train as on test."""
+    root, config_path = repo
+    register(root, config_path)
+    b5_world(root, config_path, monkeypatch, same=True)
+    for source_allocation, other in (("registered", "exploratory"), ("exploratory", "registered")):
+        monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
+        source = runner.run_agent(str(config_path), "B5", "train", ids=["1"], allocation=source_allocation)
+        assert json.loads((source / "manifest.json").read_text())["status"] == "failed"
+        monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+        with pytest.raises(DataError, match="allocation is .*a resumed run must be the same run"):
+            runner.run_agent(str(config_path), "B5", "train", resume_from=source.name, allocation=other)
+        done = runner.run_agent(str(config_path), "B5", "train", resume_from=source.name, allocation=source_allocation)
+        assert json.loads((done / "manifest.json").read_text())["status"] == "done"
+    # on test, with the swap a fact of its own (one fact for both is refused there: see the next test)
+    b5_world(root, config_path, monkeypatch)
+    for source_allocation, other in (("registered", "exploratory"), ("exploratory", "registered")):
+        monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
+        source = runner.run_agent(str(config_path), "B5", "test", allocation=source_allocation)
+        git(root, "push", "-q", "origin", "main")
+        assert json.loads((source / "manifest.json").read_text())["status"] == "failed"
+        monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+        before = git(root, "rev-parse", "HEAD").strip()
+        with pytest.raises(DataError, match="a resumed run must be the same run"):
+            runner.run_agent(str(config_path), "B5", "test", resume_from=source.name, allocation=other)
+        assert git(root, "rev-parse", "HEAD").strip() == before  # refused before its intent
+        done = runner.run_agent(str(config_path), "B5", "test", resume_from=source.name, allocation=source_allocation)
+        git(root, "push", "-q", "origin", "main")
+        manifest = json.loads((done / "manifest.json").read_text())
+        assert manifest["status"] == "done" and manifest.get("allocation") == (
+            "exploratory" if source_allocation == "exploratory" else None)
+    # each configuration completed once: neither blocks the other, and a second of either is refused
+    for allocation in ("registered", "exploratory"):
+        with pytest.raises(barrier.TestSplitLocked, match="already completed it"):
+            runner.run_agent(str(config_path), "B5", "test", allocation=allocation)
+
+
+def test_the_exploratory_run_is_refused_on_test_when_it_is_j7s_allocation(repo, monkeypatch):
+    """The same fact for both (one sha256) would run B5 twice on test, once without a verdict: refused before
+    anything is registered. On train it is only a duplicate, and runs."""
+    root, config_path = repo
+    register(root, config_path)
+    registered, swap = b5_world(root, config_path, monkeypatch, same=True)
+    assert registered.parent.name == swap.parent.name
+    before = git(root, "rev-parse", "HEAD").strip()
+    with pytest.raises(DataError, match="is J7's allocation itself"):
+        runner.run_agent(str(config_path), "B5", "test", allocation="exploratory")
+    assert git(root, "rev-parse", "HEAD").strip() == before and not (root / registry.TEST_DIR).exists()
+    assert json.loads((runner.run_agent(str(config_path), "B5", "train", ids=["1"], allocation="exploratory")
+                       / "manifest.json").read_text())["status"] == "done"

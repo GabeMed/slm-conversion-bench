@@ -562,6 +562,30 @@ bench judge j7 --centroids <fact> --adapters <fact> --cheap-alt <replay>=<eval> 
 
 J7 prints the allocation fact. Write its path into `arms.B5.allocation`.
 
+**B5's exploratory allocation** (SPEC §3 extension 1 and 6.1, "one cluster swapped, live"; no verdict).
+`config.yaml` already names it (`arms.B5.exploratory_allocation`): c0 on its adapter, c1–c3 on the production
+LLM, on the centroids and adapters `arms.B5` names. It is written by hand, not by a judgment, and `judgments/`
+does not carry it until step 12 commits it, so **create it right after pulling the change that named it, before
+any `bench verify`** (verify, `bench prereg` and the run read it; until it exists, verify reports a divergence),
+in `.venv-analysis`:
+
+```sh
+python -c "
+from bench import paths
+from bench.contracts.config import load_config
+from bench.contracts.facts import write_fact
+from bench.prereg import EXPLORATORY_ALLOCATION
+b5 = load_config('config.yaml')['arms']['B5']
+on = {k: b5[k].split('/')[2] for k in ('centroids', 'adapters')}
+path = write_fact('exploratory', 'allocation', {**on, 'allocation': EXPLORATORY_ALLOCATION})
+assert str(path.relative_to(paths.ROOT)) == b5['exploratory_allocation'], path
+print(path)"
+```
+
+The assert fails if the configuration names another fact than the one this writes. `bench prereg` refuses any
+exploratory fact that is not exactly this swap on `arms.B5`'s centroids and adapters, and a test run of it whose
+fact is J7's own allocation.
+
 ### 12. Pre-registration: before the first test question
 
 `config.yaml` is now final. Against the Stage 0 commit it may differ only in:
@@ -740,6 +764,11 @@ done
   per-call-site table beside B4's replay, which a script outside the registered code computes after the test
   (`bench report` does not print it), as it does the projection-tolerant EX and the reading without test
   question 875 (SPEC 6.1 and section 2).
+- **B5 on the exploratory allocation** (SPEC 6.1, "one cluster swapped, live"; may be run, with its own budget
+  approval, after the loop): `bench run --arm B5 --allocation exploratory --split test --workers 8`, then `bench
+  eval` and `bench judge j3 --j8` as for any arm. It is its own configuration (its manifest records `allocation:
+  exploratory`, the registry keys it apart), so it neither blocks nor is blocked by B5's own run; a resume keeps
+  the allocation of its source. The plan names it as `b5_exploratory: {eval, cost}`, never under `arms`.
 - A defect that needs a new registration: `bench prereg --replace --reason "<the defect>"`. It
   becomes a line of `prereg/DEVIATIONS.md`, which the report prints.
 
@@ -784,7 +813,8 @@ bench report --plan plan.yaml
   which the plan names under `attempts: {<attempt>: <its partial eval>}`; a plan that leaves one out is
   refused.
 - `plan.yaml` only names what the steps above printed; its keys are in the header of
-  `bench/report.py`. A test plan with B1 names the `b1k` choice of step 7.
+  `bench/report.py`. A test plan with B1 names the `b1k` choice of step 7. A test plan names every exploratory B5 run the
+  test completed as `b5_exploratory` (the report refuses one left out, and one put under `arms`).
 - `bench verify` must report 0 divergences.
 - The report reads the registry as `origin/main` holds it, hence the push before it.
 

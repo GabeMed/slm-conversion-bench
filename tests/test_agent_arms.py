@@ -78,7 +78,7 @@ def test_b1_prefixes_each_call_site_with_the_teachers_examples(monkeypatch, repo
     set_config(repo, B1={"few_shot": {"k": 2, "source_run": source}})
     routed = []
     real_route = hooks.route
-    monkeypatch.setattr(hooks, "route", lambda arm, site, messages, config: routed.append(messages) or real_route(arm, site, messages, config))
+    monkeypatch.setattr(hooks, "route", lambda arm, site, messages, config, allocation="registered": routed.append(messages) or real_route(arm, site, messages, config, allocation))
     _, manifest, calls = run(monkeypatch, repo, "B1", ("3",))
     assert manifest["status"] == "done" and manifest["few_shot"]["source_run"] == source
     assert all(len(messages) == 1 for messages in routed)  # the router sees CHESS's prompt only
@@ -406,6 +406,39 @@ def test_b5_leaves_an_unallocated_cluster_with_the_production_llm(monkeypatch, r
     _, manifest, calls = run(monkeypatch, repo, "B5", ("1",))
     assert manifest["status"] == "done" and manifest["few_shot"] is None  # cheap_alt unreachable: no prefix needed
     assert {c["engine"] for c in calls if c["call_site"] != "filter_column"} == {"production_llm"}
+
+
+def test_b5_on_the_exploratory_allocation_runs_on_calib_as_its_own_configuration(monkeypatch, repo):
+    """`bench run --arm B5 --allocation exploratory` (SPEC §3 extension 1): routed by arms.B5.exploratory_allocation
+    (c0 on its adapter, the rest on the production LLM), recorded as that allocation and that fact, under a run id
+    of its own; the registered B5 stays on J7's allocation and records none."""
+    choice, centroids = facts(paths.ROOT)
+    adapters = adapters_for(choice, centroids, ("c0", "c1"))
+    registered = write_fact("J7", "allocation", {"centroids": centroids.parent.name, "adapters": adapters.parent.name,
+                                                 "allocation": {"c0": "production_llm", "c1": "slm"}})
+    swap = write_fact("exploratory", "allocation", {"centroids": centroids.parent.name, "adapters": adapters.parent.name,
+                                                    "allocation": {"c0": "slm", "c1": "production_llm"}})
+    set_config(repo, B5={"choice": rel(choice), "centroids": rel(centroids), "adapters": rel(adapters),
+                         "allocation": rel(registered), "exploratory_allocation": rel(swap)})
+    splits = json.loads(paths.SPLITS.read_text())
+    paths.SPLITS.write_text(json.dumps({**splits, "train": ["1", "2"], "calib": ["3"]}))  # the synthetic calib is empty
+    monkeypatch.setattr(clusters, "embed", by_column_filter)
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    run_dir = runner.run_agent(str(repo), "B5", "calib", ids=["3"], allocation="exploratory")
+    manifest, calls = json.loads((run_dir / "manifest.json").read_text()), read_calls(run_dir / "calls.jsonl")
+    assert manifest["status"] == "done" and validate_calls(calls) == [] and manifest["split"] == "calib"
+    assert (manifest["arm"], manifest["allocation"]) == ("B5", "exploratory") and "-B5-exploratory-calib-" in run_dir.name
+    assert manifest["facts"]["allocation"] == swap.parent.name != registered.parent.name
+    assert {(c["cluster"], c["engine"]) for c in calls} == {("c0", "slm:qwen3-8b+lora:qwen3-8b-c0"), ("c1", "production_llm")}
+    _, manifest, calls = run(monkeypatch, repo, "B5", ("1",))  # the registered B5: J7's allocation, no allocation field
+    assert "allocation" not in manifest and manifest["facts"]["allocation"] == registered.parent.name
+    assert {(c["cluster"], c["engine"]) for c in calls} == {("c0", "production_llm"), ("c1", "slm:qwen3-8b+lora:qwen3-8b-c1")}
+    for arm in ("B0", "B1", "B2", "B3", "B4"):
+        with pytest.raises(runner.data.DataError, match="--allocation is B5's"):
+            runner.run_agent(str(repo), arm, "calib", ids=["3"], allocation="exploratory",
+                             engine="production_llm" if arm == "B2" else None)
+    with pytest.raises(runner.data.DataError, match="--allocation must be one of"):
+        runner.run_agent(str(repo), "B5", "calib", ids=["3"], allocation="c0-only")
 
 
 def test_examples_are_only_the_teachers_successful_answers(monkeypatch, repo):
