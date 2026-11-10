@@ -110,6 +110,25 @@ Changes after Stage 0 that can change a result or its interpretation.
   are the teacher's own calls. K1's cost is now a real API cost, which §6.8's payback can count, and the calls
   ran under the API's terms, not the subscription's. Direction: neutral for the verdicts; it removes the
   context mismatch §11.3 was to measure
+- 2026-11-10 · analysis code changed after Stage 0: bench/judge/b1k.py, bench/judge/j7.py, bench/judge/base.py,
+  bench/contracts/facts.py, bench/report.py, bench/prereg.py — refusal guards only, no stored result changes (J3
+  37b6afbb…, J5 d6d05ccb…, J6 2a766ca7…, b1k 11dedaac… recompute to the same bytes). b1k refuses a k = 3 execution
+  whose few-shot was not drawn by today's sampling rule (manifest few_shot.sampling, the per-step rule), and a
+  k = 0 one whose prefix is not empty; J7 refuses a cheap_alt replay whose few-shot is not B1's (arms.B1.few_shot.k,
+  now in J7's reads, and the same sampling rule); prereg refuses unless exactly one b1k choice exists, stored by
+  its sha256, by today's rule, on today's pilot questions, with the configured k, and unless every fact arms.*
+  names (J6's choice, J5's centroids, S5's adapters, J7's allocation; B4's and B5's adapters and B5's allocation
+  included, which it only listed as null before) is set, present and tracked by git. A missing J8 or other judgment
+  result, a missing fact file, and a report plan whose arm lacks its eval or cost are refused with a message
+  instead of a traceback.
+- 2026-11-10 · analysis code changed after Stage 0: bench/report.py — Appendix B gets the allocation.min_calls
+  floor (100) that A5 and J7 already keep: with fewer repair calls (revise, with gold) than that, its verdict is
+  "inconclusive by design", whatever the bootstrap. The calibration replay had 5 revise calls and K1 6, so on this
+  workload Appendix B cannot be decided by the repair test. Decided after the revise outcomes were known, before
+  any test run: J6 (judgments/J6, written 04:19 and 05:16 UTC, before the floor) and the teacher's per-call eval
+  (eval-per-call-agent-B0-calib-20261109T151141.039667Z-20261109T153122.727095Z) give 0 of 5 for both SLM
+  candidates replayed and 2 of 5 for the teacher (questions 519 and 689). Direction: the floor stops the repair
+  test from deciding against the SLM on these 5 calls, which favours the SLM arms in Appendix B
 - 2026-11-09 · the model-rejection rule narrowed after Stage 0 (9f2a972, 17:33 UTC; b65a3d4, 17:43 UTC;
   bench/agent/rejections.py, bench/agent/hooks.py classify, patch 5b). At Stage 0 any HTTP 400 or 413 from the
   engine was the model's failure (scored, the question wrong), except Anthropic's "credit balance" 400. Now only a

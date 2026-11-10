@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from bench import paths
-from bench.judge.base import JudgmentError, calls_of, canonical, n_boot, read_jsonl, reference, require_done, run_dir
+from bench.judge.base import (JudgmentError, calls_of, canonical, n_boot, read_jsonl, reference, require_done,
+                              require_few_shot, run_dir)
 
 JUDGMENT = "b1k"
 K = {"k0": 0, "k3": 3}
@@ -53,10 +54,11 @@ def choose(k0: Dict[str, bool], k3: Dict[str, bool], seed: int, resamples: int) 
 
 def end_to_end(name: str, run_id: str, eval_run_id: str, pilot: List[str]) -> Tuple[Dict[str, Any], Dict[str, bool], int]:
     """(what was read, the correctness of each pilot question, how many it answered with no SQL) for
-    one of the two executions, checked to be B1 on the pilot of calib, on `cheap_alt`, with that k."""
+    one of the two executions, checked to be B1 on the pilot of calib, on `cheap_alt`, with that k (k = 3:
+    drawn by today's sampling rule, so an execution made before the per-step rule is refused; k = 0:
+    an empty prefix, which no sampling rule touches)."""
     found = require_done(run_id, type="agent", arm="B1", split="calib")
-    if found.get("few_shot_k") != K[name]:
-        raise JudgmentError(f"{run_id} ran with few_shot_k {found.get('few_shot_k')!r}, not {K[name]}")
+    require_few_shot(run_id, found, K[name])  # k = 3: today's sampling rule; k = 0: an empty prefix
     if sorted(found.get("question_ids") or [], key=int) != sorted(pilot, key=int):
         raise JudgmentError(f"{run_id} did not run exactly the pilot questions (bench.data.pilot_ids)")
     engines = {c["engine"] for c in calls_of(run_id)}

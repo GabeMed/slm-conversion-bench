@@ -49,6 +49,22 @@ def call(run_id: str, question_id: str, site: str, key: str = "single", *, respo
     }
 
 
+def few_shot(k: int, sampling: Optional[str] = "today") -> Dict[str, Any]:
+    """The few-shot fields a cheap_alt execution records in its manifest (bench.agent.runner.few_shot_for):
+    k examples drawn by today's sampling rule (`sampling="today"`), another rule, or none recorded
+    (`None`, as before the per-step rule). k = 0 is the empty prefix at every call site."""
+    from bench.agent.few_shot import ANY_STEP, SAMPLING, digests
+    from bench.contracts.calls import CALL_SITES
+    if k == 0:
+        prefix = {site: {ANY_STEP: []} for site in CALL_SITES}
+        return {"few_shot": {"k": 0, "source_run": None}, "few_shot_k": 0, "few_shot_sha256": digests(prefix)}
+    provenance = {"k": k, "seed": 1, "source_run": "agent-B0-train"}
+    if sampling is not None:
+        provenance["sampling"] = SAMPLING if sampling == "today" else sampling
+    prefix = {site: {ANY_STEP: [{"role": "user", "content": f"{site} example {i}"} for i in range(k)]} for site in CALL_SITES}
+    return {"few_shot": provenance, "few_shot_k": k, "few_shot_sha256": digests(prefix)}
+
+
 def write_run(run_id: str, manifest: Dict[str, Any], calls: Optional[List[dict]] = None,
               config: Optional[Dict[str, Any]] = None, files: Optional[Dict[str, Any]] = None) -> Path:
     run_dir = paths.RUNS / run_id

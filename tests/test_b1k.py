@@ -10,7 +10,7 @@ from bench import cli, data, verify
 from bench.judge import b1k
 from bench.judge.base import JudgmentError
 from bench.judge.j4 import noninferiority
-from fixtures.fake import call, repo, write_run
+from fixtures.fake import call, few_shot, repo, write_run
 
 CALIB = [str(q) for q in range(1000, 1080)]
 PILOT = CALIB[:50]
@@ -55,14 +55,14 @@ def test_the_two_executions_must_be_evaluated_on_the_same_questions():
 
 
 def agent_run(run_id, k, right, *, arm="B1", split="calib", questions=PILOT, engine="cheap_alt", status="done",
-              no_sql=()):
+              no_sql=(), sampling="today"):
     """B1's agent execution on `questions` with k examples, and its end-to-end eval: right on `right`,
     no SQL on `no_sql`."""
     calls = [call(run_id, q, "generate_candidate", "generate_candidate_one:0", parsed={"SQL": "SELECT 1"},
                   role="cheap_alt" if engine == "cheap_alt" else "slm", engine=engine, model="engine-model")
              for q in questions]
     write_run(run_id, {"type": "agent", "arm": arm, "split": split, "question_ids": list(questions),
-                       "few_shot_k": k, "status": status}, calls)
+                       **few_shot(k, sampling), "status": status}, calls)
     rows = [{"question_id": q, "predicted_sql": None if q in no_sql else "SELECT 1", "correct": q in right}
             for q in questions]
     write_run(f"eval-{run_id}", {"type": "eval", "source_run_id": run_id, "status": None}, files={"results.jsonl": rows})
@@ -137,6 +137,24 @@ def test_run_refuses_executions_that_are_not_b1_on_the_pilot_on_cheap_alt_with_t
     monkeypatch.setattr(data, "pilot_ids", lambda config: PILOT[:40])
     with pytest.raises(JudgmentError, match="exactly the pilot questions"):
         b1k.run(k0, k3, config)
+
+
+def test_run_refuses_a_k3_execution_drawn_by_another_sampling_rule(tmp_path, monkeypatch):
+    """A k = 3 execution made before the per-step sampling rule (its manifest records no rule, or another)
+    is another B1: choosing on it would write a second, wrong choice. A k = 0 execution has no examples
+    to draw, so no rule; it must have the empty prefix."""
+    _, config, k0, k3 = world(tmp_path, monkeypatch, set(PILOT[:12]), set(PILOT[:30]))
+    for run_id, sampling in (("agent-k3-old", None), ("agent-k3-other", "one prefix per call site")):
+        old = agent_run(run_id, 3, set(PILOT[:30]), sampling=sampling)
+        with pytest.raises(JudgmentError, match=f"{run_id} drew its 3 few-shot examples by another sampling rule"):
+            b1k.run(k0, old, config)
+    path = tmp_path / "runs" / "agent-k0" / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["few_shot_sha256"] = dict(manifest["few_shot_sha256"], agent_ir="0" * 64)
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(JudgmentError, match="agent-k0 ran with few_shot_k 0 but a non-empty prefix"):
+        b1k.run(k0, k3, config)
+    assert not (tmp_path / "judgments" / "b1k").exists()
 
 
 def test_bench_verify_recomputes_the_choice(tmp_path, monkeypatch):

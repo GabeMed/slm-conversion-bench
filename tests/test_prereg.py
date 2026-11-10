@@ -13,6 +13,7 @@ import yaml
 from bench import paths
 from bench.barrier import prereg_published
 from bench.contracts.config import config_sha256, load_config
+from bench.contracts.facts import canonical
 from bench.data import DataError
 from bench.evaluate import evaluate, evaluate_per_call
 from bench.prereg import PreregError, check_registered_analysis_code, register
@@ -21,7 +22,16 @@ from synthetic import make_repo, sha256
 # distinct seeds, so reading one seed key for another shows
 SHIPPED = load_config(paths.ROOT / "config.yaml")
 CONFIG = {**SHIPPED, "seeds": {"calib_split": 101, "schema_shuffle": 202, "bootstrap": 303, "few_shot": 404},
-          "cost": {**SHIPPED["cost"], "slo_from": "agent-B0-calib"}}  # what the pilot fixes before the registration
+          "cost": {**SHIPPED["cost"], "slo_from": "agent-B0-calib"},  # what the pilot fixes before the registration
+          # every fact the arms follow, decided (the repo fixture writes and commits each)
+          "arms": {**SHIPPED["arms"], "B3": {"choice": "judgments/J6/c/choice.json"},
+                   "B4": {"choice": "judgments/J6/c/choice.json", "centroids": "judgments/J5/c/centroids.json",
+                          "adapters": "judgments/S5/a/adapters.json"},
+                   "B5": {"choice": "judgments/J6/c/choice.json", "centroids": "judgments/J5/c/centroids.json",
+                          "adapters": "judgments/S5/a/adapters.json", "allocation": "judgments/J7/a/allocation.json"}}}
+ARM_FACTS = sorted({rel for arm in CONFIG["arms"].values() if isinstance(arm, dict)
+                    for name, rel in arm.items() if name != "few_shot" and isinstance(rel, str)})
+PILOT = [str(i) for i in range(100, 150)]  # what bench.data.pilot_ids gives in these tests (no BIRD here)
 
 
 def git(cwd, *args):
@@ -53,6 +63,22 @@ def init_published(root, origin):
     git(root, "push", "-q", "-u", "origin", "main")
 
 
+def write_choice(root, k, pilot=PILOT, rule=None):
+    """B1's k as bench judge b1k stores it: by the sha256 of its bytes."""
+    from bench.judge import b1k
+    raw = canonical({"judgment": "b1k", "reads": {}, "result": {"k": k, "rule": rule or b1k.RULE, "pilot_ids": pilot}})
+    path = root / "judgments" / "b1k" / hashlib.sha256(raw).hexdigest() / "choice.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def pilot(monkeypatch):
+    from bench import data
+    monkeypatch.setattr(data, "pilot_ids", lambda config: list(PILOT))
+
+
 @pytest.fixture
 def repo(tmp_path):
     root = tmp_path / "clone"
@@ -61,6 +87,10 @@ def repo(tmp_path):
     (root / "data" / "splits.json").write_text(json.dumps({"calib": [str(i) for i in range(100, 160)], "test": ["9"]}) + "\n")
     (root / "data" / "MANIFEST.json").write_text('{"databases": {}}\n')
     (root / "config.yaml").write_text(yaml.safe_dump(CONFIG))
+    write_choice(root, CONFIG["arms"]["B1"]["few_shot"]["k"])  # the pilot chose the configured k
+    for rel in ARM_FACTS:  # prereg reads only that git holds them
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("{}\n")
     copy_analysis_code(root)
     init_published(root, tmp_path / "origin.git")
     return root
@@ -182,15 +212,85 @@ def test_register_refuses_what_the_report_would_refuse_after_the_test(repo):
     with pytest.raises(PreregError, match="no cost.slo_from"):
         register("config.yaml", root=repo)
     k = CONFIG["arms"]["B1"]["few_shot"]["k"]
-    choice = repo / "judgments" / "b1k" / ("0" * 64) / "choice.json"
-    choice.parent.mkdir(parents=True)
-    choice.write_text(json.dumps({"judgment": "b1k", "result": {"k": 3 - k}}))
+    shutil.rmtree(repo / "judgments" / "b1k")
+    other = write_choice(repo, 3 - k)
     commit(CONFIG, "the pilot chose the other k")
-    with pytest.raises(PreregError, match=rf"arms.B1.few_shot.k is {k}, and the stored choice .* is \[{3 - k}\]"):
+    with pytest.raises(PreregError, match=rf"arms.B1.few_shot.k is {k}, and the stored choice .* is {3 - k}"):
         register("config.yaml", root=repo)
-    choice.write_text(json.dumps({"judgment": "b1k", "result": {"k": k}}))
+    write_choice(repo, k)
+    commit(CONFIG, "two choices")
+    with pytest.raises(PreregError, match="holds 2 choices of B1's k, not one"):
+        register("config.yaml", root=repo)
+    other.unlink()
     commit(CONFIG, "the pilot chose this k")
     assert register("config.yaml", root=repo)["new"] is True
+
+
+@pytest.mark.parametrize("damage", ["none", "edited", "rule", "pilot"])
+def test_register_refuses_a_b1k_choice_that_is_missing_or_not_the_pilots(repo, damage):
+    """B1's k must have been chosen by bench judge b1k, by today's rule, on today's pilot: a clone with no
+    choice, or with one edited after it was written, or chosen by another rule or on other questions,
+    does not let any k through."""
+    k = CONFIG["arms"]["B1"]["few_shot"]["k"]
+    shutil.rmtree(repo / "judgments" / "b1k")
+    if damage == "edited":
+        path = write_choice(repo, k)
+        path.write_bytes(path.read_bytes().replace(b'"k":', b'"k": '))
+    elif damage == "rule":
+        write_choice(repo, k, rule="k = 3 by a replay of the teacher's calls")
+    elif damage == "pilot":
+        write_choice(repo, k, pilot=[str(i) for i in range(110, 160)])
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", damage)
+    reason = {"none": "holds 0 choices", "edited": "not stored by its sha256", "rule": "not chosen by today's rule",
+              "pilot": "other pilot questions"}[damage]
+    with pytest.raises(PreregError, match=reason):
+        register("config.yaml", root=repo)
+    assert not (repo / "prereg" / "manifest.json").exists()
+
+
+def test_register_refuses_a_fact_the_configuration_names_that_git_does_not_track(repo):
+    """The b1k choice and every arms.* fact (J6's choice, J5's centroids, the adapters, the allocation) must
+    be in the registration commit: a clone without them could not tell which decision was registered."""
+    rel = CONFIG["arms"]["B5"]["allocation"]
+    git(repo, "rm", "-q", "--cached", "--", rel)
+    (repo / ".gitignore").write_text("judgments/J7/\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the allocation, ignored")
+    with pytest.raises(PreregError, match=rf"{rel}, a fact the configuration names, is not tracked"):
+        register("config.yaml", root=repo)
+    git(repo, "add", "-f", "--", rel)
+    git(repo, "commit", "-q", "-m", "the allocation, forced in")
+    with pytest.raises(PreregError, match="is ignored by git"):
+        register("config.yaml", root=repo)
+    (repo / ".gitignore").unlink()
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the allocation, tracked")
+    assert register("config.yaml", root=repo)["new"] is True
+    git(repo, "rm", "-q", "--", CONFIG["arms"]["B4"]["adapters"])
+    git(repo, "commit", "-q", "-m", "the adapters fact, gone")
+    with pytest.raises(PreregError, match="judgments/S5/a/adapters.json, a fact the configuration names, does not exist"):
+        register("config.yaml", root=repo, replace=True, reason=REASON)
+    git(repo, "checkout", "-q", "HEAD~1", "--", CONFIG["arms"]["B4"]["adapters"])
+    (repo / "judgments" / "b1k").rename(repo / "b1k-elsewhere")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "no choice in the clone")
+    with pytest.raises(PreregError, match="holds 0 choices"):
+        register("config.yaml", root=repo, replace=True, reason=REASON)
+
+
+@pytest.mark.parametrize("unset_fact", [("B4", "adapters"), ("B5", "adapters"), ("B5", "allocation"), ("B3", "choice")])
+def test_register_refuses_an_arm_whose_fact_is_still_null(repo, unset_fact):
+    """B4's and B5's adapters and B5's allocation (and every other fact the router reads) are decided before
+    the registration: registered null, the arm could not run on test, and its decision would come after."""
+    arm, name = unset_fact
+    config = {**CONFIG, "arms": {**CONFIG["arms"], arm: {**CONFIG["arms"][arm], name: None}}}
+    (repo / "config.yaml").write_text(yaml.safe_dump(config))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", f"arms.{arm}.{name} null")
+    with pytest.raises(PreregError, match=rf"arms.{arm}.{name} not set"):
+        register("config.yaml", root=repo)
+    assert not (repo / "prereg" / "manifest.json").exists()
 
 
 @pytest.mark.parametrize("rel", ANALYSIS + ["bench/report.py", "bench/judge/j9.py"])
@@ -332,6 +432,11 @@ def published(tmp_path, monkeypatch, tmp_path_factory):
     raw["stats"]["pilot_size"] = 1  # the synthetic calibration split has a single id
     raw["stats"]["pilot_mix"] = {"simple": 1, "moderate": 0, "challenging": 0}
     raw.setdefault("cost", {})["slo_from"] = "agent-B0-calib"
+    raw["arms"] = {**raw["arms"], **{arm: CONFIG["arms"][arm] for arm in ("B3", "B4", "B5")}}  # every fact decided
+    for rel in ARM_FACTS:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("{}\n")
+    write_choice(root, raw["arms"]["B1"]["few_shot"]["k"])
     config_path.write_text(yaml.safe_dump(raw))
     paths.SPLITS.write_text(json.dumps({"train": ["1", "2"], "calib": ["3"], "test": ["9"], "excluded": []}))
     (root / "SPEC.md").write_text("protocol\n")
@@ -385,7 +490,7 @@ def test_the_command_registers_and_refuses_through_the_cli(repo, monkeypatch, ca
     monkeypatch.setattr(paths, "ROOT", repo)
     assert main(["prereg", "--config", str(repo / "config.yaml")]) == 0
     out = capsys.readouterr()
-    assert (repo / "prereg" / "HASH").read_text().strip() in out.out and "arms.B4.adapters" in out.err  # a value still null in the shipped config
+    assert (repo / "prereg" / "HASH").read_text().strip() in out.out and "train.sft.max_steps" in out.err  # a value still null (not a fact an arm follows)
     (repo / "notes.txt").write_text("x\n")
     assert main(["prereg", "--config", str(repo / "config.yaml")]) == 2
     assert "uncommitted" in capsys.readouterr().err
