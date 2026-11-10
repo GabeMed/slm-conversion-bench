@@ -4,6 +4,7 @@ checkout's code, uploaded). Each mirrors a Modal function, through the same shar
     serve <plan.json>              modal_apps/serve_vllm.py:Server (common.start_serving), then waits on vLLM
     download <in.json>             modal_apps/serve_vllm.py:download (the weights at the pinned revision)
     parity <in.json> <out.json>    modal_apps/train.py:peft_reference (bench.preflight.peft_generate on the GPU)
+    basecheck <in.json> <out.json> bench.basecheck.teacher_forced on the GPU (`bench preflight --base-check`)
     aiperf <args.json> <run dir>   modal_apps/loadtest.py:run_aiperf (bench.loadtest.run_level)
     calibrate <in.json> <out.json> a few short requests at fixed concurrencies, timed (the tunnel's overhead)
 """
@@ -100,6 +101,25 @@ def parity(in_path: str, out_path: str) -> int:
     return 0
 
 
+def basecheck(in_path: str, out_path: str) -> int:
+    """The training rows' teacher-forced losses on the pinned base, with the adapter and without (bench/basecheck.py)."""
+    started = time.monotonic()
+    from bench.basecheck import teacher_forced
+    from bench.contracts.facts import sha256_dir
+    from modal_apps import common
+
+    spec = json.loads(Path(in_path).read_text())
+    adapter = Path(common.ADAPTERS) / spec["adapter_sha256"]
+    if not adapter.is_dir() or sha256_dir(adapter) != spec["adapter_sha256"]:
+        raise RuntimeError(f"adapter {spec['adapter_sha256']} is not on the volume intact")
+    scored = teacher_forced(spec["base"], str(adapter), spec["rows"], spec["template_kwargs"], spec["max_length"],
+                            spec["max_context"], "cuda")
+    out = {**scored, "function_seconds": round(time.monotonic() - started, 3), "observed_gpus": common.gpu_names(),
+           "versions": versions(REFERENCE_PACKAGES)}
+    Path(out_path).write_text(json.dumps(out))
+    return 0
+
+
 def aiperf(args_path: str, run_dir: str) -> int:
     """bench.loadtest.run_level with this pod's credentials: vLLM's key from the RunPod secret (VLLM_API_KEY),
     the headers from the variables headers_env names (none on RunPod)."""
@@ -151,7 +171,7 @@ def calibrate(in_path: str, out_path: str) -> int:
 
 
 def main(argv) -> int:
-    jobs = {"serve": serve, "download": download, "parity": parity, "aiperf": aiperf, "calibrate": calibrate}
+    jobs = {"serve": serve, "download": download, "parity": parity, "basecheck": basecheck, "aiperf": aiperf, "calibrate": calibrate}
     if not argv or argv[0] not in jobs:
         print(f"usage: python -m runpod_apps.job {{{','.join(jobs)}}} ...", file=sys.stderr)
         return 2
