@@ -14,7 +14,8 @@ computed, never of a file found on disk.
 
 What is verified:
 - the judgments the report plan names (`bench/report.py`): `j5`, `j6`, `j7`, `j8`, `per_call`,
-  `teacher_train_cost`, the `cost` of every arm and every `format` entry;
+  `teacher_train_cost`, `b1k` (B1's few-shot k, a `choice.json`), the `cost` of every arm and every
+  `format` entry;
 - the judgments behind the facts `config.yaml › arms` points at: a `choice` is written by J6,
   `centroids` by J5, an `allocation` by J7 (`adapters` is training's output, S5, not a judgment).
   A fact stands when **at least one** stored result that wrote it verifies, with everything that
@@ -47,7 +48,7 @@ FACT_WRITERS: Dict[str, Tuple[str, Callable[[Dict[str, Any]], Any]]] = {
     "centroids": ("J5", lambda result: (result.get("centroids") or {}).get("sha256")),
     "allocation": ("J7", lambda result: (result.get("allocation_fact") or {}).get("sha256")),
 }
-PLAN_KEYS = ("j5", "j6", "j7", "j8", "per_call", "teacher_train_cost")
+PLAN_KEYS = ("j5", "j6", "j7", "j8", "per_call", "teacher_train_cost", "b1k")
 REFUSALS = (JudgmentError, FactError, ConfigError, DataError, OSError)
 
 
@@ -165,8 +166,14 @@ def _j8(reads, result, config):
     return (lambda loadtests: j8.run(loadtests, config, slo_from=slo_from)), (sorted(reads["loadtests"]),)
 
 
+def _b1k(reads, result, config):
+    from bench.judge import b1k
+    k0, k3 = ((_run_id(reads[name], "run"), _run_id(reads[name], "eval")) for name in ("k0", "k3"))
+    return b1k.run, (k0, k3, config)
+
+
 # how each judgment's `run` is called again from what its result recorded
-RECOMPUTE = {"J2": _j2, "J3": _j3, "J5": _j5, "J6": _j6, "J7": _j7, "J8": _j8}
+RECOMPUTE = {"J2": _j2, "J3": _j3, "J5": _j5, "J6": _j6, "J7": _j7, "J8": _j8, "b1k": _b1k}
 
 
 def recompute(payload: Dict[str, Any], config: Dict[str, Any]) -> List[Path]:
