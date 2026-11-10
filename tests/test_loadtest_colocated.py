@@ -1,0 +1,164 @@
+"""The co-located load client's choices and samples (runpod_apps/colocated.py) on a fake /proc and cgroup: the
+cores AIPerf is pinned to, what the probe records, and the CPU each side used over a level. No pod."""
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # runpod_apps/ sits beside bench/
+
+from runpod_apps import colocated  # noqa: E402
+from runpod_apps import job  # noqa: E402
+
+
+def test_cpu_lists_read_and_written_in_the_kernels_format():
+    assert colocated.parse_cpu_list("0-3,8,10-11\n") == [0, 1, 2, 3, 8, 10, 11]
+    assert colocated.parse_cpu_list("") == []
+    assert colocated.format_cpu_list([11, 10, 3, 0, 1, 2, 8]) == "0-3,8,10-11"
+    assert colocated.format_cpu_list([248, 249, 250, 251]) == "248-251"
+
+
+def test_the_server_unpinned_the_last_four_allowed_cpus_are_taken_and_that_is_said():
+    allowed = list(range(252))
+    choice = colocated.choose_cores(allowed, {101: allowed, 102: allowed})
+    assert choice["cores"] == [248, 249, 250, 251] and choice["server_pinned"] is False
+    assert choice["server_cores"] == [] and "not pinned" in choice["rule"]
+
+
+def test_the_cores_the_server_is_pinned_to_are_never_taken():
+    allowed = list(range(16))
+    choice = colocated.choose_cores(allowed, {101: allowed, 102: [12, 13, 14, 15]})
+    assert choice["cores"] == [8, 9, 10, 11] and choice["server_pinned"] is True
+    assert choice["server_cores"] == [12, 13, 14, 15] and "12-15" in choice["rule"]
+    with pytest.raises(colocated.ColocatedError, match="3 CPU"):
+        colocated.choose_cores([0, 1, 2, 3], {101: [3]})
+
+
+def fake_proc(root: Path, processes, cpus=None):
+    """processes: {pid: (ppid, cmdline, utime, stime, affinity)}; cpus: {cpu: [user, nice, system, idle]}."""
+    for pid, (ppid, cmdline, utime, stime, affinity) in processes.items():
+        d = root / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "cmdline").write_text(cmdline.replace(" ", "\0") + "\0")
+        rest = ["S", str(ppid)] + ["0"] * 9 + [str(utime), str(stime)] + ["0"] * 6
+        (d / "stat").write_text(f"{pid} (a (b) c) " + " ".join(rest))  # a comm with parentheses
+        (d / "status").write_text(f"Name:\tx\nCpus_allowed_list:\t{affinity}\n")
+    lines = ["cpu  1 1 1 1 0 0 0 0"] + [f"cpu{c} {u} {n} {s} {i} 0 0 0 0" for c, (u, n, s, i) in (cpus or {}).items()]
+    (root / "stat").write_text("\n".join(lines) + "\n")
+
+
+def fake_cgroup(root: Path, usage_usec=0, cpuset="0-15", cpu_max="1600000 100000"):
+    cg = root / "fs/cgroup"
+    cg.mkdir(parents=True, exist_ok=True)
+    (cg / "cpuset.cpus.effective").write_text(cpuset + "\n")
+    (cg / "cpu.max").write_text(cpu_max + "\n")
+    (cg / "cpu.stat").write_text(f"usage_usec {usage_usec}\nuser_usec 0\n")
+
+
+SERVER = {1: (0, "/bin/bash /start.sh", 0, 0, "0-15"),
+          50: (1, "python3 -m runpod_apps.job serve /bench/plan.json", 100, 20, "0-15"),
+          51: (50, "vllm serve /model --port 8000", 400, 50, "0-15"),
+          52: (51, "VLLM::EngineCore", 3000, 200, "0-15"),
+          60: (1, "sshd: root", 5, 5, "0-15")}
+
+
+def test_the_probe_reads_the_cgroup_the_servers_tree_and_its_affinity(tmp_path, monkeypatch):
+    proc, sysfs = tmp_path / "proc", tmp_path / "sys"
+    fake_proc(proc, SERVER)
+    fake_cgroup(sysfs)
+    monkeypatch.setattr(colocated, "own_affinity", lambda: list(range(16)))
+    monkeypatch.setattr(colocated.shutil, "which", lambda name: f"/usr/bin/{name}")
+    found = colocated.probe(proc, sysfs)
+    assert found["server_pids"] == [50, 51, 52]  # the server, vLLM and its EngineCore; not sshd, not init
+    assert found["allowed_cpus"] == "0-15" and found["allowed_count"] == 16
+    assert found["cgroup"] == {"cpuset_effective": "0-15", "cpu_max": "1600000 100000", "cpu_limit": 16.0}
+    assert found["server_affinity"] == ["0-15"] and found["taskset"] == "/usr/bin/taskset"
+    assert found["choice"]["cores"] == [12, 13, 14, 15] and found["choice"]["server_pinned"] is False
+    json.dumps(found)  # what the job writes
+
+
+def test_the_probe_falls_back_on_the_jobs_affinity_and_refuses_without_a_server(tmp_path, monkeypatch):
+    proc, sysfs = tmp_path / "proc", tmp_path / "sys"
+    fake_proc(proc, SERVER)
+    (sysfs / "fs/cgroup").mkdir(parents=True)
+    (sysfs / "fs/cgroup/cpu.max").write_text("max 100000\n")
+    monkeypatch.setattr(colocated, "own_affinity", lambda: list(range(8)))
+    found = colocated.probe(proc, sysfs)
+    assert found["allowed_cpus"] == "0-7" and found["cgroup"]["cpu_limit"] is None
+    assert found["choice"]["cores"] == [4, 5, 6, 7]
+    empty = tmp_path / "empty"
+    fake_proc(empty, {1: (0, "/bin/bash /start.sh", 0, 0, "0-7")})
+    with pytest.raises(colocated.ColocatedError, match="no server process"):
+        colocated.probe(empty, sysfs)
+
+
+def test_the_sample_is_each_sides_cpu_over_the_level(tmp_path, monkeypatch):
+    proc, sysfs = tmp_path / "proc", tmp_path / "sys"
+    fake_proc(proc, SERVER, cpus={12: [100, 0, 0, 900], 13: [0, 0, 0, 1000]})
+    fake_cgroup(sysfs, usage_usec=1_000_000)
+    clock = iter([10.0, 20.0])
+    sampler = colocated.Sampler([12, 13], proc, sysfs, clock=lambda: next(clock))
+    sampler.tick = 100
+    children = iter([1.0, 31.0])  # AIPerf's processes: 30 CPU seconds over the 10 s level
+    monkeypatch.setattr(sampler, "_children_s", lambda: next(children))
+    with sampler:
+        fake_proc(proc, {**SERVER, 52: (51, "VLLM::EngineCore", 3000 + 900, 200 + 100, "0-15")},  # +10 s of CPU
+                  cpus={12: [400, 0, 0, 1600], 13: [0, 0, 0, 2000]})
+        fake_cgroup(sysfs, usage_usec=1_000_000 + 41_000_000)
+    out = sampler.result
+    assert out["wall_s"] == 10.0
+    assert out["aiperf"] == {"cpu_s": 30.0, "cores": 3.0}
+    assert out["server"] == {"pids": 3, "cpu_s": 10.0, "cores": 1.0}
+    assert out["container"] == {"cpu_s": 41.0, "cores": 4.1}
+    assert out["pinned_cores_host_busy"] == {"12": 0.3, "13": 0.0}
+
+
+def test_the_sample_says_none_for_what_the_machine_does_not_show(tmp_path):
+    with colocated.Sampler([0], tmp_path / "noproc", tmp_path / "nosys") as sampler:
+        pass
+    out = sampler.result
+    assert out["server"] == {"pids": 0, "cpu_s": None, "cores": None}
+    assert out["container"] == {"cpu_s": None, "cores": None} and out["pinned_cores_host_busy"] is None
+    assert out["aiperf"]["cpu_s"] >= 0
+
+
+def test_the_aiperf_job_samples_only_when_asked(tmp_path, monkeypatch):
+    from bench import loadtest
+
+    seen = []
+
+    def fake_run_level(run_dir, args, key, headers, var, aiperf, measure=None):
+        seen.append(measure)
+        return {"returncode": 0}
+    monkeypatch.setattr(loadtest, "run_level", fake_run_level)
+    for extra in ({}, {"cpu_sample": {"cores": [1, 2]}}):
+        (tmp_path / "args.json").write_text(json.dumps({"headers_env": {}, **extra}))
+        assert job.main(["aiperf", str(tmp_path / "args.json"), str(tmp_path)]) == 0
+    assert seen[0] is None and isinstance(seen[1](), colocated.Sampler) and seen[1]().cores == [1, 2]
+
+
+def test_run_level_returns_the_sample_taken_around_aiperf_alone(tmp_path, monkeypatch):
+    from bench import loadtest
+
+    order = []
+
+    class Measure:
+        result = {"aiperf": "sampled"}
+
+        def __enter__(self):
+            order.append("enter")
+
+        def __exit__(self, *exc):
+            order.append("exit")
+
+    monkeypatch.setattr(loadtest, "aiperf_command", lambda aiperf, tok: ["aiperf"])
+    monkeypatch.setattr(loadtest, "wait_ready", lambda *a: (0.0, {"id": "m"}))
+    monkeypatch.setattr(loadtest, "warm_up", lambda *a: order.append("warm-up"))
+    monkeypatch.setattr(loadtest, "write_aiperf_config", lambda *a: None)
+    monkeypatch.setattr(loadtest, "run_aiperf", lambda run_dir, cmd: order.append("aiperf") or 0)
+    args = {"tokenizer": {}, "base_url": "http://x/v1", "model": "m", "ready_timeout_s": 1, "warmup": [],
+            "timeout_s": 1, "url": "http://x", "concurrency": 1, "request_count": 1, "stream": False, "headers_env": {}}
+    out = loadtest.run_level(tmp_path, args, None, {}, None, "aiperf", measure=Measure)
+    assert out["cpu_sample"] == {"aiperf": "sampled"} and order == ["warm-up", "enter", "aiperf", "exit"]
+    assert "cpu_sample" not in loadtest.run_level(tmp_path, args, None, {}, None, "aiperf")

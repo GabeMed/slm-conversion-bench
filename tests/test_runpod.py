@@ -698,6 +698,10 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
         assert m["server_versions"] == {"vllm": "0.30.0", "torch": "2.13.0", "transformers": "5.18.0", "flashinfer-python": "0.9.1"}  # the serving image's, as it recorded them
         top = max(world.config["loadtest"]["concurrency"])
         assert m["tunnel_calibration"]["overhead_ms"] == {"1": 3.5, str(top): 3.5}  # client via tunnel - server
+        # the default client, recorded: a CPU pod of the configured flavor and vCPUs; nothing co-located
+        assert m["client"]["kind"] == "pod" and m["client"]["description"] == f"cpu pod cpu5c {world.config['loadtest']['client']['cpu']}"
+        assert m["client"]["pod_id"] and m["client"]["pod_id"] != m["client"]["server_pod_id"]
+        assert not {"cpu_sample", "loopback_calibration"} & set(m)
     direct, through = world.calibrated  # once per sweep: on the server against vLLM's port, then through the tunnel
     assert direct["base_url"] == "http://127.0.0.1:8000/v1" and through["base_url"] == f"http://127.0.0.1:{world.port}/v1"
     assert direct["concurrency"] == [1, max(world.config["loadtest"]["concurrency"])] and direct["model"] == TINY_NAME
@@ -744,6 +748,152 @@ def test_the_load_test_needs_the_server_up(runpod_repo):
         loadtest.loadtest(str(world.config_path), f"slm:{TINY_NAME}",
                           _source_run("agent-B3-calib-src", calls=base, arm="B3"), "runpod", concurrency=[1])
     assert not world.fake.pods
+
+
+def cpuset_job(world, taskset="/usr/bin/taskset", allowed="0-251"):
+    """What runpod_apps.job cpuset writes on a RunPod A100 pod: the host's CPUs in the cpuset, 16 by the quota,
+    vLLM unpinned."""
+    from runpod_apps import colocated
+
+    def run(shell, name, command):
+        out = re.search(r"job cpuset (\S+)", command).group(1)
+        cpus = colocated.parse_cpu_list(allowed)
+        world.probed = getattr(world, "probed", 0) + 1
+        shell.local(out).write_text(json.dumps({
+            "nproc": 252, "allowed_cpus": allowed, "allowed_count": len(cpus), "job_affinity": allowed,
+            "cgroup": {"cpuset_effective": allowed, "cpu_max": "1600000 100000", "cpu_limit": 16.0},
+            "server_pids": [101, 102], "server_affinity": [allowed],
+            "choice": colocated.choose_cores(cpus, {101: cpus, 102: cpus}), "taskset": taskset,
+            "hostname": "a100-host", "pod_id": "serving"}))
+        return 0
+    return run
+
+
+def colocated_aiperf_job(world, monkeypatch):
+    """The aiperf job on the serving pod: the args it was sent are kept, and vLLM's loopback port (8000 in the
+    pod) is this machine's fake vLLM's."""
+    inner = aiperf_job(world, monkeypatch)
+
+    def run(shell, name, command):
+        args_path = shell.local(re.search(r"job aiperf (\S+) ", command).group(1))
+        sent = json.loads(args_path.read_text())
+        world.sent = getattr(world, "sent", []) + [sent]
+        here = f"http://127.0.0.1:{world.port}"
+        args_path.write_text(json.dumps({**sent, "base_url": sent["base_url"].replace("http://127.0.0.1:8000", here),
+                                         "url": sent["url"].replace("http://127.0.0.1:8000", here)}))
+        return inner(shell, name, command)
+    return run
+
+
+def colocated_world(world, monkeypatch):
+    ready_volume(world)
+    rserve.up(world.provider(), TINY_NAME, tunnel=fake_tunnel(world))
+    world.jobs["aiperf"] = colocated_aiperf_job(world, monkeypatch)
+    world.jobs["cpuset"] = cpuset_job(world)
+    monkeypatch.delenv("T_SLM_KEY")
+    small_sweep(world)
+    return world.shells[State().serving(TINY_NAME)["id"]]
+
+
+def test_the_colocated_client_runs_aiperf_on_the_serving_pod_pinned_on_the_loopback(runpod_repo, monkeypatch):
+    from bench import loadtest
+
+    world = runpod_repo
+    server = colocated_world(world, monkeypatch)
+    (server.pod_dir / "bench/code/runpod_apps/colocated.py").unlink()  # a pod brought up before this client
+    engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
+    source = _source_run("agent-B4-calib-src", calls=[dict(c, engine=engine) for c in SOURCE])
+    run_dirs = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1, 4], client="colocated")
+    assert (server.pod_dir / "bench/code/runpod_apps/colocated.py").is_file()  # the code uploaded to it first
+    # no client pod, no tunnel, no key authorized: everything on the serving pod
+    assert world.fake.created("loadtest") == [] and world.ssh == []
+    assert [p["name"].rsplit("-", 1)[0] for p in world.fake.pods.values()] == [f"slm-bench-serve-{TINY_NAME}"]
+    assert "bench_client" not in (server.pod_dir / "root/.ssh/authorized_keys").read_text()
+    assert world.probed == 1 and server.started[-2:] == ["aiperf-1-c1", "aiperf-2-c4"]
+    jobs = [c for c in server.commands if "-m runpod_apps.job aiperf" in c]
+    assert len(jobs) == 2 and all('taskset -c 248-251 "$PY" -m runpod_apps.job aiperf' in c for c in jobs)
+    assert len(world.sent) == 2
+    for sent in world.sent:
+        assert sent["base_url"] == "http://127.0.0.1:8000/v1" and sent["url"] == "http://127.0.0.1:8000"
+        assert sent["cpu_sample"] == {"cores": [248, 249, 250, 251]}
+    # the calibration twice on the loopback: unpinned (the server's side), then pinned (the client's)
+    direct, pinned = world.calibrated
+    assert direct["base_url"] == pinned["base_url"] == "http://127.0.0.1:8000/v1"
+    calibrations = [c for c in server.commands if "-m runpod_apps.job calibrate" in c]
+    assert "taskset" not in calibrations[0] and "taskset -c 248-251 python3 -m runpod_apps.job calibrate" in calibrations[1]
+    for d, level in zip(run_dirs, (1, 4)):
+        m = json.loads((d / "manifest.json").read_text())
+        assert (m["status"], m["where"], m["concurrency"]) == ("done", "runpod", level)
+        client = m["client"]
+        assert client["kind"] == "colocated" and client["description"] == "colocated on the serving pod"
+        assert client["pod_id"] == State().serving(TINY_NAME)["id"] and client["reaches_server"] == "loopback http://127.0.0.1:8000"
+        assert client["pinned_cores"] == [248, 249, 250, 251] and client["server_pinned"] is False
+        assert "not pinned" in client["cores_rule"] and client["nproc"] == 252
+        assert client["cgroup"] == {"cpuset_effective": "0-251", "cpu_max": "1600000 100000", "cpu_limit": 16.0}
+        assert m["loopback_calibration"]["overhead_ms"] == {"1": 0.0, str(max(world.config["loadtest"]["concurrency"])): 0.0}
+        assert "tunnel_calibration" not in m
+        sample = m["cpu_sample"]  # measured in the job around AIPerf's run (this machine: what it can read)
+        assert {"wall_s", "aiperf", "server", "container", "pinned_cores_host_busy", "method"} <= set(sample)
+        assert sample["aiperf"]["cpu_s"] >= 0
+        assert "from-the-secret" not in (d / "aiperf.log").read_text() and m["secrets_redacted_in"] == ["aiperf.log"]
+
+
+def test_the_colocated_client_needs_taskset_and_leaves_no_pod(runpod_repo, monkeypatch):
+    from bench import loadtest
+
+    world = runpod_repo
+    colocated_world(world, monkeypatch)
+    world.jobs["cpuset"] = cpuset_job(world, taskset=None)
+    base = [dict(c, cluster=None, engine=f"slm:{TINY_NAME}") for c in SOURCE]
+    with pytest.raises(RunPodError, match="no taskset"):
+        loadtest.loadtest(str(world.config_path), f"slm:{TINY_NAME}",
+                          _source_run("agent-B3-calib-src", calls=base, arm="B3"), "runpod", concurrency=[1],
+                          client="colocated")
+    assert world.fake.created("loadtest") == []
+
+
+def test_one_client_kind_per_base_a_sweep_on_another_is_refused_before_any_pod(runpod_repo, monkeypatch):
+    from bench import loadtest
+
+    world = runpod_repo
+    colocated_world(world, monkeypatch)
+    engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
+    adapter_source = _source_run("agent-B4-calib-src", calls=[dict(c, engine=engine) for c in SOURCE])
+    loadtest.loadtest(str(world.config_path), engine, adapter_source, "runpod", concurrency=[1], client="colocated")
+    base = [dict(c, cluster=None, engine=f"slm:{TINY_NAME}") for c in SOURCE]
+    base_source = _source_run("agent-B3-calib-src", calls=base, arm="B3")
+    before = len(list(paths.RUNS.glob("loadtest-*")))
+    with pytest.raises(loadtest.LoadtestError, match="another client .*colocated: sweep-"):
+        loadtest.loadtest(str(world.config_path), f"slm:{TINY_NAME}", base_source, "runpod", concurrency=[1])
+    assert world.fake.created("loadtest") == [] and len(list(paths.RUNS.glob("loadtest-*"))) == before
+    # the same client is taken; a load test from before the record counts by where it ran (RunPod: a pod)
+    assert len(loadtest.loadtest(str(world.config_path), f"slm:{TINY_NAME}", base_source, "runpod", concurrency=[1],
+                                 client="colocated")) == 1
+    old = next(paths.RUNS.glob("loadtest-*/manifest.json"))
+    legacy = {k: v for k, v in json.loads(old.read_text()).items() if k != "client"}
+    assert loadtest.recorded_client(legacy) == "pod" and loadtest.recorded_client({"where": "modal"}) == "modal"
+    # another configuration is another set of sweeps
+    loadtest.check_one_client(f"slm:{TINY_NAME}", "another-config", "pod")
+    with pytest.raises(loadtest.LoadtestError, match="another client"):
+        loadtest.check_one_client(f"slm:{TINY_NAME}", legacy["config_sha256"], "pod")
+
+
+def test_the_client_flag_is_runpods_and_defaults_to_the_cpu_pod(monkeypatch, capsys):
+    from bench import loadtest
+
+    assert loadtest.client_kind("runpod") == "pod" and loadtest.client_kind("runpod", "colocated") == "colocated"
+    assert loadtest.client_kind("modal") == "modal" and loadtest.client_kind("local") == "local"
+    with pytest.raises(loadtest.LoadtestError, match="RunPod's"):
+        loadtest.client_kind("modal", "colocated")
+    with pytest.raises(loadtest.LoadtestError, match="must be one of"):
+        loadtest.client_kind("runpod", "laptop")
+    seen = []
+    monkeypatch.setattr(loadtest, "loadtest", lambda *a: seen.append(a[-1]) or [])
+    base = ["loadtest", "--engine", "e", "--source", "s", "--on", "runpod"]
+    assert cli.main(base) == 0 and cli.main(base + ["--client", "colocated"]) == 0
+    assert seen == ["pod", "colocated"]
+    with pytest.raises(SystemExit):
+        cli.main(base + ["--client", "laptop"])
 
 
 # ---------------------------------------------------------------- P-4 and the training time

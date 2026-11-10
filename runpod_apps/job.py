@@ -7,6 +7,8 @@ checkout's code, uploaded). Each mirrors a Modal function, through the same shar
     basecheck <in.json> <out.json> bench.basecheck.teacher_forced on the GPU (`bench preflight --base-check`)
     aiperf <args.json> <run dir>   modal_apps/loadtest.py:run_aiperf (bench.loadtest.run_level)
     calibrate <in.json> <out.json> a few short requests at fixed concurrencies, timed (the tunnel's overhead)
+    cpuset <out.json>              the serving pod's CPUs, the server's affinity, the cores of a co-located
+                                   AIPerf client (runpod_apps/colocated.py)
 """
 import json
 import os
@@ -122,13 +124,20 @@ def basecheck(in_path: str, out_path: str) -> int:
 
 def aiperf(args_path: str, run_dir: str) -> int:
     """bench.loadtest.run_level with this pod's credentials: vLLM's key from the RunPod secret (VLLM_API_KEY),
-    the headers from the variables headers_env names (none on RunPod)."""
+    the headers from the variables headers_env names (none on RunPod). With `cpu_sample` in the args (the
+    client co-located on the serving pod, pinned to those cores), the CPU each side used over AIPerf's run."""
     from bench.loadtest import env_headers, local_aiperf, run_level
 
     args = json.loads(Path(args_path).read_text())
     key = os.environ.get("VLLM_API_KEY")
     headers = env_headers(args["headers_env"])
-    result = run_level(Path(run_dir), args, key, headers, "VLLM_API_KEY", local_aiperf())
+    measure = None
+    if args.get("cpu_sample"):
+        from runpod_apps.colocated import Sampler
+
+        cores = args["cpu_sample"]["cores"]
+        measure = lambda: Sampler(cores)  # noqa: E731
+    result = run_level(Path(run_dir), args, key, headers, "VLLM_API_KEY", local_aiperf(), measure=measure)
     Path(run_dir, "result.json").write_text(json.dumps(result))
     return 0
 
@@ -170,8 +179,15 @@ def calibrate(in_path: str, out_path: str) -> int:
     return 0
 
 
+def cpuset(out_path: str) -> int:
+    from runpod_apps.colocated import write_probe
+
+    return write_probe(out_path)
+
+
 def main(argv) -> int:
-    jobs = {"serve": serve, "download": download, "parity": parity, "basecheck": basecheck, "aiperf": aiperf, "calibrate": calibrate}
+    jobs = {"serve": serve, "download": download, "parity": parity, "basecheck": basecheck, "aiperf": aiperf,
+            "calibrate": calibrate, "cpuset": cpuset}
     if not argv or argv[0] not in jobs:
         print(f"usage: python -m runpod_apps.job {{{','.join(jobs)}}} ...", file=sys.stderr)
         return 2

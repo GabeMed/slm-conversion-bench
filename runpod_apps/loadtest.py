@@ -9,6 +9,13 @@ half the serving pod authorizes for the load test only (removed after it, tagged
 the private half never leaves the client. The tunnel listens on the endpoint's own local port, so the
 base_url in config.yaml is the client's as well. The client's credentials are its own: vLLM's key from the
 RunPod secret, never sent from here. The training environment (AIPerf v0.13.0) is the lock's, on the volume.
+
+`--client colocated` (opt-in; the default is the CPU pod above) is the fallback for a data center with no CPU
+pod to give: AIPerf runs on the serving pod itself, in the same training environment from the volume, pinned
+with `taskset` to 4 cores the server is not pinned to, against vLLM on the loopback (no tunnel, no key).
+Its record (cores, nproc, the cgroup's CPU limits) goes in every level's manifest (`client`), with a CPU
+sample of AIPerf and of the server over the level (`cpu_sample`) and the loopback's calibration
+(`loopback_calibration`, the tunnel's counterpart); see runpod_apps/colocated.py.
 """
 import io
 import json
@@ -18,17 +25,26 @@ import types
 import urllib.parse
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from runpod_apps import pods as rp
 from runpod_apps import settings as rs
+from runpod_apps.colocated import format_cpu_list
 from runpod_apps.settings import VOLUME, WORK, RunPodError
 from runpod_apps.ssh import TUNNEL_OPTIONS
 
 CLIENT_KEY = "/root/.ssh/bench_client"
+CLIENTS = ("pod", "colocated")  # `bench loadtest --client`: the default, and the opt-in fallback
+COLOCATED_NEEDS = "runpod_apps/colocated.py"  # a serving pod brought `up` by code without it gets this checkout's
+LOOPBACK = f"http://127.0.0.1:{rp.POD_PORT}"
 
 
-def connect(config: Dict[str, Any], candidate: str) -> Any:
+def connect(config: Dict[str, Any], candidate: str, client_kind: str = "pod") -> Any:
+    """The load client of `candidate`'s server: `pod`, a CPU pod in its data center through an SSH tunnel;
+    `colocated`, the serving pod itself, AIPerf pinned to 4 of its cores, on the loopback
+    (runpod_apps/colocated.py). Each level's result carries the client's record (`client`)."""
+    if client_kind not in CLIENTS:
+        raise RunPodError(f"the load client is one of {CLIENTS}, not {client_kind!r}")
     session: Dict[str, Any] = {}
 
     @contextmanager
@@ -40,14 +56,19 @@ def connect(config: Dict[str, Any], candidate: str) -> Any:
         server_pod = provider.api.get_pod(record["id"])
         if server_pod is None or server_pod.get("status") != "RUNNING":
             raise RunPodError(f"the pod {record['id']} serving {candidate} is not running")
-        endpoint = rp.ssh_endpoint(server_pod)
         server = provider.remote(server_pod)
+        if client_kind == "colocated":
+            with colocated(provider, server, server_pod):
+                yield
+            return
+        endpoint = rp.ssh_endpoint(server_pod)
         from bench.train import candidate as entry_of
 
         port = urllib.parse.urlsplit(entry_of(config, candidate)["endpoint"]["base_url"]).port
         env = {"VLLM_API_KEY": rs.secret_ref(provider.settings["secrets"]["vllm_api_key"])}
+        vcpus = config["loadtest"]["client"]["cpu"]
         with provider.job_pod("loadtest", provider.settings["images"]["cpu_job"],
-                              cpu_vcpus=config["loadtest"]["client"]["cpu"], env=env, candidate=candidate) as ready:
+                              cpu_vcpus=vcpus, env=env, candidate=candidate) as ready:
             client, tag = ready["remote"], f"bench-loadtest-{ready['pod']['id']}"
             client.check(f"rm -f {CLIENT_KEY} {CLIENT_KEY}.pub && ssh-keygen -q -t ed25519 -N '' -C {tag} -f {CLIENT_KEY}",
                          "making the client's key")
@@ -65,12 +86,53 @@ def connect(config: Dict[str, Any], candidate: str) -> Any:
                 client.start_job("train-env", rp.TRAIN_ENV + '"$PY" -c "import aiperf"')
                 client.wait_job("train-env", 3600, provider.poll_s)
                 calibration = calibrate(config, candidate, port, server, client, provider.poll_s)
-                session.update(provider=provider, client=client, levels=0, calibration=calibration)
+                flavor = provider.settings["cpu_flavor"]
+                session.update(provider=provider, client=client, levels=0, calibration=calibration,
+                               calibration_key="tunnel_calibration", pin="", rewrite={},
+                               record={"kind": "pod", "description": f"cpu pod {flavor} {vcpus}",
+                                       "pod_id": ready["pod"]["id"], "flavor": flavor, "vcpus": vcpus,
+                                       "server_pod_id": server_pod["id"], "reaches_server": "ssh tunnel"})
                 yield
             finally:
                 session.clear()
                 keys = "/root/.ssh/authorized_keys"
                 server.shell.run(f"grep -v {tag} {keys} > {keys}.tmp; mv {keys}.tmp {keys}")
+
+    @contextmanager
+    def colocated(provider, server, server_pod):
+        """AIPerf on the serving pod: the training environment (AIPerf) from the volume, the CPUs read and 4
+        cores chosen (runpod_apps.job cpuset), every AIPerf job pinned to them with taskset, against vLLM on
+        the loopback; the calibration on the loopback, unpinned (as the server's own side of the tunnel's is)
+        and pinned."""
+        if not server.exists(f"{WORK}/code/{COLOCATED_NEEDS}"):  # a pod brought `up` by code without this client
+            provider.upload_code(server)
+        provider.clear_stale_train_lock(server)
+        server.start_job("train-env", rp.TRAIN_ENV + '"$PY" -c "import aiperf"')
+        server.wait_job("train-env", 3600, provider.poll_s)
+        server.check(f"mkdir -p {WORK}/loadtest && rm -f {WORK}/loadtest/cpuset.json", "clearing the last CPU probe")
+        server.start_job("cpuset", f"python3 -m runpod_apps.job cpuset {WORK}/loadtest/cpuset.json")
+        server.wait_job("cpuset", 300, provider.poll_s)
+        probe = json.loads(server.read(f"{WORK}/loadtest/cpuset.json") or "{}")
+        if not probe.get("taskset"):
+            raise RunPodError("the serving pod has no taskset (util-linux): the co-located client cannot be pinned")
+        cores = probe["choice"]["cores"]
+        pin = f"taskset -c {format_cpu_list(cores)} "
+        calibration = calibrate(config, candidate, None, server, server, provider.poll_s, pin=pin)
+        record = {"kind": "colocated", "description": "colocated on the serving pod", "pod_id": server_pod["id"],
+                  "server_pod_id": server_pod["id"], "hostname": probe.get("hostname"),
+                  "reaches_server": f"loopback {LOOPBACK}", "pinned_cores": cores,
+                  "pinned_cores_list": format_cpu_list(cores), "cores_rule": probe["choice"]["rule"],
+                  "server_pinned": probe["choice"]["server_pinned"], "server_cores": probe["choice"]["server_cores"],
+                  "server_affinity": probe.get("server_affinity"), "server_pids": probe.get("server_pids"),
+                  "nproc": probe.get("nproc"), "allowed_cpus": probe.get("allowed_cpus"),
+                  "allowed_count": probe.get("allowed_count"), "cgroup": probe.get("cgroup")}
+        session.update(provider=provider, client=server, levels=0, calibration=calibration,
+                       calibration_key="loopback_calibration", pin=pin, record=record,
+                       rewrite={"base_url": f"{LOOPBACK}/v1", "url": LOOPBACK, "cpu_sample": {"cores": cores}})
+        try:
+            yield
+        finally:
+            session.clear()
 
     def run_aiperf(payloads: bytes, args: Dict[str, Any]) -> Dict[str, Any]:
         from bench.loadtest import PAYLOADS
@@ -84,11 +146,11 @@ def connect(config: Dict[str, Any], candidate: str) -> Any:
         with tempfile.TemporaryDirectory() as work:
             local = Path(work)
             (local / PAYLOADS).write_bytes(payloads)
-            (local / "args.json").write_text(json.dumps(args))
-            client.check(f"mkdir -p {run_dir}", "mkdir")
+            (local / "args.json").write_text(json.dumps({**args, **session["rewrite"]}))
+            client.check(f"rm -rf {run_dir} {run_dir}.tgz && mkdir -p {run_dir}", "mkdir")
             client.shell.put(local / PAYLOADS, f"{run_dir}/{PAYLOADS}")
             client.shell.put(local / "args.json", f"{run_dir}.args.json")
-        client.start_job(name, rp.TRAIN_ENV + f'"$PY" -m runpod_apps.job aiperf {run_dir}.args.json {run_dir}')
+        client.start_job(name, rp.TRAIN_ENV + f'{session["pin"]}"$PY" -m runpod_apps.job aiperf {run_dir}.args.json {run_dir}')
         client.wait_job(name, config["loadtest"]["client"]["timeout_s"], provider.poll_s)
         client.check(f"tar -czf {run_dir}.tgz --exclude {PAYLOADS} -C {run_dir} .", "packing the artifacts")
         with tempfile.TemporaryDirectory() as work:
@@ -98,7 +160,7 @@ def connect(config: Dict[str, Any], candidate: str) -> Any:
         result = json.loads(files.pop("result.json"))
         state = client.read(f"{VOLUME}/vllm-cache/bench-serving/{candidate}.json")
         return {**result, "server_state": json.loads(state) if state else None, "files": files,
-                "tunnel_calibration": session["calibration"]}
+                session["calibration_key"]: session["calibration"], "client": session["record"]}
 
     return types.SimpleNamespace(app=types.SimpleNamespace(run=run), run_aiperf=types.SimpleNamespace(remote=run_aiperf))
 
@@ -110,21 +172,26 @@ def calibration_spec(config: Dict[str, Any], candidate: str, base_url: str) -> D
             "max_tokens": 8, "timeout_s": 120}
 
 
-def calibrate(config: Dict[str, Any], candidate: str, port: int, server, client, poll_s: float) -> Dict[str, Any]:
+def calibrate(config: Dict[str, Any], candidate: str, port: Optional[int], server, client, poll_s: float,
+              pin: str = "") -> Dict[str, Any]:
     """Once per sweep, before it: the same small sample timed on the serving pod against vLLM's own port and on
-    the load client through its tunnel; `overhead_ms` (client minus server, per concurrency, p50) is what the
-    tunnel and the network add to each measured request, which the report can state."""
+    the load client, through its tunnel (`port`); `overhead_ms` (client minus server, per concurrency, p50) is
+    what the tunnel and the network add to each measured request, which the report can state. Co-located
+    (`port` None: the client is the server), the client's side is the loopback again, pinned (`pin`): the
+    overhead is the loopback's and the pinning's."""
     out = {}
-    for where, remote, base in (("server_localhost", server, f"http://127.0.0.1:{rp.POD_PORT}/v1"),
-                                ("client_tunnel", client, f"http://127.0.0.1:{port}/v1")):
-        remote.check(f"echo {rp.quote(json.dumps(calibration_spec(config, candidate, base)))} > {WORK}/calibrate.json",
+    client_side = ("client_tunnel", client, f"http://127.0.0.1:{port}/v1", "") if port is not None else \
+        ("client_loopback", client, f"{LOOPBACK}/v1", pin)
+    for where, remote, base, prefix in (("server_localhost", server, f"{LOOPBACK}/v1", ""), client_side):
+        remote.check(f"rm -f {WORK}/calibrate.out.json && "
+                     f"echo {rp.quote(json.dumps(calibration_spec(config, candidate, base)))} > {WORK}/calibrate.json",
                      "writing the calibration")
-        remote.start_job("calibrate", f"python3 -m runpod_apps.job calibrate {WORK}/calibrate.json {WORK}/calibrate.out.json")
+        remote.start_job("calibrate", f"{prefix}python3 -m runpod_apps.job calibrate {WORK}/calibrate.json {WORK}/calibrate.out.json")
         remote.wait_job("calibrate", 1800, poll_s)
         out[where] = json.loads(remote.read(f"{WORK}/calibrate.out.json") or "{}").get("levels")
     by_level = {lv["concurrency"]: lv for lv in out["server_localhost"] or []}
     out["overhead_ms"] = {str(lv["concurrency"]): round(lv["p50_ms"] - by_level[lv["concurrency"]]["p50_ms"], 2)
-                          for lv in out["client_tunnel"] or []
+                          for lv in out[client_side[0]] or []
                           if lv.get("p50_ms") is not None and (by_level.get(lv["concurrency"]) or {}).get("p50_ms") is not None}
     return out
 
