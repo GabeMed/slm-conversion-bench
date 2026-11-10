@@ -963,6 +963,128 @@ def test_preflight_cli_takes_runpod_and_the_training_backend(tmp_path, monkeypat
     assert seen["args"] == (str(config_path), None, "runpod", "tinker")
 
 
+def basecheck_job(world, adapter_nll=0.15, base_nll=0.6):
+    """What runpod_apps.job basecheck writes: per row, `adapter_nll` and `base_nll` per completion token."""
+    def run(shell, name, command):
+        spec_path, out_path = re.search(r"job basecheck (\S+) (\S+)", command).groups()
+        spec = json.loads(shell.local(spec_path).read_text())
+        adapter = shell.local(f"/runpod-volume/adapters/{spec['adapter_sha256']}")
+        assert facts.sha256_dir(adapter) == spec["adapter_sha256"]  # what the job checks in the pod
+        world.basecheck_spec = spec
+        tokens = [10 + i for i in range(len(spec["rows"]))]
+        shell.local(out_path).write_text(json.dumps({
+            "tokens": 100 * len(tokens), "completion_tokens": tokens, "adapter": [adapter_nll * n for n in tokens],
+            "base": [base_nll * n for n in tokens], "function_seconds": 12.5, "load_seconds": 9.0, "score_seconds": 3.0,
+            "versions": {"torch": "2.14.1", "transformers": "5.18.0", "peft": "0.21.1"}}))
+        return 0
+    return run
+
+
+def test_the_base_check_scores_the_last_steps_rows_in_the_serving_pod_between_two_servers(runpod_repo, monkeypatch):
+    from bench.basecheck import PASS, base_check
+    from bench.train import parse_dataset
+    from bench.train_tinker import schedule, step_rows
+
+    world = runpod_repo
+    served_now, server, _, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["basecheck"] = basecheck_job(world)
+    manifest = json.loads((paths.ROOT / "train/adapters/c0/manifest.json").read_text())
+    rows = parse_dataset((paths.ROOT / "train/datasets/c0.jsonl").read_bytes(), "c0.jsonl")
+    steps = step_rows(len(rows), schedule(len(rows), manifest["hyperparameters"]["sft"]), manifest["hyperparameters"]["seed"])
+    last = len(steps)
+    result = base_check(world.config, "c0", "runpod", {last: 0.15})
+    assert result["status"] == PASS and abs(result["ratio_to_tinker"] - 1) < 1e-9 and result["base_over_adapter"] == pytest.approx(4)
+    sent = world.basecheck_spec
+    assert sent["rows"] == [rows[i] for step in steps for i in step]  # every step's rows (fewer than 100), in order
+    assert sent["template_kwargs"] == manifest["chat_template_kwargs"] and sent["base"] == manifest["base"]
+    shell = world.shells[served_now["pod_id"]]
+    assert shell.started == ["serve", "serve-stop", "basecheck", "serve"]  # stopped, scored, served again
+    assert (shell.pod_dir / "bench/jobs/serve.ready").is_file()
+    command = next(c for c in shell.commands if c.startswith("# bench-job basecheck"))
+    assert "env/train/requirements.lock" in command  # the train lock's environment
+    assert result["pod_id"] == served_now["pod_id"] and result["function_seconds"] == 12.5
+    assert not world.fake.created("basecheck") and list(world.fake.pods) == [served_now["pod_id"]]
+
+
+def test_the_base_check_uploads_the_code_only_to_a_pod_whose_code_lacks_it(runpod_repo, monkeypatch):
+    from bench.basecheck import base_check
+
+    world = runpod_repo
+    served_now, server, _, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["basecheck"] = basecheck_job(world)
+    uploads = []
+    original = rp.Provider.upload_code
+    monkeypatch.setattr(rp.Provider, "upload_code", lambda self, remote: uploads.append(1) or original(self, remote))
+    code = world.shells[served_now["pod_id"]].pod_dir / "bench/code/bench/basecheck.py"
+    code.unlink()  # a pod brought up by code that predates the base check
+    base_check(world.config, "c0", "runpod", {})
+    assert code.is_file()
+    base_check(world.config, "c0", "runpod", {})
+    assert len(uploads) == 1
+
+
+def test_the_base_check_fails_when_the_pinned_base_does_not_reproduce_tinkers_losses(runpod_repo, monkeypatch):
+    from bench.basecheck import FAIL, base_check
+
+    world = runpod_repo
+    served_now, server, _, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["basecheck"] = basecheck_job(world, adapter_nll=0.30)
+    manifest = json.loads((paths.ROOT / "train/adapters/c0/manifest.json").read_text())
+    result = base_check(world.config, "c0", "runpod", {1: 0.15})
+    assert result["status"] == FAIL and result["ratio_to_tinker"] == pytest.approx(2) and "served base" in result["action"]
+    assert manifest["adapter_sha256"] == result["adapter_sha256"]
+
+
+def test_the_base_check_can_leave_the_server_stopped_for_the_pods_down(runpod_repo, monkeypatch, capsys):
+    from bench.basecheck import base_check
+
+    world = runpod_repo
+    served_now, server, _, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["basecheck"] = basecheck_job(world)
+    result = base_check(world.config, "c0", "runpod", {}, restart=False)
+    shell = world.shells[served_now["pod_id"]]
+    assert shell.started == ["serve", "serve-stop", "basecheck"] and result["server_left_stopped"]
+    assert result["status"] == "undecided"  # no logged loss given
+    assert "left stopped" in capsys.readouterr().err and not (shell.pod_dir / "bench/jobs/serve.ready").exists()
+
+
+def test_the_base_check_serves_again_when_its_job_fails(runpod_repo, monkeypatch):
+    from bench.basecheck import base_check
+
+    world = runpod_repo
+    served_now, server, _, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["basecheck"] = lambda shell, name, command: 1
+    with pytest.raises(RunPodError, match="job basecheck exited with 1"):
+        base_check(world.config, "c0", "runpod", {1: 0.15})
+    shell = world.shells[served_now["pod_id"]]
+    assert shell.started == ["serve", "serve-stop", "basecheck", "serve"]
+    assert (shell.pod_dir / "bench/jobs/serve.ready").is_file()
+
+
+def test_preflight_cli_runs_only_the_base_check_when_asked(tmp_path, monkeypatch, capsys):
+    import bench.basecheck as basecheck
+    import bench.preflight as preflight
+
+    _, config_path, _ = make_s5_repo(tmp_path, monkeypatch)
+    seen = {}
+    monkeypatch.setattr(preflight, "preflight", lambda *a: pytest.fail("the full preflight ran"))
+    monkeypatch.setattr(basecheck, "base_check", lambda *a, **k: seen.update(args=a, kwargs=k) or basecheck.summarise(
+        [{"step": 100, "index": 0}], {"completion_tokens": [10], "adapter": [1.5], "base": [6.0]}, a[3]))
+    assert cli.main(["preflight", "--config", str(config_path), "--base-check", "c2", "--on", "runpod",
+                     "--tinker-loss", "100=0.1453", "--no-restart"]) == 0
+    assert seen["args"][1:] == ("c2", "runpod", {100: 0.1453}) and seen["kwargs"] == {"restart": False}
+    report = json.loads(next(paths.RUNS.glob("basecheck-c2-*/report.json")).read_text())
+    assert report["type"] == "base_check" and report["status"] == "pass"
+    assert cli.main(["preflight", "--config", str(config_path), "--base-check", "c2", "--on", "runpod",
+                     "--tinker-loss", "100"]) == 2
+    assert "STEP=LOSS" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------- the pods' script, the jobs, the archive
 
 def test_the_boot_script_and_the_training_environment_are_valid_bash():
