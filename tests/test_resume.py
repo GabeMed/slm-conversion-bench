@@ -259,3 +259,22 @@ def test_the_router_times_of_the_complete_questions_are_copied_and_their_absence
     (source / "routes.jsonl").unlink()  # a routed run from before routes.jsonl existed
     assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B5"}, new, {"1"}) == {"copied": 0, "missing": True}
     assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B3"}, new, {"1"}) is None
+
+
+def test_a_killed_routed_sources_router_times_are_read_from_every_worker_file(tmp_path, monkeypatch):
+    """A killed B4 or B5 session never merged its workers' routes.w<k>.jsonl: they are read as its C1 lines are,
+    a last line cut off by the kill dropped, and hashed with them before anything is read."""
+    from bench.agent import resume
+
+    monkeypatch.setattr(paths, "RUNS", tmp_path / "runs")
+    source = tmp_path / "runs" / "agent-B4-killed"
+    source.mkdir(parents=True)
+    row = lambda q: json.dumps({"question_id": q, "call_site": "agent_ir", "invocation_key": "ir", "embed_ms": 1.0})  # noqa: E731
+    (source / "routes.w0.jsonl").write_text(row("1") + "\n" + row("3") + "\n")
+    (source / "routes.w1.jsonl").write_text(row("2") + "\n" + '{"question_id": "4", "cut')
+    new = tmp_path / "runs" / "agent-B4-new"
+    new.mkdir()
+    killed = {"run_id": "agent-B4-killed", "arm": "B4", "status": "running"}
+    assert resume.copy_routes(killed, new, {"1", "2"}) == {"copied": 2, "missing": False}
+    assert sorted(json.loads(line)["question_id"] for line in (new / "routes.jsonl").read_text().splitlines()) == ["1", "2"]
+    assert set(resume.unregistered_source_hashes(killed)) == {"routes.w0.jsonl", "routes.w1.jsonl"}

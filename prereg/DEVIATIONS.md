@@ -175,3 +175,35 @@ Changes after Stage 0 that can change a result or its interpretation.
   limit is a result, not a stop: it has no cost, J7 never allocates its cluster to it, and a cost claim with no SLM
   arm priced is "not testable at the API's latency". (7) A V3 or A6 confirmation must also hold at Modal's price
   for the same GPU, CPU and memory billed apart ($3.13/h against RunPod's $1.79/h; against the SLM)
+- 2026-11-10 · the rules for a failure during the test split, fixed before the registration (no execution has
+  touched the test split); analysis code changed after Stage 0 for them: bench/evaluate.py, bench/report.py, and
+  bench/prereg.py (frozen with prereg/). The registration (bench/prereg.py) now records `execution_code`: the
+  sha256 of every tracked file of the code that runs, defined by exclusion so that no new file is left out:
+  everything under bench/ outside the analysis code, vendor/chess, modal_apps, runpod_apps, env/ and
+  pyproject.toml (and a uv.lock if one appears). An execution on test (`bench run`, `bench replay`) starts only
+  on a clean working tree (`git status --porcelain` with no user-level excludes file, and an empty
+  .git/info/exclude; what the repository's .gitignore ignores, such as runs/, does not count; .claude/ is
+  added to it), whose HEAD holds the registered commit's tree outside prereg/ and registry/, and whose
+  execution code hashes to the registered one. A reading of the test (bench eval, the report) needs no clean
+  tree, since it writes judgments/, but HEAD must hold the registered tree outside prereg/, registry/ and
+  judgments/, besides the analysis code's hashes it already checked. Every execution's manifest, and on test
+  the registry, records `end_reason`, `n_predictions` and the sha256 of its predictions.json and calls.jsonl
+  when it ends, and a test execution's manifest is committed as `running` with its intent, so a session killed
+  outright stays listed. A test execution that did not end is resumed (`--resume-from`): from the latest
+  attempt of its configuration, under the same registration and config_sha256, with the source and the
+  resumed session both clean at the registered code and the source's outputs still hashing to its registered
+  manifest; a killed session (still `running`, its lock free) is resumed from the questions it journaled as
+  they ended, after the sha256 of what it left is computed and published in the new intent as
+  `unregistered_source_hashes`, since no record vouched for them. It is run again from its first question
+  (`--redo-reason`, the defect, published in the intent before the first question) only when resuming it is
+  impossible (the code refuses a redo of an attempt it can resume) or a declared defect affects questions it
+  completed (`--redo-affects-completed`), and only once this file, as published, has a line naming that
+  attempt (D22); every earlier attempt stays in the registry. The report lists, per configuration, every
+  attempt with how it ended, its redo reason, and its n and EX: for an attempt abandoned with predictions, a
+  partial EX labelled descriptive (`bench eval --partial`: the questions it completed, the model's failures
+  scored as wrong; the questions it did not finish and those with a harness error left out), which overlaps
+  the questions a final run resumed from it copied, and is never read for a verdict. Before this, resuming on
+  test was refused, an execution that did not end could be run again from scratch with no stated reason, and
+  the report listed attempts by status only. Direction: none on any measured value; it narrows which test
+  executions can be produced and makes every attempt, its reason and its partial accuracy public, so no
+  configuration can be rerun until a preferred outcome appears

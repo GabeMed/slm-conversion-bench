@@ -171,12 +171,14 @@ def _whole_lines(path: Path) -> List[str]:
 
 
 def _killed_files(run_dir: Path) -> List[Path]:
-    """What a killed session wrote that a resume reads: its C1 lines (calls.jsonl and each worker's) and
-    its answered questions (answers*.jsonl), and predictions.json if it had come that far."""
+    """What a killed session wrote that a resume reads: its C1 lines (calls.jsonl and each worker's), its
+    answered questions (answers*.jsonl), the router's times (routes*.jsonl, B4 and B5), and
+    predictions.json if it had come that far."""
     def worker(path: Path) -> Tuple[int, str]:
         found = re.search(r"\.w(\d+)\.jsonl$", path.name)
         return (int(found.group(1)) + 1 if found else 0, path.name)
-    names = [p for pattern in ("calls*.jsonl", "answers*.jsonl", "predictions.json") for p in run_dir.glob(pattern)]
+    names = [p for pattern in ("calls*.jsonl", "answers*.jsonl", "routes*.jsonl", "predictions.json")
+             for p in run_dir.glob(pattern)]
     return sorted(names, key=lambda p: (p.name.split(".")[0], *worker(p)))
 
 
@@ -301,11 +303,19 @@ def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict
 def copy_routes(source: Dict[str, Any], run_dir: Path, keep: set) -> Optional[Dict[str, Any]]:
     """The router's times of the complete questions (routes.jsonl, B4 and B5), copied as their C1 lines are.
     A source of a routed arm without that file (run before it existed) is recorded as missing them; an arm
-    that does not embed (B0, B1, B2, B3) has none to copy."""
-    found = paths.RUNS / source["run_id"] / "routes.jsonl"
-    if not found.is_file():
-        return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
-    lines = [line for line in found.read_text().splitlines() if line.strip()]
+    that does not embed (B0, B1, B2, B3) has none to copy. A killed source's are read as its C1 lines are:
+    routes.jsonl and each worker's routes.w<k>.jsonl that no merge reached, a cut-off last line dropped."""
+    run_dir_source = paths.RUNS / source["run_id"]
+    if source.get("status") == KILLED:
+        files = [path for path in _killed_files(run_dir_source) if path.name.startswith("routes")]
+        if not files:
+            return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
+        lines = [line for path in files for line in _whole_lines(path)]
+    else:
+        found = run_dir_source / "routes.jsonl"
+        if not found.is_file():
+            return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
+        lines = [line for line in found.read_text().splitlines() if line.strip()]
     copied = [line for line in lines if json.loads(line).get("question_id") in keep]
     (run_dir / "routes.jsonl").write_text("".join(line + "\n" for line in copied))
     return {"copied": len(copied), "missing": False}
