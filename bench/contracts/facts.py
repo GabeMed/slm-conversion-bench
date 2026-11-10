@@ -80,6 +80,8 @@ def read_fact(path: str, name: str) -> Tuple[Dict[str, Any], str]:
     """The payload and its sha256. The file must be the fact `name`, and its content sha256 must be
     the directory it lives in. Checked on every read: the cache below is keyed by the file's
     modification time and size, so a file changed on disk is read and verified again."""
+    if not Path(path).is_file():
+        raise FactError(f"{path}: no {name} fact there")
     stat = Path(path).stat()
     return _read_fact(path, name, stat.st_mtime_ns, stat.st_size)
 
