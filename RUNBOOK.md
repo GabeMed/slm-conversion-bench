@@ -195,6 +195,10 @@ flight or failed included), and ends `done` like any run, so it is the run eval,
 judgments read. Its manifest records the source (`resumed_from`, with the calls the source spent on
 questions it did not complete under `discarded`), `resumed_question_ids`, and `sessions`, whose sum is
 the run's working time. It is refused on test.
+A replay stopped the same way (`failed` with `harness_errors`, or `interrupted`) is resumed with
+`bench replay <source> --engine <engine>|--arm <arm> [--call-sites ...] [--ids ...] --workers 8 --resume-from
+<replay run_id>`, with the same source, engine or arm, call sites, ids and configuration: it copies the
+invocations that ended (not the questions), sends the others, and records `resumed_from.copied` and `.discarded`.
 
 ### 6. K1: the teacher's logs on train
 

@@ -58,6 +58,11 @@ def main(argv=None) -> int:
     p.add_argument("--ids", nargs="+", help="only these questions of the source run")
     p.add_argument("--workers", type=int, default=1,
                    help="replay the questions in this many processes: still one run and one manifest (default 1)")
+    p.add_argument("--resume-from", metavar="RUN_ID",
+                   help="resume a replay that stopped on an infrastructure failure (status failed with harness "
+                        "errors, or interrupted): a new replay that copies the invocations it completed (C1 lines) "
+                        "and sends the others; source, engine or arm, call sites, ids and configuration (by hash) "
+                        "must be the failed replay's")
 
     p = sub.add_parser("call-sites", help="add the call sites of done train/calib runs to registry/call_sites.json")
     p.add_argument("run_ids", nargs="+")
@@ -130,7 +135,7 @@ def main(argv=None) -> int:
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,
-                         ids=args.ids, workers=args.workers))
+                         ids=args.ids, workers=args.workers, resume_from=args.resume_from))
         elif args.command == "call-sites":
             from bench.agent.registry import update_call_sites
             print(update_call_sites(args.run_ids))

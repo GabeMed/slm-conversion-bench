@@ -19,6 +19,10 @@ question is process state in `hooks`): worker k takes every N-th question from t
 workers' C1 files are merged into `calls.jsonl` in the order of the questions, as one process
 writes them. The first question that fails stops every worker. The number of workers changes no
 output, so it is recorded (`workers`) but is not part of the configuration's identity.
+
+`--resume-from <replay run_id>` makes a new replay that copies the invocations a replay stopped by an
+infrastructure failure had completed and sends only the others (`bench.agent.resume`): the same
+source, engine or arm, configuration, few-shot prefix, call sites and questions, else it is refused.
 """
 import hashlib
 import json
@@ -31,8 +35,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from bench import barrier, data, paths
 from bench.agent import hooks
-from bench.agent.runner import (_in_workers, _merge_workers, _prepare_chess, check_engines, few_shot_for, finish,
-                                open_run, used_key_envs, worker_parts)
+from bench.agent.runner import (_in_workers, _merge_workers, _prepare_chess, _write_manifest, check_engines,
+                                few_shot_for, finish, open_run, used_key_envs, worker_parts)
 from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES, read_calls, validate_calls
 from bench.contracts.config import config_sha256, engine_spec, load_config
 from bench.provenance import scrub
@@ -124,7 +128,8 @@ def new_outcome() -> Dict[str, Any]:
 
 
 def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, arm: Optional[str] = None,
-           call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None, workers: int = 1) -> Path:
+           call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None, workers: int = 1,
+           resume_from: Optional[str] = None) -> Path:
     config = load_config(config_path)
     hooks.configure(config)
     if (engine is None) == (arm is None):
@@ -132,6 +137,10 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
     if workers < 1:
         raise data.DataError("--workers must be at least 1")
     source = _source(source_run_id)
+    failed = None
+    if resume_from is not None:
+        from bench.agent import resume
+        failed = resume.load_replay_source(resume_from)
     split = source["split"]
     barrier.ensure_split_allowed(split, config)  # the source run's split
     _same_policy(source_run_id, source, config)
@@ -172,19 +181,35 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
               "engine": engine, "arm": arm, "call_sites": sorted(call_sites) if call_sites else None,
               "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded,
               "workers": workers}  # as in an agent run, not the configuration's identity
+    if failed is not None:
+        expected = {key: fields[key] for key in resume.REPLAY_IDENTITY if key != "split"}
+        resume.check_same(failed, {"split": split, **json.loads(json.dumps(expected)), "config_sha256": config_sha256(config)})
+        plan = resume.plan_replay(failed, resume.read_calls_of(failed), [identity(r) for r in records],
+                                  config["retries"]["parse_max_attempts"])  # before the run exists: a refusal leaves none
     label = arm or re.sub(r"[^A-Za-z0-9_.-]+", "_", engine)
     run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields,
                                           used_key_envs(config, engines, retrieval=False))
     outcome = new_outcome()
+    copied: set = set()
+    if failed is not None:
+        resume.copy_replay(plan, run_dir)
+        copied, outcome["model_failures"] = plan["copied"], dict(plan["model_failures"])
+        manifest.update(plan["fields"])
+        resume.open_session(manifest, workers)
+        _write_manifest(run_dir, manifest, config)
     stopped_by = None
     try:
         by_question: Dict[str, List[Dict[str, Any]]] = {q: [] for q in question_ids}
         for record in records:
-            by_question[record["question_id"]].append(record)
-        dataset = list(by_question.items())
+            if identity(record) not in copied:
+                by_question[record["question_id"]].append(record)
+        outcome["replayed"] += [q for q, left in by_question.items() if not left]  # every invocation copied
+        dataset = [(q, left) for q, left in by_question.items() if left]
         kwargs = {"config": config, "run_id": manifest["run_id"], "run_dir": run_dir, "arm": arm, "engine": engine,
                   "few_shot": few_shot, "allowed_call_sites": allowed}
-        if workers == 1:
+        if failed is not None and not dataset:  # the failed replay had sent every invocation: nothing to send
+            pass
+        elif workers == 1:
             _execute(dataset=dataset, outcome=outcome, reader=reader, **kwargs)
         else:
             _in_workers(_execute, kwargs, worker_parts(dataset, workers), outcome, new=new_outcome,
@@ -205,6 +230,10 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
                {"n_questions_replayed": len(outcome["replayed"]), "model_failures": outcome["model_failures"]},
                problems=empty)
     return run_dir
+
+
+def identity(record: Dict[str, Any]):
+    return record["question_id"], record["call_site"], record["invocation_key"]
 
 
 def _execute(config, run_id, run_dir, arm, engine, dataset, few_shot, allowed_call_sites, outcome,
