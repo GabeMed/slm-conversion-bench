@@ -126,8 +126,13 @@ def test_the_subscriptions_limit_is_waited_out_and_the_call_sent_again(claude, t
                     result="You've hit your session limit · resets 9:20pm (America/Sao_Paulo)")
     answer(limit)
     waits = []
+    real_sleep = claude_code_engine.time.sleep
 
     def sleep(seconds):  # the limit lifts after the second pause
+        if seconds != claude_code_engine.LIMIT_WAIT_S:
+            # time.sleep is patched process-wide: subprocess's own polling while it waits for the fake claude
+            # (Popen._wait) sleeps too, only when the child has not exited yet; that is not the engine's wait
+            return real_sleep(seconds)
         waits.append(seconds)
         if len(waits) == 2:
             answer(_answer())
