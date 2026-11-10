@@ -61,3 +61,24 @@ Changes after Stage 0 that can change a result or its interpretation.
   after the base model's calibration replay and the B3 pilot had been read (agent call sites included), before any
   adapter was evaluated; the only c3 training so far was a speed measurement on the previous file, outside the
   registry and never evaluated
+- 2026-11-10 · the training rows of the column filter and of the CHESS agent's own call sites (agent_ir, agent_ss,
+  agent_cg) are no longer the curated examples but drawn from K1's final attempts that parsed, masked by
+  curation.mask, with no deduplication and no per-question cap: every agent-site invocation (9,164 of 9,167) and a
+  uniform sample of N = 12,000 of the 64,136 column-filter invocations, by call (the smallest sha256 rank under
+  seeds.curation_sample = 20260934); each row goes to the cluster of its prompt's nearest centroid (the router's
+  assignment at run time; J5's centroids b98b66cd… unchanged), not to J5's cluster of a curated twin
+  (bench/curate.py, `bench datasets`; N, the seed and the rule recorded under `routed_sites` in
+  train/datasets/manifest.json; every other call site's rows are unchanged). Exact deduplication and the
+  per-question cap (curation.max_per_question_call_site) were additions of this project, not the paper's method, and
+  on these sites they trained on another distribution than the teacher's: DONE was 0.7% of the agent rows against
+  27.3% of the teacher's calls, and the cap, 4 invocations per question whatever the database's width, weighed
+  questions rather than calls ("yes" 14.9% of the column-filter rows against 9.4% of the teacher's;
+  european_football_2 22.3% of the calls, 8.6% of the rows), with 3,332 column-filter rows, below the paper's
+  10k–100k rule of thumb (now: "yes" 9.2%, DONE 27.3%). Curate, the embed execution and J5's clusters and centroids
+  are unchanged; c0 (3,292 → 11,982 rows), c1 (2,539 → 2,517: its 40 column-filter rows replaced by the 18 the
+  router sends it) and c3 (415 → 9,164) change, c2 is byte-identical (the file its adapter was trained on). This
+  replaces the 415-row frequency rule of the line above before any official c3 training with it and before any
+  dataset regeneration under it. Decided after the base model's calibration results and the B3 pilot had been read,
+  before any c0 or c3 adapter was evaluated (c3 was trained once, as a speed measurement on the earlier file,
+  outside the registry and never evaluated). It changes the trained arms' (B4, B5) training data and tends to
+  favour them, which is why it is declared
