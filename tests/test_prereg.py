@@ -283,6 +283,31 @@ def test_register_refuses_a_fact_the_configuration_names_that_git_does_not_track
         register("config.yaml", root=repo, replace=True, reason=REASON)
 
 
+def test_the_exploratory_allocation_is_registered_as_the_arms_facts_are(repo):
+    """B5's exploratory allocation (SPEC §3 extension 1) is optional; set, it must be a fact the registration
+    commit holds, and the configuration registered with it is the only one a test run opens the barrier for."""
+    rel = "judgments/exploratory/e/allocation.json"
+    config = {**CONFIG, "arms": {**CONFIG["arms"], "B5": {**CONFIG["arms"]["B5"], "exploratory_allocation": rel}}}
+    (repo / "config.yaml").write_text(yaml.safe_dump(config))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the exploratory allocation, named")
+    with pytest.raises(PreregError, match=rf"{rel}, a fact the configuration names, does not exist"):
+        register("config.yaml", root=repo)
+    (repo / rel).parent.mkdir(parents=True)
+    (repo / rel).write_text("{}\n")
+    with pytest.raises(PreregError, match="uncommitted|not tracked"):
+        register("config.yaml", root=repo)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "the exploratory allocation, tracked")
+    assert register("config.yaml", root=repo)["new"] is True
+    git(repo, "push", "-q", "origin", "main")
+    assert prereg_published(config, repo) == ""
+    other = {**config, "arms": {**config["arms"], "B5": {**config["arms"]["B5"],
+                                                         "exploratory_allocation": "judgments/exploratory/f/allocation.json"}}}
+    assert "configuration differs" in prereg_published(other, repo)  # another exploratory fact: not the registered one
+    assert "configuration differs" in prereg_published(CONFIG, repo)  # nor dropping it
+
+
 @pytest.mark.parametrize("unset_fact", [("B4", "adapters"), ("B5", "adapters"), ("B5", "allocation"), ("B3", "choice")])
 def test_register_refuses_an_arm_whose_fact_is_still_null(repo, unset_fact):
     """B4's and B5's adapters and B5's allocation (and every other fact the router reads) are decided before

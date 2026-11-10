@@ -13,6 +13,7 @@ of (no number goes in it):
     teacher_train_cost: <J3 result of the teacher on train>
     b1k: <the choice of B1's few-shot k on the pilot (bench judge b1k); a test plan with B1 needs it>
     attempts:   {<abandoned test attempt>: <its `bench eval --partial`>}   # every one that left predictions
+    b5_exploratory: {eval: <eval execution>, cost: <its J3 result>}   # B5 on arms.B5.exploratory_allocation
 
 Every figure is read from a judgment or computed by one: J1's per-question table and summary
 (`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
@@ -99,6 +100,13 @@ Every verdict holds for this workload only: the map opens with a scope line, and
   it have none, and their cost rows carry the label "no cost within the latency limit"; a cost claim with no
   SLM arm priced for that reason is "not testable at the API's latency", naming the engines.
 - A7, A2/A3, B2: not measured by J1–J8 in the core; stated as such.
+
+**B5 on the exploratory allocation** (`bench run --arm B5 --allocation exploratory`, SPEC §3 extension 1: one
+cluster swapped to its adapter, the rest on the production LLM; the plan's `b5_exploratory`) is a configuration
+of its own (the registry keys it apart from B5 by its `allocation`), listed with its n, EX and cost as
+exploratory: it is in no J4 comparison, no row of the SPEC §5 map and no verdict. Its run recorded the choice,
+centroids and adapters the plan's judgments name and the allocation fact `arms.B5.exploratory_allocation`
+names, which no judgment wrote.
 """
 import hashlib
 import json
@@ -241,14 +249,16 @@ def registration_in_force(split: str, config: Dict[str, Any]) -> Optional[str]:
 
 def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any], judged: Dict[str, Any],
                        reads: Dict[str, Any], pilot_plan: Dict[str, str], expected: Dict[str, str],
-                       in_force: Optional[str]) -> Optional[List[str]]:
+                       in_force: Optional[str], exploratory: Optional[Dict[str, Any]] = None) -> Optional[List[str]]:
     """A test report is bound to what the test registry recorded (SPEC 6.1, REQ-013):
     - every arm's run, and the per-call evaluation's replay, is a `done` entry made under the
       pre-registration in force (`in_force`), and each configuration's **completed** runs under it are
       all known (several `done` runs of one configuration: no verdict). A run that did not finish is
       listed as not completed and never blocks its re-run (T13);
     - every trained arm's run (and the replay routed as B4) recorded the facts the plan's judgments
-      name, and a plan without them is refused, never unchecked;
+      name, and a plan without them is refused, never unchecked; an arm's run is never one on B5's
+      exploratory allocation, and the plan's `b5_exploratory` run is one, which recorded the choice,
+      centroids and adapters the judgments name and the exploratory allocation fact;
     - the per-call evaluation replays the plan's B0 run, and that teacher run is bound like an arm's
       (its several runs count with the replay's), even when the plan has no B0 arm;
     - every pilot the report uses (the pilot's evals, J6's zero-shot per-call evals) finished
@@ -271,26 +281,37 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
         if entry["prereg_hash"] != in_force:
             raise JudgmentError(f"{label}'s run {run_id} ran under pre-registration {entry['prereg_hash']}, not the one "
                                 f"in force ({in_force}): it is reported, never read for a verdict")
-        key = (entry["type"], entry["arm"], entry["engine"], entry["prereg_hash"])
+        key = (entry["type"], entry["arm"], entry["engine"], entry["prereg_hash"], entry.get("allocation"))
         same = sorted(r["run_id"] for r in registry["runs"] if r["status"] == "done"
-                      and (r["type"], r["arm"], r["engine"], r["prereg_hash"]) == key)
+                      and (r["type"], r["arm"], r["engine"], r["prereg_hash"], r.get("allocation")) == key)
         return entry, (same if len(same) > 1 else None)
 
-    def facts_of(label: str, entry: Dict[str, Any], names: Tuple[str, ...]) -> None:
-        missing = [n for n in names if n not in expected]
+    def facts_of(label: str, entry: Dict[str, Any], names: Tuple[str, ...], against: Optional[Dict[str, str]] = None) -> None:
+        against = expected if against is None else against
+        missing = [n for n in names if n not in against]
         if missing:
             raise JudgmentError(f"{label}'s facts cannot be checked: the plan names no "
                                 f"{', '.join(FACT_SOURCE[n] for n in missing)}")
         recorded = entry.get("facts") or {}
         for name in names:
-            if recorded.get(name) != expected[name]:
+            if recorded.get(name) != against[name]:
                 raise JudgmentError(f"{label}'s test run recorded the {name} fact {recorded.get(name)!r}; "
-                                    f"the plan's judgments name {expected[name]!r}")
+                                    f"the plan's judgments name {against[name]!r}")
 
     for arm, found in arms.items():
         entry, found["several_runs"] = bind(arm, found["run_id"])
+        if entry.get("allocation") is not None:
+            raise JudgmentError(f"{arm}'s run {found['run_id']} ran on the {entry['allocation']} allocation: it is "
+                                f"the plan's b5_exploratory, never an arm with a verdict")
         if arm in NEEDS:
             facts_of(arm, entry, NEEDS[arm])
+    if exploratory is not None:
+        entry, exploratory["several_runs"] = bind("B5 (exploratory allocation)", exploratory["run_id"])
+        if entry.get("allocation") != "exploratory":
+            raise JudgmentError(f"the plan's b5_exploratory run {exploratory['run_id']} did not run on the exploratory "
+                                f"allocation")
+        facts_of("B5 (exploratory allocation)", entry, NEEDS["B5"],
+                 {**{k: v for k, v in expected.items() if k != "allocation"}, "allocation": exploratory["allocation_fact"]})
     replay_several = None
     if reads.get("per_call"):
         entry, replay_several = bind("the per-call evaluation", reads["per_call"]["replay"]["run_id"])
@@ -343,6 +364,58 @@ def training_datasets(plan: Dict[str, Any], sources: Dict[str, Any]) -> Optional
 
 
 REQUIRED_COST = ("upper_bound", "cache_not_reported", "lower_bound", "failed_unbilled", "prices", "by_question")
+
+
+def b5_exploratory(plan: Dict[str, Any], config: Dict[str, Any], split: str, specs: Dict[str, Any], ex_table: Callable,
+                   ex_summary: Callable, tables: set, sources: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """B5 on the exploratory allocation (SPEC §3 extension 1), from the plan's `b5_exploratory`: its n, EX and
+    cost, read as an arm's are, for a table of its own with no verdict. Its evaluation is J1's together with the
+    arms' but B5's (one instrument, one gold); its J3 priced with the arms' price table and, for its SLM calls, the plan's j8. None
+    when the plan names none."""
+    spec = plan.get("b5_exploratory")
+    if not spec:
+        return None
+    if not (isinstance(spec, dict) and spec.get("eval") and spec.get("cost")):
+        raise JudgmentError("the plan's b5_exploratory needs its end-to-end evaluation (eval) and its J3 result (cost)")
+    from bench.contracts.router import ALLOCATIONS
+    configured = ((config.get("arms") or {}).get("B5") or {}).get(ALLOCATIONS["exploratory"])
+    if not configured:
+        raise JudgmentError(f"the plan has a b5_exploratory and the configuration no arms.B5.{ALLOCATIONS['exploratory']}")
+    allocation, allocation_sha = read_fact(str(paths.ROOT / configured), "allocation")
+    if manifest(spec["eval"]).get("partial"):
+        raise JudgmentError(f"{spec['eval']} scores an abandoned attempt (--partial)")
+    source = manifest(spec["eval"])["source_run_id"]
+    if manifest(source).get("allocation") != "exploratory":
+        raise JudgmentError(f"the plan's b5_exploratory evaluation {spec['eval']} scores {source}, not a run on the "
+                            f"exploratory allocation")
+    if (manifest(source).get("facts") or {}).get("allocation") != allocation_sha:
+        raise JudgmentError(f"{source} ran on another allocation fact than arms.B5.{ALLOCATIONS['exploratory']}")
+    # beside every arm's evaluation but B5's (J1 scores a configuration once, and keys it by arm), so J1 checks one
+    # instrument and one gold across them
+    rows = [r for r in ex_table([run_dir(e) for e in [s["eval"] for a, s in specs.items() if a != "B5"] + [spec["eval"]]])
+            if r["source_run_id"] == source]
+    wrong = {(r["arm"], r["engine"], r["split"]) for r in rows} - {("B5", None, split)}
+    if not rows or wrong:
+        raise JudgmentError(f"{spec['eval']} is not B5 on {split}: J1 reads {sorted(map(str, wrong)) or 'nothing'}")
+    j3 = read_result(spec["cost"], "J3")
+    if j3["reads"].get("eval", {}).get("run_id") != spec["eval"]:
+        raise JudgmentError(f"the J3 result of b5_exploratory was not computed with {spec['eval']}")
+    cost = j3["result"]
+    missing = [k for k in REQUIRED_COST if k not in cost]
+    if missing:
+        raise JudgmentError(f"the J3 result of b5_exploratory records no {', '.join(missing)}")
+    if tables and (cost["prices_as_of"], cost["prices"]["sha256"]) not in tables:
+        raise JudgmentError("b5_exploratory was priced with another price table than the arms")
+    basis = (cost.get("slm_cost_basis") or {}).get("basis")
+    if basis is not None and (j3["reads"].get("j8") or {}).get("sha256") != (sources.get("j8") or {}).get("sha256"):
+        raise JudgmentError("the J3 result of b5_exploratory priced its SLM calls with another load test than the plan's j8")
+    (summary,) = ex_summary(rows)
+    sources["b5_exploratory"] = {"eval": reference(spec["eval"]), "j3": result_reference(spec["cost"])}
+    return {"n": summary["n"], "ex": summary["ex"], "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
+            "run_id": j3["reads"]["run"]["run_id"], "allocation": allocation["allocation"], "allocation_fact": allocation_sha,
+            "cost_per_correct": costs_of(cost), "cost_label": cost["label"], "replaceable_fraction": cost["replaceable_fraction"],
+            "slm_outside_slo": (cost.get("slm_cost_basis") or {}).get("outside_slo") or [],
+            "verdict": "none (exploratory, SPEC §3 extension 1)"}
 
 
 def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_summary: Callable,
@@ -441,10 +514,13 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         j7_prices = judged["j7"].get("prices") or {}
         if arms and (j7_prices.get("as_of"), j7_prices.get("sha256")) not in tables:
             raise JudgmentError("the plan's J7 ordered engines by another price table than the arms were priced with")
+    exploratory = b5_exploratory(plan, config, split, specs, ex_table, ex_summary, tables, sources)
     replay_several = _registry_bindings(split, arms, registry, judged, reads, pilot_plan, _expected_facts(plan, judged),
-                                        in_force)
+                                        in_force, exploratory)
     if split == "test":  # every evaluation read was scored under the registration in force (eval records it)
         evals = {f"{arm}'s": spec["eval"] for arm, spec in specs.items()}
+        if exploratory is not None:
+            evals["B5's (exploratory allocation)"] = plan["b5_exploratory"]["eval"]
         for who in ("replay_eval", "teacher_eval"):
             if (reads.get("per_call") or {}).get(who):
                 evals[f"the per-call {who.replace('_', ' ')}'s"] = reads["per_call"][who]["run_id"]
@@ -502,7 +578,10 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             "v3_min_ratio": config["claims"]["v3_min_ratio"],
             "utilizations": [f"{round(u * 100)}%" for u in sorted(config["cost"]["utilizations"])],
             "registry": registry, "prereg_in_force": in_force,
-            "attempts": attempts_by_configuration(registry, in_force, arms, plan.get("attempts") or {})
+            "exploratory": exploratory,
+            "attempts": attempts_by_configuration(registry, in_force, {**arms, **({"B5 (exploratory)": exploratory}
+                                                                                if exploratory else {})},
+                                                  plan.get("attempts") or {})
             if split == "test" else [],
             "deviations": deviations(ref=remote if split == "test" else "HEAD"),
             "datasets": training_datasets(plan, sources), "sources": sources}
@@ -1086,6 +1165,7 @@ def test_registry(root: Optional[Path] = None, ref: str = "HEAD") -> Dict[str, A
         found = ended or intent
         ended_with = ended or {}
         runs.append({"run_id": run_id, "type": found.get("type"), "arm": found.get("arm"), "engine": found.get("engine"),
+                     "allocation": found.get("allocation"),
                      "status": ended.get("status") if ended else "interrupted (intent, no manifest)",
                      "commit": found.get("commit"), "prereg_hash": found.get("prereg_hash"),
                      "started_at": intent.get("started_at"), "facts": ended_with.get("facts"),
@@ -1121,9 +1201,9 @@ def attempts_by_configuration(registry: Dict[str, Any], in_force: Optional[str],
     final = {found["run_id"]: (found["n"], found["ex"]) for found in arms.values()}
     grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
     for run in runs:
-        grouped.setdefault((run["type"], run["arm"], run["engine"], run["prereg_hash"]), []).append(run)
+        grouped.setdefault((run["type"], run["arm"], run["engine"], run["prereg_hash"], run.get("allocation")), []).append(run)
     out = []
-    for (run_type, arm, engine, prereg_hash), found in sorted(grouped.items(), key=lambda kv: [str(k) for k in kv[0]]):
+    for (run_type, arm, engine, prereg_hash, allocation), found in sorted(grouped.items(), key=lambda kv: [str(k) for k in kv[0]]):
         rows = []
         for run in sorted(found, key=lambda r: (r.get("started_at") or "", r["run_id"])):
             row = {"run_id": run["run_id"], "status": run_reading(run, in_force), "end_reason": run.get("end_reason"),
@@ -1155,7 +1235,8 @@ def attempts_by_configuration(registry: Dict[str, Any], in_force: Optional[str],
             while source is not None and "copied_into" not in source:
                 source["copied_into"] = final_row["run_id"]
                 source = by_id.get(source["resumed_from"] or "")
-        out.append({"type": run_type, "arm": arm, "engine": engine, "prereg_hash": prereg_hash, "attempts": rows})
+        out.append({"type": run_type, "arm": arm, "engine": engine, "prereg_hash": prereg_hash, "attempts": rows,
+                    **({"allocation": allocation} if allocation else {})})
     return out
 
 
@@ -1296,6 +1377,20 @@ def render(data: Dict[str, Any]) -> str:
     else:
         parts.append("The desk triage is not recorded in `config.yaml › selection.triage`.")
     parts.append("")
+    explored = data.get("exploratory")
+    if explored:
+        costs = ", ".join(f"{u + ': ' if u else ''}{_usd(c)}" for u, c in
+                          sorted(explored["cost_per_correct"].items(), key=lambda kv: float(kv[0].rstrip("%") or 0)))
+        parts += ["## Exploratory: B5 on a single-cluster swap (no verdict)", "",
+                  "SPEC §3 extension 1, registered before the test: "
+                  + ", ".join(f"{c} → {e}" for c, e in sorted(explored["allocation"].items()))
+                  + " (`arms.B5.exploratory_allocation`, written by hand, no judgment behind it). It is in no comparison "
+                  "and no row of the SPEC §5 map.", "",
+                  _table(["configuration", "n", "EX"] + [f"EX {d}" for d in difficulties]
+                         + ["cost per correct query (standard prices)", "replaceable fraction (calls)", "verdict"],
+                         [["B5, exploratory allocation", explored["n"], _pct(explored["ex"])]
+                          + [_pct(explored["by_difficulty"].get(d)) for d in difficulties]
+                          + [costs, _pct((explored["replaceable_fraction"] or {}).get("calls")), "none (exploratory)"]]), ""]
     fraction = data["arms"].get("B5", {}).get("replaceable_fraction")
     parts += ["## Replaceable fraction (B5)", "",
               NO_SLM[0].upper() + NO_SLM[1:] + "." if b5_without_slm(data) else
@@ -1329,7 +1424,9 @@ def render(data: Dict[str, Any]) -> str:
         parts.append(f"The registry could not be read from git: {registry['reason']}.")
     elif registry["runs"]:
         parts.append(_table(["execution", "type", "arm", "status", "commit", "pre-registration"],
-                            [[r["run_id"], r["type"] or "—", r["arm"] or "—", run_reading(r, data["prereg_in_force"]),
+                            [[r["run_id"], r["type"] or "—",
+                              (r["arm"] or "—") + (f" ({r['allocation']} allocation)" if r.get("allocation") else ""),
+                              run_reading(r, data["prereg_in_force"]),
                               (r["commit"] or "—")[:12], (r["prereg_hash"] or "—")[:12]] for r in registry["runs"]]))
     else:
         parts.append("No test-split execution is committed.")
@@ -1340,7 +1437,8 @@ def render(data: Dict[str, Any]) -> str:
                   "finish left out), never read for a verdict. An attempt the final run resumed overlaps it: the final "
                   "run copied those questions, and its EX counts them again.", ""]
         for group in data["attempts"]:
-            title = " ".join(str(x) for x in (group["type"], group["arm"], group["engine"]) if x is not None)
+            title = " ".join(str(x) for x in (group["type"], group["arm"], group["engine"]) if x is not None) + \
+                (f" ({group['allocation']} allocation)" if group.get("allocation") else "")
             parts += [f"**{title}** (pre-registration {(group['prereg_hash'] or '—')[:12]})", "",
                       _table(["attempt", "status", "how it ended", "run again because", "n", "EX", "overlap"],
                              [[a["run_id"], a["status"], a["end_reason"] or "—",

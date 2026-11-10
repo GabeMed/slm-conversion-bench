@@ -1693,3 +1693,69 @@ def test_an_slm_arm_outside_its_latency_limit_is_not_testable_at_the_apis_latenc
     assert row(rows, "V3")["verdict"].startswith(said) and row(rows, "A6")["verdict"].startswith(said)
     assert "no cost within the latency limit: slm:qwen3-8b+lora:c1 sustain no load level within it (B5)" in \
         row(rows, "A6")["verdict"]
+
+
+def test_b5_on_the_exploratory_allocation_is_listed_without_a_verdict(pipeline, monkeypatch):
+    """SPEC §3 extension 1: the plan's b5_exploratory, a test run of B5 on arms.B5.exploratory_allocation, is a
+    configuration of its own: listed with its n, EX and cost, in no comparison, no row of the map and no
+    verdict; it does not make B5's own run one of several, and it is never bound as the arm B5."""
+    from bench.judge import j3
+    from fixtures.fake import write_run
+    root, config = pipeline["root"], copy.deepcopy(pipeline["config"])
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    run = lambda: report.run(str(pipeline["plan"]), config, ex_table, ex_summary, noninferiority,  # noqa: E731
+                             pilot_ids=PILOT)
+    before = json.loads((run() / "report.json").read_text())
+    # the hand-written fact, on the centroids and adapters J7 allocated on; the registration named it (stood in here)
+    j7 = read_result(plan["j7"], "J7")["result"]
+    first, *rest = sorted(j7["allocation"])
+    allocation = {first: "slm", **{c: "production_llm" for c in rest}}
+    swap = facts.write_fact("exploratory", "allocation", {"centroids": j7["centroids"], "adapters": j7["adapters"],
+                                                          "allocation": allocation})
+    config["arms"]["B5"]["exploratory_allocation"] = relative(swap)
+    monkeypatch.setattr(report, "registration_in_force",
+                        lambda split, config: pipeline["prereg_hash"] if split == "test" else None)
+    b5 = json.loads((paths.RUNS / "agent-B5-test" / "manifest.json").read_text())
+    run_id = "agent-B5-exploratory-test"
+    calls = [{**c, "run_id": run_id} for c in read_jsonl(paths.RUNS / "agent-B5-test" / "calls.jsonl")]
+    recorded = {**b5.get("facts", {}), **json.loads((root / "registry" / "test" / "agent-B5-test.manifest.json")
+                                                    .read_text())["facts"], "allocation": swap.parent.name}
+    write_run(run_id, {**{k: v for k, v in b5.items() if k != "run_id"}, "allocation": "exploratory", "facts": recorded},
+              calls)
+    scored = json.loads((paths.RUNS / "eval-B5" / "manifest.json").read_text())
+    write_run("eval-B5-exploratory", {**{k: v for k, v in scored.items() if k != "run_id"}, "source_run_id": run_id,
+                                      "status": None},
+              files={"results.jsonl": read_jsonl(paths.RUNS / "eval-B5" / "results.jsonl")})
+    cost = j3.run(run_id, "eval-B5-exploratory", str(paths.ROOT / plan["j8"]), config)
+    identity = {"type": "agent", "arm": "B5", "engine": None, "commit": "c" * 40, "prereg_hash": pipeline["prereg_hash"],
+                "allocation": "exploratory"}
+    (root / "registry" / "test" / f"{run_id}.intent.json").write_text(json.dumps(
+        {**identity, "run_id": run_id, "split": "test", "started_at": "2026-10-01T10:00:00+00:00"}))
+    (root / "registry" / "test" / f"{run_id}.manifest.json").write_text(json.dumps(
+        {**identity, "status": "done", "facts": recorded}))
+    for args in (("add", "registry"), ("commit", "-q", "-m", "the exploratory run")):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    publish(root)
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "b5_exploratory": {"eval": "eval-B5-exploratory",
+                                                                           "cost": relative(cost)}}))
+    out = run()
+    data, markdown = json.loads((out / "report.json").read_text()), (out / "report.md").read_text()
+    explored = data["exploratory"]
+    assert (explored["n"], explored["allocation"], explored["allocation_fact"]) == (len(TEST_IDS), allocation, swap.parent.name)
+    assert explored["ex"] == data["arms"]["B5"]["ex"] and explored["verdict"].startswith("none (exploratory")
+    assert explored["several_runs"] is None
+    # nothing that has a verdict moved: the arms, the comparisons, the map
+    assert set(data["arms"]) == set(before["arms"]) and data["tests"] == before["tests"] and data["map"] == before["map"]
+    assert data["arms"]["B5"]["several_runs"] is None  # one completed run per configuration: B5's is still one
+    assert "## Exploratory: B5 on a single-cluster swap (no verdict)" in markdown
+    assert f"| {run_id} | agent | B5 (exploratory allocation) | done |" in markdown
+    assert f"**agent B5 (exploratory allocation)** (pre-registration {pipeline['prereg_hash'][:12]})" in markdown
+    # never the arm B5, whose verdicts rest on J7's allocation
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "arms": {**plan["arms"], "B5": {"eval": "eval-B5-exploratory",
+                                                                                        "cost": relative(cost)}}}))
+    with pytest.raises(JudgmentError, match="ran on the exploratory allocation: it is the plan's b5_exploratory"):
+        run()
+    # and an exploratory run bound to another fact than the configuration names is refused
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "b5_exploratory": {"eval": "eval-B5", "cost": plan["arms"]["B5"]["cost"]}}))
+    with pytest.raises(JudgmentError, match="not a run on the exploratory allocation"):
+        run()

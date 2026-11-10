@@ -32,6 +32,9 @@ def main(argv=None) -> int:
     group.add_argument("--ids", nargs="+", help="question ids, all inside the split")
     group.add_argument("--limit", type=int, help="the first N questions of the split, by id")
     p.add_argument("--engine", choices=("production_llm", "cheap_alt"), help="B2 only: the engine of the single call")
+    p.add_argument("--allocation", choices=("registered", "exploratory"), default="registered",
+                   help="B5 only: J7's allocation (arms.B5.allocation, the registered arm), or the exploratory "
+                        "single-cluster swap of SPEC §3 extension 1 (arms.B5.exploratory_allocation; no verdict)")
     p.add_argument("--workers", type=int, default=1,
                    help="answer the questions in this many processes: still one run and one manifest (default 1)")
     p.add_argument("--resume-from", metavar="RUN_ID",
@@ -171,7 +174,8 @@ def main(argv=None) -> int:
             print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
                             workers=args.workers, batch=args.batch,
                             via_claude_code=args.via_claude_code, resume_from=args.resume_from,
-                            redo_reason=args.redo_reason, redo_affects_completed=args.redo_affects_completed))
+                            redo_reason=args.redo_reason, redo_affects_completed=args.redo_affects_completed,
+                            allocation=args.allocation))
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,

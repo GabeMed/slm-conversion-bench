@@ -117,15 +117,19 @@ def b1k_choice(root: Path, config: Dict[str, Any]) -> Path:
 def arm_fact_paths(root: Path, config: Dict[str, Any]) -> List[Path]:
     """The facts the configuration names for the arms (`arms.<arm>.<fact>`, as the router reads them:
     J6's choice, J5's centroids, S5's adapters, J7's allocation). Every one must be set: an arm whose fact
-    is null cannot run on test, and registering it would fix B4 or B5 as undecided."""
-    from bench.contracts.router import ARM_FACTS
+    is null cannot run on test, and registering it would fix B4 or B5 as undecided. B5's exploratory
+    allocation (`arms.B5.exploratory_allocation`, SPEC §3 extension 1, no verdict) is optional; when set, it is
+    registered as the others are, so a test run of it follows the fact registered before the test."""
+    from bench.contracts.router import ALLOCATIONS, ARM_FACTS
     arms = config.get("arms") or {}
     missing = [f"arms.{arm}.{name}" for arm, names in sorted(ARM_FACTS.items())
                for name in names if not (arms.get(arm) or {}).get(name)]
     if missing:
         raise PreregError(f"{', '.join(missing)} not set: every fact the arms follow is decided before the "
                           f"registration (the adapters by S5, the allocation by J7)")
-    return [root / arms[arm][name] for arm, names in sorted(ARM_FACTS.items()) for name in names]
+    exploratory = (arms.get("B5") or {}).get(ALLOCATIONS["exploratory"])
+    return [root / arms[arm][name] for arm, names in sorted(ARM_FACTS.items()) for name in names] + \
+        ([root / exploratory] if exploratory else [])
 
 
 def _check_facts_tracked(root: Path, facts: List[Path]) -> None:

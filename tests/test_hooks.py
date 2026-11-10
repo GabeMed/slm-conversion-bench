@@ -138,7 +138,7 @@ def test_what_the_api_answers_reaches_c1_through_the_agents_own_client(tmp_path)
 
 def test_an_engine_with_no_pinned_provider_records_none(run, monkeypatch):
     model, calls_path, _ = run
-    monkeypatch.setattr(hooks, "route", lambda arm, call_site, messages, config: hooks.Route("slm:qwen3-8b", None))
+    monkeypatch.setattr(hooks, "route", lambda arm, call_site, messages, config, allocation="registered": hooks.Route("slm:qwen3-8b", None))
     model.script = ['{"table_names": ["t"]}']
     hooks.invoke_tool_call("select_tables", "single", [HumanMessage(content="q")], JsonOutputParser())
     (line,) = read_calls(calls_path)

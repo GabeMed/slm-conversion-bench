@@ -75,6 +75,7 @@ class _RunState:
     arm: Optional[str]
     calls_path: Path
     engine: Optional[str] = None  # a fixed engine (B2, `replay --engine`): the router is not asked
+    allocation: str = "registered"  # B5's: J7's, or the exploratory one (bench.contracts.router.ALLOCATIONS)
     few_shot: Optional[Dict[str, Dict[str, List[Any]]]] = None  # {call site: {step: messages}}; None: cheap_alt is refused
     allowed_call_sites: Optional[frozenset] = None  # `test` runs: the registered set (REQ-001)
     question_id: Optional[str] = None
@@ -120,8 +121,9 @@ def max_workers() -> int:
 
 def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Optional[str] = None,
               few_shot: Optional[Dict[str, Dict[str, List[Dict[str, str]]]]] = None,
-              allowed_call_sites: Optional[List[str]] = None, stop: Any = None) -> None:
-    """`engine` fixes the engine of every call (no routing); `few_shot` is the prefix per call site
+              allowed_call_sites: Optional[List[str]] = None, stop: Any = None,
+              allocation: str = "registered") -> None:
+    """`engine` fixes the engine of every call (no routing); `allocation` is the one B5 routes by; `few_shot` is the prefix per call site
     and step (bench.agent.few_shot) for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site; `stop`
     is the flag the worker processes of one run share (set: no further model call)."""
     global _run
@@ -135,7 +137,7 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
         _time_embedding()
     prefix = None if few_shot is None else {site: {step: _lc_messages(messages) for step, messages in steps.items()}
                                             for site, steps in few_shot.items()}
-    _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, few_shot=prefix,
+    _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, allocation=allocation, few_shot=prefix,
                      allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites),
                      stop=stop)
 
@@ -203,7 +205,7 @@ def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
     else:
         _embed_timing.__dict__.clear()
         t0 = time.perf_counter()
-        chosen = route(run.arm, call_site, messages, _config)
+        chosen = route(run.arm, call_site, messages, _config, run.allocation)
         if chosen.cluster is not None:  # the router embedded the prompt (B4, B5): its time, outside latency_ms
             _record_route(run, call_site, key, chosen, t0, time.perf_counter())
     temperature = float(_config["call_sites"][call_site]["temperature"])

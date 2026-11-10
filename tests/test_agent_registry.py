@@ -505,6 +505,27 @@ def test_done_runs_are_matched_by_type_arm_engine_and_registration(repo):
     assert registry.done_runs_of("replay", "B2", "cheap_alt", "h1", "HEAD") == ["e"]
 
 
+def test_b5_on_the_exploratory_allocation_is_a_configuration_of_its_own(repo):
+    """One completed run per configuration: a B5 run on the exploratory allocation (SPEC §3 extension 1) neither
+    counts as the registered B5's nor is counted by it, done or attempted."""
+    root, _ = repo
+    (root / registry.TEST_DIR).mkdir(parents=True)
+    b5 = {"type": "agent", "arm": "B5", "engine": None, "prereg_hash": "h1", "started_at": "2026-11-11T00:00:00"}
+    entries = {"b5": {**b5, "status": "done"}, "b5x": {**b5, "allocation": "exploratory", "status": "done"},
+               "b5x-0": {**b5, "allocation": "exploratory", "status": "failed"}}
+    for run_id, entry in entries.items():
+        (root / registry.TEST_DIR / f"{run_id}.manifest.json").write_text(json.dumps({"run_id": run_id, **entry}))
+        (root / registry.TEST_DIR / f"{run_id}.intent.json").write_text(
+            json.dumps({"run_id": run_id, **{k: v for k, v in entry.items() if k != "status"}}))
+    git(root, "add", "registry")
+    git(root, "commit", "-q", "-m", "entries")
+    assert registry.done_runs_of("agent", "B5", None, "h1", "HEAD") == ["b5"]
+    assert registry.done_runs_of("agent", "B5", None, "h1", "HEAD", allocation="exploratory") == ["b5x"]
+    assert [a["run_id"] for a in registry.attempts_of("agent", "B5", None, "h1", "HEAD")] == ["b5"]
+    assert sorted(a["run_id"] for a in registry.attempts_of("agent", "B5", None, "h1", "HEAD", allocation="exploratory")) \
+        == ["b5x", "b5x-0"]
+
+
 def test_a_registry_commit_waits_for_another_gits_lock(repo, monkeypatch):
     """A git process that holds the index for a moment (an editor, a `git status` elsewhere) must not
     fail a run that finished: the commit waits for the lock, a bounded number of times."""
