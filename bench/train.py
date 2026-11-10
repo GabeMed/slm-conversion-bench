@@ -104,7 +104,7 @@ def _message_problems(where: str, message: Any) -> List[str]:
 
 
 def row_problems(row: Any) -> List[str]:
-    """What keeps a dataset row from being one prompt-completion pair (design §5.1, "Dados de treino")."""
+    """What keeps a dataset row from being one prompt-completion pair (design §5.1, training data)."""
     if not isinstance(row, dict):
         return ["a row must be an object"]
     prompt, completion = row.get("prompt"), row.get("completion")
