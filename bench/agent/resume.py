@@ -15,7 +15,8 @@ calls.jsonl compares a line's `run_id` with the run's; `resumed_question_ids` sa
 from where), with its prediction and its `tool_errors`. Every other question is answered again from
 the start. The calls the source made for questions that are not complete are part of no answer and
 are not copied: they are counted (calls, usage) under `resumed_from.discarded`, so what they cost
-stays visible. CHESS's own outputs of the complete questions are copied under
+stays visible. The router's times of the complete questions (routes.jsonl, B4 and B5) are copied the same
+way; a routed source without that file is recorded under `resumed_from.routes` as missing them. CHESS's own outputs of the complete questions are copied under
 chess/resumed/<source run_id>/ (inspection only: nothing downstream reads chess/).
 
 The new run's manifest has the usual fields, `started_at`/`finished_at` being this session's (as its
@@ -134,7 +135,21 @@ def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict
 
     discarded = [call for call in calls if call["question_id"] not in keep]
     return {"n_calls": len(discarded), "usage": _usage_totals(discarded),
-            "question_ids": sorted({c["question_id"] for c in discarded}, key=lambda q: int(q) if q.isdigit() else -1)}
+            "question_ids": sorted({c["question_id"] for c in discarded}, key=lambda q: int(q) if q.isdigit() else -1),
+            "routes": copy_routes(source, run_dir, keep)}
+
+
+def copy_routes(source: Dict[str, Any], run_dir: Path, keep: set) -> Optional[Dict[str, Any]]:
+    """The router's times of the complete questions (routes.jsonl, B4 and B5), copied as their C1 lines are.
+    A source of a routed arm without that file (run before it existed) is recorded as missing them; an arm
+    that does not embed (B0, B1, B2, B3) has none to copy."""
+    found = paths.RUNS / source["run_id"] / "routes.jsonl"
+    if not found.is_file():
+        return {"copied": 0, "missing": True} if source.get("arm") in ("B4", "B5") else None
+    lines = [line for line in found.read_text().splitlines() if line.strip()]
+    copied = [line for line in lines if json.loads(line).get("question_id") in keep]
+    (run_dir / "routes.jsonl").write_text("".join(line + "\n" for line in copied))
+    return {"copied": len(copied), "missing": False}
 
 
 def _resumed_from(source: Dict[str, Any], **what: Any) -> Dict[str, Any]:
@@ -150,7 +165,9 @@ def _sessions(source: Dict[str, Any]) -> List[Dict[str, Any]]:
 def manifest_fields(source: Dict[str, Any], complete: List[str], discarded: Dict[str, Any]) -> Dict[str, Any]:
     """What the new run's manifest records of the resume. The last session (this one) is closed by
     `runner.finish`, with the run's `finished_at`."""
-    return {"resumed_from": _resumed_from(source, discarded=discarded), "resumed_question_ids": complete,
+    discarded = dict(discarded)
+    routes = discarded.pop("routes", None)  # the router's times copied, or missing (B4, B5)
+    return {"resumed_from": _resumed_from(source, discarded=discarded, routes=routes), "resumed_question_ids": complete,
             "sessions": _sessions(source)}
 
 

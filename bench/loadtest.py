@@ -13,28 +13,27 @@ B3 on calib; an adapter (`slm:<candidate>+lora:<name>`) on the calls B4 on calib
 `--as-deployed`, B4 as it is served: one server with every adapter, the payload all of B4's calls on calib in the
 proportions B4 sent them, each line's `model` the adapter the router chose for it (AIPerf's `raw_payload` sends
 each line as it is); its engine is `slm:<candidate>+as-deployed`. The manifest records the sweep's traffic
-(`traffic`: the cluster, or `all`), the one J8 compares with the teacher's latency on the same calls. A non-SLM
+(`traffic`: the cluster, or `all`; `traffic_kind`: base, adapter or as_deployed) and the composition of its pool by
+cluster, call site and engine: J8 reweights the teacher's latencies to that call-site mix for the sweep's limit,
+and adds the router's time to a sweep the router feeds. A non-SLM
 engine (the local smoke server) replays every call of its source.
 
-The pool is shuffled first with `seeds.loadtest_shuffle`: the file groups each question's calls together, so in
-file order every level would replay a handful of questions on a few databases, each its own mix. Without that
-seed the pool keeps the file order, as before it existed, and the manifest says which order was replayed. The
-first `warmup_request_count` calls warm the server up; then each concurrency level replays its own next calls,
-once each, as AIPerf v0.13.0 `raw_payload` lines: `request_count` calls, or `request_count_by_level[<concurrency>]`
-where the configuration gives one. **No call is replayed twice in a sweep**, so the prefix cache holds only what
-real traffic shares, never an exact repeat carried over from a previous level. A pool too small for the warm-up
-and every level (a small cluster) is refused (`short_source: refuse`, the default), or every level's count is
-scaled down by the same factor, rounded down, and a level left with fewer calls than its concurrency is not run
-(`reduce`); the manifest records the counts configured and replayed, and the levels skipped.
+**Each level draws its own calls from the engine's whole pool**, seeded (`seeds.loadtest_shuffle` and the level's
+index): `request_count` calls, or `request_count_by_level[<concurrency>]` where the configuration gives one, none
+twice within the level, **stratified by cluster** (proportional allocation, largest remainder: every level holds
+each cluster in the pool's proportion; B3's calls carry no cluster and are one stratum). Levels draw
+independently, so a small pool's calls come back in later levels; that is why **every level starts from an
+empty prefix cache** (`cold_prefix_cache: always`, the same for every sweep): no level meets a cache that a
+previous one filled with its own prompts. A pool smaller than a level's count is replayed whole, once, and the
+manifest says so (`short_pool`). The first `warmup_request_count` calls of the seeded order warm the server up
+before each level, outside the measured calls.
 
-**A cold prefix cache between levels** (`cold_prefix_cache`: `never`, the default; `reduced`, a sweep whose pool
-was too small; `always`): after the warm-up and before AIPerf, the server's prefix cache is emptied (vLLM's
+**The cache reset**: after the warm-up and before AIPerf, the server's prefix cache is emptied (vLLM's
 `POST /reset_prefix_cache`, which vLLM 0.30 registers only with VLLM_SERVER_DEV_MODE=1; `bench serve --on
-runpod` sets it) and the answer must say `success: true`, retried while blocks are still held. A small pool's
-later levels would otherwise meet a cache holding most of their own prefixes from the levels before. AIPerf's
-own `resetKvCache` sends the same POST but accepts `{"success": false}` (vLLM answers 200 either way), so the
-load test does it itself. A server without the route is an error: start it in dev mode, or restart vLLM
-between levels. Every level is its own run:
+runpod` sets it) and the answer must say `success: true`, retried while blocks are still held. AIPerf's own
+`resetKvCache` sends the same POST but accepts `{"success": false}` (vLLM answers 200 either way), so the load
+test does it itself. A server without the route is an error: start it in dev mode, or restart vLLM between
+levels. Every level is its own run:
 
     runs/loadtest-<engine>-c<concurrency>-<timestamp>/
         payloads.jsonl                 the lines replayed
@@ -50,8 +49,7 @@ lists (for an adapter, the path it was loaded from), and warms it up before meas
 what was configured (`gpu`, `prefix_cache`) apart from what was observed (`observed`): the GPUs the Modal or
 RunPod server reports it got, and the share of prompt tokens the server says it read from its cache (AIPerf's
 `overall_usage_prompt_cache_read_pct`, from the servers' own `usage`). The levels of one invocation share a
-`sweep_id` and run in increasing order on one warm server, so later levels meet a fuller prefix cache (unless
-it is emptied between them, above).
+`sweep_id` and run in increasing order on one warm server (its prefix cache emptied before each, above).
 
 Credentials: the endpoint's API key (`api_key_env`) and its `headers_env` (each header sent with the value
 of the environment variable it names; Modal proxy auth). AIPerf receives them through a YAML config that
@@ -61,6 +59,7 @@ Modal-Key verbatim into its export).
 """
 import hashlib
 import json
+from fractions import Fraction
 import random
 import re
 import subprocess
@@ -82,8 +81,7 @@ REDACTED = b"<redacted>"
 # params the agent's client does not send as body fields (hooks.chat_model pops them)
 CLIENT_ONLY_PARAMS = ("max_tokens", "timeout_s")
 AS_DEPLOYED = "+as-deployed"  # the engine label of B4 served as deployed: every adapter on one server
-SHORT_SOURCE = ("refuse", "reduce")
-COLD_PREFIX_CACHE = ("never", "reduced", "always")
+COLD_PREFIX_CACHE = ("never", "always")
 RESET_PREFIX_CACHE = "/reset_prefix_cache"  # vLLM's, registered with VLLM_SERVER_DEV_MODE=1
 
 
@@ -146,8 +144,7 @@ def shuffled_order(n: int, seed: Optional[int]) -> List[int]:
 
 
 def shuffle_pool(payloads: List[dict], seed: Optional[int]) -> List[dict]:
-    """The pool in the order it is replayed (so every level draws from the whole source's mix of call sites,
-    questions and databases)."""
+    """The pool in the seed's order (the warm-up's calls are its first)."""
     return [payloads[i] for i in shuffled_order(len(payloads), seed)]
 
 
@@ -157,40 +154,39 @@ def level_counts(levels: List[int], settings: Dict[str, Any]) -> List[int]:
     return [by_level.get(level, int(settings["request_count"])) for level in levels]
 
 
-def plan_sweep(n: int, warmup: int, levels: List[int], counts: List[int], short_source: str = "refuse",
-               what: str = "the source") -> Dict[str, Any]:
-    """Which calls of a pool of `n` each level replays: the warm-up first, then each level its own `count`
-    after the previous levels', none twice. A pool too small for all of them is refused (`refuse`), or every
-    count is scaled by the same factor, rounded down, and a level left with fewer calls than its concurrency is
-    skipped (`reduce`). Returns {"levels": [{"concurrency", "offset", "count", "configured"}], "skipped",
-    "reduced"}."""
-    if short_source not in SHORT_SOURCE:
-        raise LoadtestError(f"loadtest.short_source must be one of {SHORT_SOURCE}, not {short_source!r}")
-    available, needed = n - warmup, sum(counts)
-    if available <= 0:
-        raise LoadtestError(f"{what} has {n} calls: none is left after the {warmup} warm-up calls")
-    reduced = needed > available
-    if reduced and short_source == "refuse":
-        raise LoadtestError(f"{what} has {n} calls; the warm-up and the levels {levels} need {warmup + needed} without "
-                            f"replaying one (loadtest.short_source: refuse). Lower request_count, or reduce")
-    planned, skipped, offset = [], [], warmup
-    for level, configured in zip(levels, counts):
-        count = configured * available // needed if reduced else configured
-        if reduced and count < level:
-            skipped.append(level)
-            continue
-        planned.append({"concurrency": level, "offset": offset, "count": count, "configured": configured})
-        offset += count
-    if not planned:
-        raise LoadtestError(f"{what} has {n} calls: reduced, no level of {levels} keeps as many calls as its concurrency")
-    return {"levels": planned, "skipped": skipped, "reduced": reduced}
+def largest_remainder(sizes: Dict[str, int], count: int) -> Dict[str, int]:
+    """`count` split over the strata in proportion to their `sizes` (Hamilton's method): each its quota's
+    integer part, then one more to the largest remainders, ties to the smaller stratum name. Never more than a
+    stratum holds."""
+    total = sum(sizes.values())
+    quotas = {k: Fraction(count * n, total) for k, n in sizes.items()}
+    out = {k: int(q) for k, q in quotas.items()}
+    left = count - sum(out.values())
+    for k in sorted(sizes, key=lambda k: (-(quotas[k] - out[k]), str(k)))[:left]:
+        out[k] += 1
+    return {k: min(n, sizes[k]) for k, n in out.items()}
 
 
-def cold_cache(mode: str, reduced: bool) -> bool:
-    """Whether every level of a sweep starts from an empty prefix cache (`loadtest.cold_prefix_cache`)."""
+def draw_level(strata: List[str], count: int, seed: int, index: int) -> Dict[str, Any]:
+    """The pool positions one level replays: `count` of them (all, if the pool holds fewer: `short_pool`), none
+    twice, stratified by cluster (`strata[i]` is position i's) with proportional allocation by largest
+    remainder, each stratum's drawn at random with the level's own seed (`seed` and the level's index). Levels
+    draw independently: a call can come back in a later level, which starts from an empty prefix cache."""
+    rng = random.Random(f"{seed}:{index}")
+    by_stratum: Dict[str, List[int]] = {}
+    for position, stratum in enumerate(strata):
+        by_stratum.setdefault(stratum, []).append(position)
+    taken = largest_remainder({k: len(v) for k, v in by_stratum.items()}, min(count, len(strata)))
+    chosen = [i for k in sorted(by_stratum) for i in rng.sample(by_stratum[k], taken[k])]
+    rng.shuffle(chosen)
+    return {"positions": chosen, "short_pool": count > len(strata), "strata": dict(sorted(taken.items()))}
+
+
+def cold_cache(mode: str) -> bool:
+    """Whether every level starts from an empty prefix cache (`loadtest.cold_prefix_cache`)."""
     if mode not in COLD_PREFIX_CACHE:
         raise LoadtestError(f"loadtest.cold_prefix_cache must be one of {COLD_PREFIX_CACHE}, not {mode!r}")
-    return mode == "always" or (mode == "reduced" and reduced)
+    return mode == "always"
 
 
 def _require_source(source: Dict[str, Any], arm: str, engine: str) -> None:
@@ -468,20 +464,19 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     label = engine + AS_DEPLOYED if as_deployed else engine
     models = ({e: engine_spec(config, e)["model"] for e in sorted({c["engine"] for c in selected["calls"]})}
               if as_deployed else None)
-    # absent, the file order: the seed is a configuration key, and a configuration without it replays as it did
     shuffle_seed = config["seeds"].get("loadtest_shuffle")
-    order = shuffled_order(len(selected["calls"]), shuffle_seed)
-    pool = [selected["calls"][i] for i in order]
+    if shuffle_seed is None:
+        raise LoadtestError("seeds.loadtest_shuffle is not set: each level's draw is seeded")
+    pool = selected["calls"]
     payloads = build_payloads(pool, spec["model"], spec.get("params") or {}, settings["stream"], config["call_sites"],
                               models)
-    warmup = payloads[:min(settings["warmup_request_count"], len(payloads))]
+    strata = [c.get("cluster") or "none" for c in pool]  # B3 does not route: its calls are one stratum
+    warmup = shuffle_pool(payloads, shuffle_seed)[:min(settings["warmup_request_count"], len(payloads))]
     tok = _tokenizer(config, engine, tokenizer)
     vllm = endpoint["kind"] == "vllm"
     levels = list(concurrency or settings["concurrency"])
-    what = f"runs/{source}" + (f" (cluster {selected['traffic']})" if selected["kind"] == "adapter" else "")
-    sweep = plan_sweep(len(payloads), len(warmup), levels, level_counts(levels, settings),
-                       settings.get("short_source", "refuse"), what)
-    cold = cold_cache(settings.get("cold_prefix_cache", "never"), sweep["reduced"])
+    counts = level_counts(levels, settings)
+    cold = cold_cache(settings.get("cold_prefix_cache", "never"))
 
     remote, aiperf = None, None
     if on == "local":
@@ -507,9 +502,10 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     sweep_id = f"sweep-{_slug(label)}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
     context = remote.app.run() if remote else nullcontext()
     with context:
-        for index, planned in enumerate(sweep["levels"]):
-            level, count, offset = planned["concurrency"], planned["count"], planned["offset"]
-            chosen = payloads[offset:offset + count]
+        for index, (level, configured) in enumerate(zip(levels, counts)):
+            drawn = draw_level(strata, configured, shuffle_seed, index)
+            chosen = [payloads[i] for i in drawn["positions"]]
+            count = len(chosen)
             raw = "".join(json.dumps(p, ensure_ascii=False) + "\n" for p in chosen).encode()
             started = datetime.now(timezone.utc)
             run_id = f"loadtest-{_slug(label)}-c{level}-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
@@ -518,7 +514,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
             (run_dir / PAYLOADS).write_bytes(raw)
             manifest = {
                 "run_id": run_id, "type": "loadtest", "sweep_id": sweep_id, "level_index": index,
-                "levels": [p["concurrency"] for p in sweep["levels"]], "levels_skipped": sweep["skipped"],
+                "levels": levels,
                 "engine": label, "model": spec["model"], "models": sorted(models.values()) if models else None,
                 "traffic": selected["traffic"], "traffic_kind": selected["kind"],
                 "cluster": selected["traffic"] if selected["kind"] == "adapter" else None,
@@ -530,12 +526,13 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 "source_status": source_run["status"],
                 "source_calls": len(payloads), "source_calls_all": len(source_run["calls"]),
                 "n_questions": len({c["question_id"] for c in pool}),
-                "composition": {"source": composition(pool), "level": composition(pool[offset:offset + count])},
-                "payload_shuffle_seed": shuffle_seed,  # null: the file order; the offset is in the order replayed
-                "payload_offset": offset, "payloads_repeat": False,  # never: plan_sweep refuses or reduces
+                "composition": {"source": composition(pool),
+                                "level": composition([pool[i] for i in drawn["positions"]])},
+                "strata": drawn["strata"],  # the level's calls per cluster (proportional, largest remainder)
+                "payload_shuffle_seed": shuffle_seed, "level_seed": f"{shuffle_seed}:{index}",
+                "short_pool": drawn["short_pool"],  # the pool holds fewer calls than the level: all of them, once
                 "payloads_sha256": hashlib.sha256(raw).hexdigest(), "concurrency": level,
-                "request_count": count, "request_count_configured": planned["configured"],
-                "request_count_reduced": sweep["reduced"], "cold_prefix_cache": cold,
+                "request_count": count, "request_count_configured": configured, "cold_prefix_cache": cold,
                 "warmup_request_count": len(warmup),
                 "stream": settings["stream"], "tokenizer": tok, "aiperf_version": settings["aiperf_version"],
                 "config_sha256": config_sha256(config), **git_state(),

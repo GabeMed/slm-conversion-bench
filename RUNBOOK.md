@@ -510,10 +510,12 @@ bench judge j8 --loadtest <run> --loadtest <run> --slo-from <B0 calib>
   Run B3 and B4 on calib first.
 - One server serves the base and every adapter (`up` after the last `bench train`), so the sweeps run back
   to back on it.
-- The payload order is `seeds.loadtest_shuffle`'s. A source too small for every level (a small cluster) is
-  refused, or reduced (`loadtest.short_source`), and with `loadtest.cold_prefix_cache` each level of such a
-  sweep starts from an empty prefix cache: vLLM's `POST /reset_prefix_cache`, which `bench serve --on runpod`
-  enables (`VLLM_SERVER_DEV_MODE=1`). A server started before that setting has no route: `down`, then `up`.
+- Each level draws its own calls from the engine's whole pool (`seeds.loadtest_shuffle` and the level's
+  index), stratified by cluster, none twice within a level; a small pool's calls come back in later levels.
+  With `loadtest.cold_prefix_cache: always` every level of every sweep starts from an empty prefix cache:
+  vLLM's `POST /reset_prefix_cache`, which `bench serve --on runpod` enables (`VLLM_SERVER_DEV_MODE=1`). A
+  server started before that setting has no route: `down`, then `up`. A pool smaller than a level is replayed
+  whole and the manifest says so (`short_pool`).
 - On Modal (`--on modal`) the server has no dev routes: a cold sweep stops there.
 - Each `bench loadtest` writes one run per concurrency level. J8 takes every run of every engine,
   each as a `--loadtest`.
@@ -521,8 +523,9 @@ bench judge j8 --loadtest <run> --loadtest <run> --slo-from <B0 calib>
   `cost.slo_from`.
 - J8 stops if one engine has no load level within the SLO. That is a result: the SLM does not meet
   the latency of the API it replaces.
-- B4 and B5 write `routes.jsonl` beside `calls.jsonl`: the router's time per invocation (`route_ms`), which
-  C1's `latency_ms` leaves out.
+- B4 and B5 write `routes.jsonl` beside `calls.jsonl`: the router's time per invocation, which C1's
+  `latency_ms` leaves out (`route_ms`), with the wait for the embedding model's lock (`embed_wait_ms`) and the
+  embedding itself (`embed_ms`) apart. A resumed run copies the lines of the questions it copies.
 
 ### 11. S6: the allocation
 

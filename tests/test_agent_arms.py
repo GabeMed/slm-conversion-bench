@@ -307,7 +307,8 @@ def test_b4_serves_each_call_with_the_adapter_of_its_cluster(monkeypatch, repo):
     routes = [json.loads(line) for line in (run_dir / "routes.jsonl").read_text().splitlines()]
     invocations = {(c["question_id"], c["call_site"], c["invocation_key"], c["cluster"], c["engine"]) for c in calls}
     assert {(r["question_id"], r["call_site"], r["invocation_key"], r["cluster"], r["engine"]) for r in routes} == invocations
-    assert len(routes) == len(invocations) and all(isinstance(r["route_ms"], int) and r["route_ms"] >= 0 for r in routes)
+    assert len(routes) == len(invocations) and all(r["route_ms"] >= 0 and r["embed_ms"] >= 0 for r in routes)
+    assert {r["embed_wait_ms"] for r in routes} == {None}  # the stand-in embedding takes no lock: no wait measured
 
 
 def test_b4_assigns_with_the_pinned_sentence_transformer(monkeypatch, repo, tiny_sentence_transformer):
@@ -318,9 +319,13 @@ def test_b4_assigns_with_the_pinned_sentence_transformer(monkeypatch, repo, tiny
     centroids = write_fact("J5", "centroids", {"embedding": embedding, "clusters": {"c0": anchors[0], "c1": anchors[1]}})
     adapters = adapters_for(choice, centroids, ("c0", "c1"))
     set_config(repo, B4={"choice": rel(choice), "centroids": rel(centroids), "adapters": rel(adapters)})
-    _, manifest, calls = run(monkeypatch, repo, "B4", ("1",))
+    run_dir, manifest, calls = run(monkeypatch, repo, "B4", ("1",))
     assert manifest["status"] == "done"
     fact = json.loads(centroids.read_text())
+    # the real embedding: the wait for its lock and the embedding itself, apart, within the router's time
+    routes = [json.loads(line) for line in (run_dir / "routes.jsonl").read_text().splitlines()]
+    assert routes and all(r["embed_wait_ms"] >= 0 and r["embed_ms"] > 0 for r in routes)
+    assert all(r["embed_wait_ms"] + r["embed_ms"] <= r["route_ms"] + 0.2 for r in routes)
     for call in calls:
         assert call["cluster"] == clusters.assign(call["prompt_messages"], fact)
         assert call["engine"] == f"slm:qwen3-8b+lora:qwen3-8b-{call['cluster']}"

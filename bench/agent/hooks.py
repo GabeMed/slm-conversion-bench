@@ -131,6 +131,8 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
         raise HarnessError("a run is routed by its arm or has a fixed engine, one of the two")
     calls_path.parent.mkdir(parents=True, exist_ok=True)
     calls_path.touch()
+    if arm in ("B4", "B5"):  # the arms whose router embeds
+        _time_embedding()
     prefix = None if few_shot is None else {site: {step: _lc_messages(messages) for step, messages in steps.items()}
                                             for site, steps in few_shot.items()}
     _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, few_shot=prefix,
@@ -199,12 +201,43 @@ def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
     if run.engine:
         chosen = Route(run.engine, None)
     else:
+        _embed_timing.__dict__.clear()
         t0 = time.perf_counter()
         chosen = route(run.arm, call_site, messages, _config)
         if chosen.cluster is not None:  # the router embedded the prompt (B4, B5): its time, outside latency_ms
-            _record_route(run, call_site, key, chosen, int((time.perf_counter() - t0) * 1000))
+            _record_route(run, call_site, key, chosen, t0, time.perf_counter())
     temperature = float(_config["call_sites"][call_site]["temperature"])
     return key, chosen, temperature, chat_model(chosen.engine, temperature)
+
+
+_embed_timing = threading.local()  # this thread's last embedding: when it was asked, got the model's lock, ended
+
+
+def _time_embedding() -> None:
+    """Time the router's embedding from outside it (bench.contracts.clusters is frozen): `embed` is wrapped to
+    record when it is called and when it returns, and `_model`, which `embed` calls once it holds the module's
+    lock, to record when the lock was taken. The wait for the lock is the queue of this process's threads
+    behind one embedding model; the rest is the embedding. Installed once per process, over whatever `embed` is
+    then (a test's stand-in has no lock: its wait is then null)."""
+    from bench.contracts import clusters
+
+    embed, model = clusters.embed, clusters._model
+
+    def timed_embed(texts, embedding):
+        _embed_timing.called = time.perf_counter()
+        try:
+            return embed(texts, embedding)
+        finally:
+            _embed_timing.returned = time.perf_counter()
+
+    def timed_model(embedding):
+        _embed_timing.locked = time.perf_counter()
+        return model(embedding)
+    timed_embed._bench_timed = timed_model._bench_timed = True
+    if not getattr(embed, "_bench_timed", False):
+        clusters.embed = timed_embed
+    if not getattr(model, "_bench_timed", False):
+        clusters._model = timed_model
 
 
 def routes_path(calls_path: Path) -> Path:
@@ -212,13 +245,22 @@ def routes_path(calls_path: Path) -> Path:
     return calls_path.with_name("routes" + calls_path.name[len("calls"):])
 
 
-def _record_route(run: "_RunState", call_site: str, invocation_key: str, chosen: Route, route_ms: int) -> None:
+def _record_route(run: "_RunState", call_site: str, invocation_key: str, chosen: Route, started: float,
+                  ended: float) -> None:
     """One line per routed invocation (not per attempt: a retry is not routed again). `route_ms` is the whole
-    of route(): reading the facts, waiting for the embedding model (one per process, under a lock, so the
-    parallel calls of one CHESS step queue for it) and embedding the prompt. C1's `latency_ms` starts after it."""
+    of route(): reading the facts, waiting for the embedding model and embedding the prompt. Apart:
+    `embed_wait_ms`, the wait for the model's lock (one model per process, so the parallel calls of one CHESS
+    step queue for it: an artifact of this harness), and `embed_ms`, the embedding itself, which J8 adds to the
+    SLM's latency. Null when not measured. C1's `latency_ms` starts after all of it."""
+    timing = _embed_timing.__dict__
+    ms = lambda a, b: round((b - a) * 1000, 1)  # noqa: E731
+    called, locked, returned = timing.get("called"), timing.get("locked"), timing.get("returned")
     line = json.dumps({"run_id": run.run_id, "question_id": run.question_id, "call_site": call_site,
                        "invocation_key": invocation_key, "cluster": chosen.cluster, "engine": chosen.engine,
-                       "route_ms": route_ms})
+                       "route_ms": ms(started, ended),
+                       "embed_wait_ms": ms(called, locked) if called and locked else None,
+                       "embed_ms": (ms(locked, returned) if locked and returned
+                                    else ms(called, returned) if called and returned else None)})
     with run.lock, open(routes_path(run.calls_path), "a") as fh:
         fh.write(line + "\n")
 

@@ -663,10 +663,9 @@ def aiperf_job(world, monkeypatch):
 
 
 def small_sweep(world):
-    """A sweep the 12 calls of the source hold without replaying one: 2 warm-up calls, 5 per level."""
+    """A small sweep over the 12 calls of the source: 2 warm-up calls, 5 per level, the cache left warm."""
     saved = yaml.safe_load(world.config_path.read_text())
-    saved["loadtest"].update(warmup_request_count=2, request_count=5, request_count_by_level={}, short_source="refuse",
-                             cold_prefix_cache="never")
+    saved["loadtest"].update(warmup_request_count=2, request_count=5, request_count_by_level={}, cold_prefix_cache="never")
     world.config_path.write_text(yaml.safe_dump(saved))
 
 

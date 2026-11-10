@@ -77,6 +77,7 @@ def test_the_manifest_records_the_source_the_sessions_and_what_was_discarded(fai
     four = [c for c in source_calls if c["question_id"] == "4"]
     assert resumed["discarded"]["n_calls"] == len(four) > 0 and resumed["discarded"]["question_ids"] == ["4"]
     assert resumed["discarded"]["usage"]["input"] == sum(c["usage"]["input"] or 0 for c in four) > 0  # a failed call has none
+    assert resumed["routes"] is None and "routes" not in resumed["discarded"]  # B0 does not embed: no router time
 
     first, this = manifest["sessions"]
     assert (first["started_at"], first["finished_at"], first["commit"], first["workers"]) == \
@@ -151,3 +152,20 @@ def test_the_cli_resumes(failed, capsys):
                      "--resume-from", source_dir.name]) == 0
     run_dir = paths.RUNS / capsys.readouterr().out.strip().splitlines()[-1].rsplit("/", 1)[-1]
     assert json.loads((run_dir / "manifest.json").read_text())["resumed_from"]["run_id"] == source_dir.name
+
+
+def test_the_router_times_of_the_complete_questions_are_copied_and_their_absence_recorded(tmp_path, monkeypatch):
+    from bench.agent import resume
+
+    monkeypatch.setattr(paths, "RUNS", tmp_path / "runs")
+    source = tmp_path / "runs" / "agent-B4-src"
+    source.mkdir(parents=True)
+    rows = [{"question_id": q, "call_site": "agent_ir", "invocation_key": "ir", "embed_ms": 100.0} for q in ("1", "2", "4")]
+    (source / "routes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    new = tmp_path / "runs" / "agent-B4-new"
+    new.mkdir()
+    assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B4"}, new, {"1", "2"}) == {"copied": 2, "missing": False}
+    assert [json.loads(line)["question_id"] for line in (new / "routes.jsonl").read_text().splitlines()] == ["1", "2"]
+    (source / "routes.jsonl").unlink()  # a routed run from before routes.jsonl existed
+    assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B5"}, new, {"1"}) == {"copied": 0, "missing": True}
+    assert resume.copy_routes({"run_id": "agent-B4-src", "arm": "B3"}, new, {"1"}) is None
