@@ -161,7 +161,9 @@ def _rejected(message, code=400):
     ("Error code: 400 - input length and `max_tokens` exceed context limit: 190000 + 64000 > 200000", 400, "harness"),
     ("Error code: 400 - max_completion_tokens is too large: exceeds the context window", 400, "harness"),
     ("Error code: 400 - This model's maximum context length is 8192 tokens. However, you requested 9000 tokens "
-     "(8000 in the messages, 1000 in the completion).", 400, "model"),
+     "(8000 in the messages, 1000 in the completion).", 400, "harness"),  # the prompt fits: the budget's
+    ("Error code: 400 - This model's maximum context length is 8192 tokens. However, you requested 9500 tokens "
+     "(9000 in the messages, 500 in the completion).", 400, "model"),
     ("Error code: 400 - too many input tokens", 400, "model"),
 ])
 def test_only_a_400_about_the_prompts_length_is_the_models_failure(message, code, classified):
