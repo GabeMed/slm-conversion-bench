@@ -75,7 +75,7 @@ class _RunState:
     arm: Optional[str]
     calls_path: Path
     engine: Optional[str] = None  # a fixed engine (B2, `replay --engine`): the router is not asked
-    few_shot: Optional[Dict[str, List[Any]]] = None  # {call site: messages}; None: cheap_alt is refused
+    few_shot: Optional[Dict[str, Dict[str, List[Any]]]] = None  # {call site: {step: messages}}; None: cheap_alt is refused
     allowed_call_sites: Optional[frozenset] = None  # `test` runs: the registered set (REQ-001)
     question_id: Optional[str] = None
     occurrences: Dict[tuple, int] = field(default_factory=dict)
@@ -119,10 +119,10 @@ def max_workers() -> int:
 
 
 def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Optional[str] = None,
-              few_shot: Optional[Dict[str, List[Dict[str, str]]]] = None,
+              few_shot: Optional[Dict[str, Dict[str, List[Dict[str, str]]]]] = None,
               allowed_call_sites: Optional[List[str]] = None, stop: Any = None) -> None:
     """`engine` fixes the engine of every call (no routing); `few_shot` is the prefix per call site
-    for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site; `stop`
+    and step (bench.agent.few_shot) for `cheap_alt` ({} for none by design); `allowed_call_sites` aborts any other call site; `stop`
     is the flag the worker processes of one run share (set: no further model call)."""
     global _run
     if _config is None:
@@ -131,7 +131,8 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
         raise HarnessError("a run is routed by its arm or has a fixed engine, one of the two")
     calls_path.parent.mkdir(parents=True, exist_ok=True)
     calls_path.touch()
-    prefix = None if few_shot is None else {site: _lc_messages(messages) for site, messages in few_shot.items()}
+    prefix = None if few_shot is None else {site: {step: _lc_messages(messages) for step, messages in steps.items()}
+                                            for site, steps in few_shot.items()}
     _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, few_shot=prefix,
                      allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites),
                      stop=stop)
@@ -200,15 +201,17 @@ def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
     return key, chosen, temperature, chat_model(chosen.engine, temperature)
 
 
-def _prefixed(call_site: str, engine: str, lc_messages: List[Any]) -> List[Any]:
-    """What is sent: B1's few-shot pairs before the prompt whenever the engine is `cheap_alt`."""
+def _prefixed(call_site: str, invocation_key: str, engine: str, lc_messages: List[Any]) -> List[Any]:
+    """What is sent: B1's few-shot pairs before the prompt whenever the engine is `cheap_alt`, those
+    of the invocation's step on an agent call site (bench.agent.few_shot.resolve)."""
     if engine != "cheap_alt":
         return lc_messages
     run = _require_run()
     if run.few_shot is None:
         raise HarnessError("cheap_alt was reached without its few-shot prefix (arms.B1.few_shot): "
                            "the runner must load it before the run starts")
-    return list(run.few_shot.get(call_site, [])) + list(lc_messages)
+    from bench.agent.few_shot import resolve
+    return list(resolve(run.few_shot.get(call_site) or {}, call_site, invocation_key)) + list(lc_messages)
 
 
 # ---------------------------------------------------------------- models
@@ -411,7 +414,7 @@ def _invocation(call_site: str, invocation_key: str, lc_messages: List[Any], int
     _refuse_if_failed(run, call_site)
     messages = _message_dicts(lc_messages)
     key, chosen, temperature, model = _harness(call_site, lambda: _begin(call_site, invocation_key, messages))
-    sent = _harness(call_site, lambda: _prefixed(call_site, chosen.engine, lc_messages))
+    sent = _harness(call_site, lambda: _prefixed(call_site, invocation_key, chosen.engine, lc_messages))
     sent_dicts = _message_dicts(sent)
     http_max_attempts = _config["retries"]["http_max_attempts"]
     failures = {"transport": 0, "parse": 0}

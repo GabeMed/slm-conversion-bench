@@ -157,7 +157,7 @@ def _answer_each(hooks, outcome: Dict[str, Dict], stop: Any,
 
 def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: Path,
                        dataset: List[Dict[str, Any]], db_root: Path, outcome: Dict[str, Dict],
-                       few_shot: Optional[Dict[str, List]] = None,
+                       few_shot: Optional[Dict[str, Dict[str, List]]] = None,
                        allowed_call_sites: Optional[List[str]] = None, part: str = "", stop: Any = None) -> None:
     """Run the patched CHESS on each question, one after another; C1 goes to run_dir/calls<part>.jsonl
     (`part` is empty for a run in one process, `.w<k>` for worker k).
