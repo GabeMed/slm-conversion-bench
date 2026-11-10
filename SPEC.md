@@ -1,9 +1,9 @@
 # SPEC v2 — slm-conversion-bench
 
 **Empirical execution of "Small Language Models are the Future of Agentic AI"**
-(Belcak et al., NVIDIA Research, arXiv 2506.02153, v3 of 22/09/2026)
+(Belcak et al., NVIDIA Research, arXiv 2506.02153, v3 of 2026-09-22)
 
-Version 2.4, of 10/11/2026. v2 is of 30/09/2026 and replaces v1, which remains preserved in `SPEC-v1.md`. v2.1 applies the corrections from a validity audit done before any paid execution (section 11.1). v2.2 swaps the open-weight teacher for a production-grade closed LLM, for cost, before Stage 0 (section 11.2). v2.3 sends the K1 calls through the author's subscription, with the provider's verbal authorization for this project only, also before Stage 0 (section 11.3). v2.4, after Stage 0 (23/10/2026) and before the pre-registration, aligns the spec with the changes declared in `prereg/DEVIATIONS.md`: K1 through the paid API, the training rows of the column filter and of the agent's call sites, the unit of B1's k rule, the Appendix B call floor, the rule for model rejections and the tool-choice parser (section 11.4). Section 11 says what changed and why.
+Version 2.4, of 2026-11-10. v2 is of 2026-09-30 and replaces v1, which remains preserved in `SPEC-v1.md`. v2.1 applies the corrections from a validity audit done before any paid execution (section 11.1). v2.2 swaps the open-weight teacher for a production-grade closed LLM, for cost, before Stage 0 (section 11.2). v2.3 sends the K1 calls through the author's subscription, with the provider's verbal authorization for this project only, also before Stage 0 (section 11.3). v2.4, after Stage 0 (2026-10-23) and before the pre-registration, aligns the spec with the changes declared in `prereg/DEVIATIONS.md`: K1 through the paid API, the training rows of the column filter and of the agent's call sites, the unit of B1's k rule, the Appendix B call floor, the rule for model rejections and the tool-choice parser (section 11.4). Section 11 says what changed and why.
 
 ## How to read this document
 
@@ -85,7 +85,7 @@ Version 2.4, of 10/11/2026. v2 is of 30/09/2026 and replaces v1, which remains p
 - **Logs and training:** the 1,034 BIRD dev questions that are not in Mini-Dev, on the 11 dev databases.
   - ~200 of them are reserved for **calibration**: pilot, selection and thresholds.
   - The remaining ~834 generate the logs.
-  - Questions, evidence and gold come from the 06/11/2025 revision of BIRD dev, on the 2024 databases. Two caveats, measured in the 01/10/2026 audit:
+  - Questions, evidence and gold come from the 2025-11-06 revision of BIRD dev, on the 2024 databases. Two caveats, measured in the 2026-10-01 audit:
     - this revision **changed 85 questions** relative to the previous one, 21 of them in the calibration;
     - its gold is **not** the one corrected by experts: on the 254 test items with identical question and evidence, it disagrees with Plat-SQL's gold on **18.9%** (48 of 254; 95% CI from 14.6% to 24.2%). That is why every verdict is read on the test, and the calibration serves only the pilot, the selection and the thresholds.
 - **Test:** **Arcwise-Plat-SQL**: **498 questions** from BIRD's Mini-Dev, used **as they are in the file** (question, evidence and corrected gold SQL).
@@ -104,7 +104,7 @@ Version 2.4, of 10/11/2026. v2 is of 30/09/2026 and replaces v1, which remains p
 
   Fidelity to the teacher is reported separately, because imitating the teacher is not being right.
 
-**Correction of the agent, by the author's decision (30/09/2026).** In the published CHESS, SQL generation and repair use the **full** schema, and the schema selector's output does not reach them (issues #31 and #34 of the CHESS repository). The POC applies the fix suggested in issue #34: generation and repair now use the **selected schema**. With this, every call site is consequential, as in the design of the CHESS paper. The correction is declared in the report.
+**Correction of the agent, by the author's decision (2026-09-30).** In the published CHESS, SQL generation and repair use the **full** schema, and the schema selector's output does not reach them (issues #31 and #34 of the CHESS repository). The POC applies the fix suggested in issue #34: generation and repair now use the **selected schema**. With this, every call site is consequential, as in the design of the CHESS paper. The correction is declared in the report.
 
 **Adjustments to the agent's harness,** so as not to contaminate the comparison:
 - no automatic fallback to another model;
@@ -193,10 +193,10 @@ Version 2.4, of 10/11/2026. v2 is of 30/09/2026 and replaces v1, which remains p
 - **masking of sensitive data,** executed, with the number of detections reported;
 - **success filter** with a signal available in production, never the gold: the SQL executes without error, the result is not empty and the format is valid;
 - **deduplication**, exact and by near-duplicate;
-- **volume that fits in training:** after the filter and the deduplication, each (question, call site) pair keeps at most N invocations. It is a seeded **uniform** sample, which preserves the distribution of the teacher's decisions. N is fixed in the configuration before registration, and the preflight checks that the largest adapter trains within the overnight window. Coverage before and after the cut is reported: rows per call site and, in the column filter, tables and columns covered per database and the yes/no proportion;
-- **the column filter and the agent's call sites** (choice of the next tool) **go through neither the deduplication nor the per-question cut.** On them, both took the training away from the teacher's distribution: the agent's prompt does not depend on the question, and exact deduplication left one row per distinct (prompt, response) pair, which trained on the rare responses; the cut weighed questions, not calls, at a call site that runs once per database column. The rows come from K1's final attempts that passed the parse, masked:
+- **volume that fits in training:** after the filter and the deduplication, each (question, call site) pair keeps at most N invocations. It is a seeded **uniform** sample, which preserves the distribution of the teacher's decisions. N is fixed in the configuration before registration, and the preflight checks that the largest adapter trains within the overnight window. Coverage before and after the cap is reported: rows per call site and, in the column filter, tables and columns covered per database and the yes/no proportion;
+- **the column filter and the agent's call sites** (choice of the next tool) **go through neither the deduplication nor the per-question cap.** On them, both took the training away from the teacher's distribution: the agent's prompt does not depend on the question, and exact deduplication left one row per distinct (prompt, response) pair, which trained on the rare responses; the cap weighed questions, not calls, at a call site that runs once per database column. The rows come from K1's final attempts that passed the parse, masked:
   - all invocations of the agent's call sites;
-  - in the column filter, a **uniform per-call** sample of 12,000 rows, a number fixed in the registered code (not in the configuration), within the rule of thumb, with the seed `seeds.curation_sample`, recorded with the rule in the datasets manifest. Without a cut, the column filter alone would take from 55 to 113 GPU-hours;
+  - in the column filter, a **uniform per-call** sample of 12,000 rows, a number fixed in the registered code (not in the configuration), within the rule of thumb, with the seed `seeds.curation_sample`, recorded with the rule in the datasets manifest. Without a cap, the column filter alone would take from 55 to 113 GPU-hours;
   - each row goes to the cluster of the centroid nearest to its prompt, the assignment the router makes at run time (S3).
 
 **Deviation.** The paraphrasing of entities and numbers is **not applied**. In text-to-SQL, the values and names are part of the correct answer, and paraphrasing them would break the task. Recorded as a finding about S2 in structured tasks.
@@ -451,7 +451,7 @@ Each one with the corresponding cut action:
 - **The days need not be consecutive** (D26). The project may pause between phases while the next phase's budget is not secured: after the pilot and the projection, before K1, and before the test. The order of this table and the pre-registration before the first test question do not change.
 - **K1 runs through the paid API** (D25), like the calibration and the test: the same teacher calls, with the same parameters, and each one's log with the API's `usage`. No verdict reads its cost or latency.
   - An execution outside the test that stops because of an infrastructure failure (such as the account balance running out) continues in a new execution, which copies the questions the source one completed and answers the others; the source's calls on unfinished questions are discarded, and the manifest records the source and each session. It is a single execution, however many sessions it takes. On the test, resuming and redoing follow 6.1.
-  - The registered one ran like this: 834 training questions, 82,403 recorded calls, seven sessions on 09/11/2026, without the batch API.
+  - The registered one ran like this: 834 training questions, 82,403 recorded calls, seven sessions on 2026-11-09, without the batch API.
 - **If time or budget get tight,** the extensions are cut in reverse order of the list, and then the S6 retraining loop (declared; K4 runs without it).
 - **Never cut:**
   - K2 (the comparison with the untrained path);
@@ -537,27 +537,27 @@ The final texts (report, posts) are written by the author. The development sessi
 | D3 | Protocol fixed beforehand, **with** a pre-registered non-inferiority margin (6.4 and D16). Curves and frontiers are still reported |
 | D4 | Abstract roles, with the concrete choice in the configuration |
 | D5 | The teacher's internal reasoning stays out of the logs |
-| D6 | Production LLM = teacher: a production-grade closed LLM, through the provider's paid API, K1 included (D25); the provider's terms and the author's permission to train on the outputs are recorded in the configuration, with link and date (author, 14/10/2026; until v2.1, an open-weight one) |
+| D6 | Production LLM = teacher: a production-grade closed LLM, through the provider's paid API, K1 included (D25); the provider's terms and the author's permission to train on the outputs are recorded in the configuration, with link and date (author, 2026-10-14; until v2.1, an open-weight one) |
 | D7 | Provider-neutral log schema, with model and version in each record |
 | D8 | Each step's contribution is measured against named alternatives (section 5 and extensions), never by "removing the step" |
 | D9 | Results stratified by difficulty, with all categories reported |
-| D10 | In the core, the only closed LLM is the teacher (D6); the cheap alternative and the SLMs are open-weight. The arm with the frontier closed one is an extension open to contributors (author, 14/10/2026; until v2.1, no closed one in the core) |
+| D10 | In the core, the only closed LLM is the teacher (D6); the cheap alternative and the SLMs are open-weight. The arm with the frontier closed one is an extension open to contributors (author, 2026-10-14; until v2.1, no closed one in the core) |
 | D11 | The single-call fallback is declared as a narrower test (7.4) |
 | D12 | S4: desk triage documented by the paper's 4 criteria, starting from its list (with no preference for it); 2 candidates in the zero-shot; 1 (or 2) in the fine-tuning; pre-registered tie-break |
-| D13 | CHESS is corrected so that generation and repair use the selected schema (CHESS issue #34), declared in the report (author, 30/09/2026) |
-| D14 | The test is Arcwise-Plat-SQL with 498 questions, used as it is in the file; ids 119 and 120 stay out of training and test; not comparable with the EX published on Mini-Dev (author, 30/09/2026) |
-| D15 | In the clusters without per-call gold, B5 chooses by agreement with the teacher (D17's bar), declared as a proxy; the claims in those clusters are end to end only (author, 30/09/2026) |
-| D16 | Fixed non-inferiority margin, Δ = 5 p.p. (2.5 p.p. in the selection); the pilot only gives the planned power (author, 01/10/2026) |
-| D17 | The agreement bar is min(95%, the teacher's agreement with itself − 2 p.p.), per call site; Appendix B is decided by the repair only, and with fewer than `min_calls` repair calls it is "inconclusive" by design (author, 01/10/2026; the floor, 10/11/2026) |
-| D18 | V1 is judged on B4; B5 belongs to A6 (author, 01/10/2026) |
-| D19 | Cost: ratio with CI, three readings (reaches 3×, cheaper below 3×, not cheaper), confirmation at 20% utilization and refutation at 100%, price of the whole container, and the p95 limit by the rule of 6.6 (author, 01/10/2026) |
-| D20 | Each LLM via API runs as the provider delivers it, with the reasoning explicit in the configuration; provider, quantization and checkpoint pinned; a response cut by the token limit is recorded as such (author, 01/10/2026) |
-| D21 | Training volume limited per (question, call site), by a seeded uniform sample, with the coverage reported; in the column filter and the agent's call sites, no deduplication nor per-question cut: all of the agent's invocations and a uniform per-call sample of the column filter, each row in the cluster of the nearest centroid (author, 01/10/2026; these call sites, 10/11/2026) |
-| D22 | Test registry: only completed executions count; registering again requires a documented defect; Stage 0 and an independent timestamp (author, 01/10/2026) |
-| D23 | B1's additional few-shot (k ∈ {0, 3}) is chosen on the pilot by a rule fixed beforehand: k = 3 only if the one-sided 95% lower bound of EX_k3 − EX_k0 (paired bootstrap, the question as the unit) is above zero, with the end-to-end EX on the pilot questions, from two executions of B1 itself in the agent, one with k = 0 and the other with k = 3 (author, 01/10/2026; the unit, 10/11/2026: before, the EX per call on the call sites with gold from two replays of the teacher's execution) |
-| D24 | Objective and constraint: the objective is to validate the paper's thesis; the constraint is the budget. Every correction is the smallest one that closes the finding (author, 01/10/2026) |
-| D25 | K1 runs through the paid API, like the calibration, which gives the SLO, and the test, in a single execution, resumed in sessions if an infrastructure failure stops it; the manifest records each session. No verdict reads K1's cost or latency. The provider's verbal authorization for K1 through the author's subscription (v2.3) was not used (author, 14/10/2026; the subscription, 21/10/2026; the paid API, 09/11/2026) |
-| D26 | The core runs in the phases of 7.3, in its order, on days not necessarily consecutive: the project pauses between phases while the next one's budget is not secured (author, 14/10/2026) |
+| D13 | CHESS is corrected so that generation and repair use the selected schema (CHESS issue #34), declared in the report (author, 2026-09-30) |
+| D14 | The test is Arcwise-Plat-SQL with 498 questions, used as it is in the file; ids 119 and 120 stay out of training and test; not comparable with the EX published on Mini-Dev (author, 2026-09-30) |
+| D15 | In the clusters without per-call gold, B5 chooses by agreement with the teacher (D17's bar), declared as a proxy; the claims in those clusters are end to end only (author, 2026-09-30) |
+| D16 | Fixed non-inferiority margin, Δ = 5 p.p. (2.5 p.p. in the selection); the pilot only gives the planned power (author, 2026-10-01) |
+| D17 | The agreement bar is min(95%, the teacher's agreement with itself − 2 p.p.), per call site; Appendix B is decided by the repair only, and with fewer than `min_calls` repair calls it is "inconclusive" by design (author, 2026-10-01; the floor, 2026-11-10) |
+| D18 | V1 is judged on B4; B5 belongs to A6 (author, 2026-10-01) |
+| D19 | Cost: ratio with CI, three readings (reaches 3×, cheaper below 3×, not cheaper), confirmation at 20% utilization and refutation at 100%, price of the whole container, and the p95 limit by the rule of 6.6 (author, 2026-10-01) |
+| D20 | Each LLM via API runs as the provider delivers it, with the reasoning explicit in the configuration; provider, quantization and checkpoint pinned; a response cut by the token limit is recorded as such (author, 2026-10-01) |
+| D21 | Training volume limited per (question, call site), by a seeded uniform sample, with the coverage reported; in the column filter and the agent's call sites, no deduplication nor per-question cap: all of the agent's invocations and a uniform per-call sample of the column filter, each row in the cluster of the nearest centroid (author, 2026-10-01; these call sites, 2026-11-10) |
+| D22 | Test registry: only completed executions count; registering again requires a documented defect; Stage 0 and an independent timestamp (author, 2026-10-01) |
+| D23 | B1's additional few-shot (k ∈ {0, 3}) is chosen on the pilot by a rule fixed beforehand: k = 3 only if the one-sided 95% lower bound of EX_k3 − EX_k0 (paired bootstrap, the question as the unit) is above zero, with the end-to-end EX on the pilot questions, from two executions of B1 itself in the agent, one with k = 0 and the other with k = 3 (author, 2026-10-01; the unit, 2026-11-10: before, the EX per call on the call sites with gold from two replays of the teacher's execution) |
+| D24 | Objective and constraint: the objective is to validate the paper's thesis; the constraint is the budget. Every correction is the smallest one that closes the finding (author, 2026-10-01) |
+| D25 | K1 runs through the paid API, like the calibration, which gives the SLO, and the test, in a single execution, resumed in sessions if an infrastructure failure stops it; the manifest records each session. No verdict reads K1's cost or latency. The provider's verbal authorization for K1 through the author's subscription (v2.3) was not used (author, 2026-10-14; the subscription, 2026-10-21; the paid API, 2026-11-09) |
+| D26 | The core runs in the phases of 7.3, in its order, on days not necessarily consecutive: the project pauses between phases while the next one's budget is not secured (author, 2026-10-14) |
 
 ### Decisions in configuration, closed before the pilot's zero-shot reading
 - models per role and the operational reserve;
@@ -593,7 +593,7 @@ The final texts (report, posts) are written by the author. The development sessi
 - the data rule was rewritten without the contradiction with the use of a public benchmark;
 - the configuration decisions close before the zero-shot reading.
 
-### 11.1 What changed in v2.1 (01/10/2026)
+### 11.1 What changed in v2.1 (2026-10-01)
 
 Before any paid execution, the design went through a validity audit: each step against the published failure modes and the gold standard of each one. The corrections below are those that prevent a wrong or empty verdict. The rest became a limitation line in the report.
 
@@ -614,7 +614,7 @@ Before any paid execution, the design went through a validity audit: each step a
 | The map did not state the scope | section 5 |
 | "Fair latency" promised an equal load profile, which API and own GPU do not have | 6.7 |
 
-### 11.2 What changed in v2.2 (14/10/2026)
+### 11.2 What changed in v2.2 (2026-10-14)
 
 Before Stage 0, paid probes measured the teacher's cost in the agent. They were 5 training questions, none from the calibration or the test. These executions are not reused: K1 answers the same questions again, as it answers the others. v2.1's open-weight teacher had given way to a frontier closed one, and that one did not fit the budget. The intermediate model of the same line got the same 5 questions right for about 60% of the cost, and K1 in batch costs about half of that.
 
@@ -625,7 +625,7 @@ Before Stage 0, paid probes measured the teacher's cost in the agent. They were 
 | K1 alone was the core's largest spend | 7.3 and D25: K1 in batch, at half price |
 | The core's budget is not entirely secured before the first spend | 7.3 and D26: phases with a pause between them, in the same order |
 
-### 11.3 What changed in v2.3 (21/10/2026)
+### 11.3 What changed in v2.3 (2026-10-21)
 
 The provider denied API credits and verbally authorized, for this project only, K1 to run through the author's subscription. Before Stage 0, the author measured what this changes, again only on training questions. These executions are not reused either: K1 answers the same questions again.
 
@@ -640,38 +640,38 @@ The provider denied API credits and verbally authorized, for this project only, 
 | Claude Code adds context to each call | 7.3 and this section: measured, and the log keeps only the CHESS prompt |
 | The subscription's usage limit interrupts long executions | 7.3: K1 pauses and continues on its own |
 
-### 11.4 What changed after Stage 0 (v2.4, 10/11/2026)
+### 11.4 What changed after Stage 0 (v2.4, 2026-11-10)
 
-Stage 0 (23/10/2026) published the configuration and the verdict rules. After it, each change that can alter a result or its reading is declared in `prereg/DEVIATIONS.md`, with the date, the reason, the moment of the decision and the direction of the effect. That is where the science of each change is recorded. This version only aligns the spec's text with those lines: it adds no rule. Everything comes before the pre-registration, and the difference against the Stage 0 commit remains public.
+Stage 0 (2026-10-23) published the configuration and the verdict rules. After it, each change that can alter a result or its reading is declared in `prereg/DEVIATIONS.md`, with the date, the reason, the moment of the decision and the direction of the effect. That is where the science of each change is recorded. This version only aligns the spec's text with those lines: it adds no rule. Everything comes before the pre-registration, and the difference against the Stage 0 commit remains public.
 
 **Changes to the text in this version:**
-- **K1 through the paid API** (section 3, 7.3, D6 and D25; deviation of 09/11/2026). K1 ran through the paid API, not through the subscription: 834 training questions and 82,403 calls, in a single execution resumed in seven sessions. v2.3's authorization was not used. The logs the SLMs learn from, therefore, do not have the ~530-token context that Claude Code added (section 11.3), and reached the model by the same path as the calibration and the test.
-- **Resuming an execution** (7.3 and D25; deviation of 09/11/2026). An execution stopped by an infrastructure failure continues in a new execution, which copies the completed questions and discards the calls of those that did not finish. Three executions that the results read were resumed this way: K1, B3's pilot on the calibration and B0's pilot on the calibration, which gives the SLO; the SLO's p95 joins the two sessions. On the test, resuming and redoing are those of 6.1, which D3's PR rewrites.
-- **The training rows of the column filter and of the agent's call sites** (S2 and D21; deviation of 10/11/2026). No deduplication nor per-question cut: all of the agent's invocations and a uniform per-call sample of the column filter, each row in the cluster of the nearest centroid. Deduplication and the cut were additions of this project, not the paper's method, and on these call sites they trained on a distribution different from the teacher's. Curation, clustering and the centroids do not change. Decided after reading the base model's calibration and B3's pilot, before evaluating any adapter of these clusters; it changes the training data of the trained arms (B4, B5) and tends to favor them. It replaces the 415-row rule by (step, answer) frequency, declared earlier the same day and never used in an official training.
-- **The unit of B1's k rule** (D23; deviation of 10/11/2026). The rule keeps its form, but moves from the EX per call on two replays of the teacher's execution to the end-to-end EX on the pilot questions, from two executions of B1 itself. Decided after reading the pilot: a replay gives each call the teacher's context and does not see the agent stop before the SQL. The change strengthens B1, the untrained arm, and makes the SLM's verdicts against it harder.
-- **The Appendix B call floor** (section 5 and D17; deviation of 10/11/2026). With fewer than `min_calls` repair calls, the verdict is "inconclusive" by design, the same floor A5 and the selection already use. The teacher hardly repairs on this workload (5 calls on the calibration, 6 in K1). Decided after knowing the result of those 5 calls, before any execution on the test; the floor prevents them from deciding against the SLM and therefore favors the SLM arms in Appendix B.
-- **Model rejections** (section 2; deviation of 09/11/2026). At Stage 0, every 400 or 413 error from the engine was a model failure, except the balance one. Now only the 413, or the 400 that says the prompt alone does not fit in the context, is the model's; the others, including that of a prompt that fits but leaves no room for `max_tokens`, are the harness's. No recorded call changes class.
-- **The tool-choice parser** (section 2; deviation of 10/11/2026, patch 16). The prompt and the other rules do not change, in every arm. B0's pilot and K1 ran with the strict parser: 1 of the pilot's 2,198 tool-choice calls and 3 of K1's 9,167 would pass with the patch.
+- **K1 through the paid API** (section 3, 7.3, D6 and D25; deviation of 2026-11-09). K1 ran through the paid API, not through the subscription: 834 training questions and 82,403 calls, in a single execution resumed in seven sessions. v2.3's authorization was not used. The logs the SLMs learn from, therefore, do not have the ~530-token context that Claude Code added (section 11.3), and reached the model by the same path as the calibration and the test.
+- **Resuming an execution** (7.3 and D25; deviation of 2026-11-09). An execution stopped by an infrastructure failure continues in a new execution, which copies the completed questions and discards the calls of those that did not finish. Three executions that the results read were resumed this way: K1, B3's pilot on the calibration and B0's pilot on the calibration, which gives the SLO; the SLO's p95 pools the two sessions. On the test, resuming and redoing are those of 6.1, which D3's PR rewrites.
+- **The training rows of the column filter and of the agent's call sites** (S2 and D21; deviation of 2026-11-10). No deduplication nor per-question cap: all of the agent's invocations and a uniform per-call sample of the column filter, each row in the cluster of the nearest centroid. Deduplication and the cap were additions of this project, not the paper's method, and on these call sites they trained on a distribution different from the teacher's. Curation, clustering and the centroids do not change. Decided after reading the base model's calibration and B3's pilot, before evaluating any adapter of these clusters; it changes the training data of the trained arms (B4, B5) and tends to favor them. It replaces the 415-row rule by (step, answer) frequency, declared earlier the same day and never used in an official training.
+- **The unit of B1's k rule** (D23; deviation of 2026-11-10). The rule keeps its form, but moves from the EX per call on two replays of the teacher's execution to the end-to-end EX on the pilot questions, from two executions of B1 itself. Decided after reading the pilot: a replay gives each call the teacher's context and does not see the agent stop before the SQL. The change strengthens B1, the untrained arm, and makes the SLM's verdicts against it harder.
+- **The Appendix B call floor** (section 5 and D17; deviation of 2026-11-10). With fewer than `min_calls` repair calls, the verdict is "inconclusive" by design, the same floor A5 and the selection already use. The teacher hardly repairs on this workload (5 calls on the calibration, 6 in K1). Decided after knowing the result of those 5 calls, before any execution on the test; the floor prevents them from deciding against the SLM and therefore favors the SLM arms in Appendix B.
+- **Model rejections** (section 2; deviation of 2026-11-09). At Stage 0, every 400 or 413 error from the engine was a model failure, except the balance one. Now only the 413, or the 400 that says the prompt alone does not fit in the context, is the model's; the others, including that of a prompt that fits but leaves no room for `max_tokens`, are the harness's. No recorded call changes class.
+- **The tool-choice parser** (section 2; deviation of 2026-11-10, patch 16). The prompt and the other rules do not change in any arm. B0's pilot and K1 ran with the strict parser: 1 of the pilot's 2,198 tool-choice calls and 3 of K1's 9,167 would pass with the patch.
 
 **Changes declared in `prereg/DEVIATIONS.md` that are already in the text or do not change it:**
-- **The load test, the latency limit and the SLM's price** (6.6, rewritten together with the change; deviation of 10/11/2026). One p95 limit per sweep, reweighted to its call-site mix; each engine on its own arm's traffic; B4 as deployed; each level with its own calls, stratified, and the prefix cache empty; the router's time added; an engine with no level within the limit is a result; and the condition of the registered provider's price. Before it, the load test already shuffled the calls with `seeds.loadtest_shuffle` before slicing the levels (deviation of 10/11/2026).
-- **Training and serving provider, and the reference GPU** (09/11/2026). The adapters train on a managed fine-tuning service, instead of the registered GPU provider, and serving runs on another provider, with the same inference server, the same weights and the same GPU. The reference GPU became an A100 80GB before the pilot's zero-shot reading, for availability. The accuracy of the SLM arms depends on these adapters; the SLM's cost and p95 are measured on the A100. The spec does not name the GPU or the providers (level rule): the configuration records them.
-- **The sample of B1's examples** (10/11/2026). Each agent step receives examples of the same step, drawn with `seeds.few_shot`. The pilot execution with k = 3 prior to the correction was superseded.
-- **The analysis code's refusals** (10/11/2026). The analysis code and the pre-registration code refuse a choice of B1's k outside today's rule, a replay of the cheap alternative without B1's few-shot, and a pre-registration in which some fact the configuration names (the S4 choice, the centroids, the adapters, the allocation) is missing or not in git. No stored result changes.
+- **The load test, the latency limit and the SLM's price** (6.6, rewritten together with the change; deviation of 2026-11-10). One p95 limit per sweep, reweighted to its call-site mix; each engine on its own arm's traffic; B4 as deployed; each level with its own calls, stratified, and the prefix cache empty; the router's time added; an engine with no level within the limit is a result; and the condition of the registered provider's price. Before it, the load test already shuffled the calls with `seeds.loadtest_shuffle` before slicing the levels (deviation of 2026-11-10).
+- **Training and serving provider, and the reference GPU** (2026-11-09). The adapters train on a managed fine-tuning service, instead of the registered GPU provider, and serving runs on another provider, with the same inference server, the same weights and the same GPU. The reference GPU became an A100 80GB before the pilot's zero-shot reading, for availability. The accuracy of the SLM arms depends on these adapters; the SLM's cost and p95 are measured on the A100. The spec does not name the GPU or the providers (level rule): the configuration records them.
+- **The sample of B1's examples** (2026-11-10). Each agent step receives examples of the same step, drawn with `seeds.few_shot`. The pilot execution with k = 3 prior to the correction was superseded.
+- **The analysis code's refusals** (2026-11-10). The analysis code and the pre-registration code refuse a choice of B1's k outside today's rule, a replay of the cheap alternative without B1's few-shot, and a pre-registration in which some fact the configuration names (the S4 choice, the centroids, the adapters, the allocation) is missing or not in git. No stored result changes.
 - **Failures on the test** (6.1). The rules for resuming and redoing an execution on the test, and the code that may run on it, enter 6.1 with D3's PR and its deviation line; this version does not change 6.1.
 
-**Note of 10/11/2026 on the first line of `prereg/DEVIATIONS.md`.** The line of 09/11/2026 says serving runs at the L40S price on the new provider. The following line, of the same day, changed the reference GPU to the A100 80GB before any cost measurement: the SLM's cost uses the serving provider's price for the A100, and the registered provider's price for the same GPU enters through 6.6's price rule, not the L40S one. Both lines stay as they were written; this note corrects the reading of the first.
+**Note of 2026-11-10 on the first line of `prereg/DEVIATIONS.md`.** The line of 2026-11-09 says serving runs at the L40S price on the new provider. The following line, of the same day, changed the reference GPU to the A100 80GB before any cost measurement: the SLM's cost uses the serving provider's price for the A100, and the registered provider's price for the same GPU enters through 6.6's price rule, not the L40S one. Both lines stay as they were written; this note corrects the reading of the first.
 
 | Problem after Stage 0 | Where the correction is in v2.4 |
 |---|---|
 | The spec sent K1 through the subscription, and it ran through the paid API | section 3, 7.3, D6, D25 and this section |
 | The spec did not say how a stopped execution continues | 7.3, D25 and this section (on the test, 6.1) |
-| Deduplication and the per-question cut took the column filter's and the agent's training away from the teacher's distribution | S2, D21 and this section |
+| Deduplication and the per-question cap took the column filter's and the agent's training away from the teacher's distribution | S2, D21 and this section |
 | B1's k rule, per call over replays, did not see the agent stop before the SQL | D23 and this section |
 | The Appendix B verdict had no floor of repair calls, and the teacher hardly repairs | section 5, D17 and this section |
 | The spec did not say when an engine refusal is the model's, nor that the parser accepts the tool in JSON | section 2 and this section |
 | The header and section 11 did not cite the rewrite of 6.6 | this section |
-| The first line of the deviations speaks of the L40S price | this section (note of 10/11/2026) |
+| The first line of the deviations speaks of the L40S price | this section (note of 2026-11-10) |
 
 ---
 

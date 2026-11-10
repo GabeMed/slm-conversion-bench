@@ -352,7 +352,7 @@ Three phases in about two weeks:
 - **A1–A7** — supporting arguments (Section 3)
 - **AV1–AV3** — alternative views (Section 4)
 - **CA1–CA4** — counter-arguments that support the alternative views (Section 4)
-- **A8–A13** — the paper's replies to the alternative views (Section 4)
+- **A8–A13** — the paper's rebuttals to the alternative views (Section 4)
 - **B1–B3** — barriers to adoption (Section 5)
 - **S1–S6** — steps of the conversion algorithm (Section 6)
 - **D1–D18** — decisions of this project (this section)

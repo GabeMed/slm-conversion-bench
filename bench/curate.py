@@ -39,7 +39,7 @@ source's configuration must record that the teacher's weights license and provid
 training on its outputs (SPEC §3, the do-not-train rule). The output is `runs/curate-<ts>/`:
 `examples.jsonl` and a manifest with the counts. `bench datasets` then splits the examples by the
 S3 clusters (J5) into `train/datasets/<cluster>.jsonl`, in TRL's conversational prompt/completion
-shape (design §5.1, "Training data").
+shape (design §5.1, training data).
 
 **The routed sites' rule** (`bench datasets`; decided after the base model's results and the B3 pilot were
 read, before any c0 or c3 adapter was evaluated). Exact deduplication and the per-question cap are
