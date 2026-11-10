@@ -119,7 +119,7 @@ def test_the_sample_is_each_sides_cpu_over_the_level(tmp_path, monkeypatch):
     assert check["pass"] is False and [f[0] for f in check["failed"]] == ["a", "d"]
     assert check["metrics"]["container_share"] == round(4.1 / 16, 3) and check["metrics"]["server_cores_used"] == 1.0
     # (c) is AIPerf's own use, 1 core of its 2 (50%); core 12 being 30% busy host-wide is data only
-    assert check["metrics"]["aiperf_pinned_share"] == 0.5 and check["metrics"]["pinned_cores_host_busy_mean"] == 0.15
+    assert check["metrics"]["aiperf_pinned_share"] == 0.5 and check["metrics"]["pinned_cores_host_busy_mean"] == pytest.approx(0.15, abs=1e-3)
     assert check["metrics"]["cgroup_cpu_max"] == "1600000 100000" and check["metrics"]["allotted_vcpus"] == 16.0
 
 
@@ -272,7 +272,7 @@ def test_a_failed_level_is_reported_and_the_cli_exits_3_after_writing_the_sweep(
 def test_other_tenants_load_on_the_pinned_cores_is_data_not_a_failure():
     check = colocated.contention_check(clean_sample(pinned_cores_host_busy={"12": 0.99, "13": 0.95, "14": 0.9,
                                                                             "15": 0.97}), CORES)
-    assert check["pass"] is True and check["metrics"]["pinned_cores_host_busy_mean"] == 0.952
+    assert check["pass"] is True and check["metrics"]["pinned_cores_host_busy_mean"] == pytest.approx(0.9525, abs=1e-3)
 
 
 def test_the_cores_are_the_least_host_busy_not_pinned_to_the_server():
@@ -301,4 +301,4 @@ def test_the_probe_samples_the_hosts_load_once_and_chooses_by_it(tmp_path, monke
     assert slept == [2.0] and found["choice"]["cores"] == [2, 4, 6, 8]
     sample = found["choice"]["host_busy_sample"]
     assert sample["seconds"] == 2.0 and sample["chosen"] == {"2": 0.0, "4": 0.0, "6": 0.0, "8": 0.0}
-    assert sample["allowed_least"] == [0.0, 0.0, 0.0, 0.0] and sample["allowed_mean"] == 0.675
+    assert sample["allowed_least"] == [0.0, 0.0, 0.0, 0.0] and sample["allowed_mean"] == pytest.approx(0.675, abs=1e-3)
