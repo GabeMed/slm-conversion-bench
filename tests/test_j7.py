@@ -165,6 +165,15 @@ def cluster_of(c):
     return "c0" if c["call_site"] in GOLD_SITES else "c1"
 
 
+SLM_COST = {"20%": 0.0001, "50%": 0.00004, "100%": 0.00002}
+
+
+def j8_of(costs):
+    """A J8 result with each cluster's adapter at its own cost per request (None: outside its latency limit)."""
+    return write_result("J8", {}, {"engine": "slm:qwen3-8b", "engines": {
+        f"slm:qwen3-8b+lora:qwen3-8b-{c}": {"cost_per_request": cost, "outside_slo": cost is None} for c, cost in costs.items()}})
+
+
 def allocation_world(tmp_path, monkeypatch):
     config_path, config = repo(tmp_path, monkeypatch, {
         "prices": {"as_of": "2026-09-30", "table": {"engine-model": {"provider": "provider-x", "input_per_mtok": 0.5, "cached_input_per_mtok": 0.05,
@@ -189,7 +198,7 @@ def allocation_world(tmp_path, monkeypatch):
     write_run("replay-cheap", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib",
                               **few_shot(config["arms"]["B1"]["few_shot"]["k"])}, cheap)
     per_call_eval("eval-cheap", "replay-cheap", cheap, teacher_ok)  # the teacher's EX exactly
-    j8 = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": {"20%": 0.0001, "50%": 0.00004, "100%": 0.00002}})
+    j8 = j8_of({"c0": SLM_COST, "c1": SLM_COST})
     # the pilot: S4's zero-shot replay of the chosen candidate, before any adapter
     zeroshot = replay(t, "zeroshot-qwen", "slm:qwen3-8b", 0.9)
     write_run("zeroshot-qwen", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "slm:qwen3-8b", "split": "calib"}, zeroshot)
@@ -233,7 +242,7 @@ def test_run_refuses_mismatched_facts_and_missing_settings(tmp_path, monkeypatch
     with pytest.raises(JudgmentError, match="does not record"):
         run_j7(world)
     manifest_path.write_text(__import__("json").dumps(routed))
-    other_j8 = write_result("J8", {}, {"engine": "slm:granite-4.2-8b", "cost_per_request": {"20%": 0.1}})
+    other_j8 = write_result("J8", {}, {"engine": "slm:granite-4.2-8b", "engines": {}})
     with pytest.raises(JudgmentError, match="not the base of these adapters"):
         run_j7((config, centroids, choice, adapters, replays, other_j8, j6))
     config["allocation"]["min_calls"] = None
@@ -342,3 +351,21 @@ def test_the_defaults_are_the_pilot_accessor_and_the_calib_difficulties(tmp_path
     assert set(result["teacher_self_agreement"]["filter_column"]["by_difficulty"]) == {"simple", "moderate", "challenging"}
     with pytest.raises(JudgmentError, match="not on the pilot questions"):  # the first 50 ids are not the pilot
         run_j7(world, pilot_ids=None, difficulty=None)
+
+
+def test_each_cluster_is_priced_at_its_own_adapter_and_never_given_to_one_outside_its_limit(tmp_path, monkeypatch):
+    world = config, centroids, choice, adapters, replays, _, j6 = allocation_world(tmp_path, monkeypatch)
+    dear = j8_of({"c0": SLM_COST, "c1": {u: 1.0 for u in SLM_COST}})
+    result = read_result(run_j7((config, centroids, choice, adapters, replays, dear, j6))[0], "J7")["result"]
+    assert result["clusters"]["c1"]["costs"]["slm"] == pytest.approx(1.0)  # c1's adapter's, not c0's
+    assert result["clusters"]["c1"]["order"] == ["cheap_alt", "slm"]  # dearer now than cheap_alt there
+    assert result["allocation"]["c1"] == "slm"  # still the only engine that passes c1's agreement bar
+    outside = j8_of({"c0": SLM_COST, "c1": None})
+    found = read_result(run_j7((config, centroids, choice, adapters, replays, outside, j6))[0], "J7")["result"]
+    # outside its limit, c1's adapter is never chosen, though it passes: c1 stays with the production LLM
+    assert found["clusters"]["c1"]["evidence"]["slm"]["passes"] is True
+    assert found["allocation"]["c1"] == "production_llm" and "slm" not in found["clusters"]["c1"]["costs"]
+    assert found["clusters"]["c1"]["outside_slo"] is True and found["outside_slo"] == ["c1"]
+    assert found["slm_engines"]["c1"] == "slm:qwen3-8b+lora:qwen3-8b-c1"
+    with pytest.raises(JudgmentError, match="did not measure the adapters"):
+        run_j7((config, centroids, choice, adapters, replays, j8_of({"c0": SLM_COST}), j6))

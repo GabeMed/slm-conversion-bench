@@ -149,3 +149,29 @@ Changes after Stage 0 that can change a result or its interpretation.
   context of 32,768, none of their calls would have triggered it. A prompt that fits but leaves no room for
   max_tokens, which has not occurred, fails the execution as a harness error; if it occurs on test, it is a
   documented defect
+- 2026-11-10 · the load test, J8, J3, J7 and the report redesigned after Stage 0 (bench/loadtest.py,
+  bench/judge/j3.py, j7.py, j8.py, bench/report.py, bench/agent/hooks.py; config.yaml: loadtest,
+  cost.limit_min_calls, cost.limit_pool, modal.gpu_prices_sensitivity), before any load test ran (no J8 result
+  exists). (1) One latency limit rule for every sweep: min(17,000 ms, the teacher's p95 in cost.slo_from reweighted
+  to the sweep's own call-site mix), a weighted inverse-distribution quantile; a call site with fewer than 30
+  teacher calls is pooled (revise, 5 calls, with generate_candidate). It replaces one limit for all engines (3,803
+  ms); with B0's routed mixes as a proxy, the adapters' limits would be 3,566 ms (c0), 7,170 (c1), 4,491 (c2) and
+  2,396 (c3): stricter for c0 and c3 (against the SLM), looser for c1 and c2 (for it). The teacher's own-mix limit
+  is reported as a sensitivity. (2) Each engine replays its own arm's end-to-end calls on calib, not B0's: the base
+  B3's, each adapter the calls B4 sent it; the SLM's traffic carries its own retries and repairs (direction unknown
+  before the runs). (3) B4 is priced by an "as deployed" sweep (one server, the four adapters, B4's mix), no longer
+  by the dearest adapter's (which was against the SLM); B5 and J7 price each cluster at its own adapter's sweep, no
+  longer at the dearest. (4) Each level draws its own calls from the engine's pool, stratified by cluster, or by
+  call site for the base, which is not routed (largest remainder), so a small cluster's calls come back in later
+  levels, and every level of every sweep starts from an empty prefix cache, which lowers throughput (against the
+  SLM); the levels start at concurrency 1 (for it). The cache is emptied with vLLM's /reset_prefix_cache, which
+  needs the serving pod in vLLM's dev mode (VLLM_SERVER_DEV_MODE=1, an environment change of the server, checked by
+  c0's P-4 in that mode). (5) The router's embedding time (the p95 over B4's calib run, whose routes.jsonl J8
+  hashes) is added to the p95 of every sweep the router feeds (the adapters, as deployed) before the limit, against
+  the SLM; the wait for the embedding model's lock, an artifact of one model per worker process, is not added (for
+  it) and is reported; the cost without the addition is a sensitivity. The time is measured by
+  bench/agent/hooks.py, which wraps clusters.embed and clusters._model at runtime (B4 and B5 runs only) solely to
+  time the lock wait and the embedding; the frozen module is not edited. (6) An engine with no level within its
+  limit is a result, not a stop: it has no cost, J7 never allocates its cluster to it, and a cost claim with no SLM
+  arm priced is "not testable at the API's latency". (7) A V3 or A6 confirmation must also hold at Modal's price
+  for the same GPU, CPU and memory billed apart ($3.13/h against RunPod's $1.79/h; against the SLM)

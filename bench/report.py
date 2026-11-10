@@ -85,6 +85,13 @@ Every verdict holds for this workload only: the map opens with a scope line, and
   - AV2 wins (the paper is refuted) only if B1 costs no more than the cheaper SLM arm at the highest
     utilization too; it does not refute if the SLM arm is cheaper at the lowest. The fixed cost and
     its payback (SPEC §6.6) are not a J1–J8 output and are left out, which the row says.
+- **The provider's price and Modal's** (SPEC §6.6): where J3 priced the SLM arms at the sensitivity price too
+  (J8's `modal.gpu_prices_sensitivity`, `standard@<u>@sensitivity`), a V3 or A6 confirmation must also hold
+  at that price: a V3 that meets the bar at the provider's price and is only cheaper at Modal's reads
+  "cheaper"; one that does not hold at Modal's at all, and an A6 not cheaper there, is inconclusive, saying so.
+- **An SLM engine outside its latency limit** (J8's `outside_slo`) has no cost: the arms whose calls ran on
+  it have none, and their cost rows carry the label "no cost within the latency limit"; a cost claim with no
+  SLM arm priced for that reason is "not testable at the API's latency", naming the engines.
 - A7, A2/A3, B2: not measured by J1–J8 in the core; stated as such.
 """
 import hashlib
@@ -126,12 +133,18 @@ def _result(plan: Dict[str, Any], key: str, judgment: str) -> Optional[Dict[str,
     return read_result(path, judgment) if path else None
 
 
-def costs_of(j3: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    """Cost per correct query at standard prices: {"": x} for an API arm, {"20%": x, ...} with an SLM."""
+SENSITIVITY = "@sensitivity"  # J3's suffix of a scenario priced at the sensitivity price (Modal's)
+
+
+def costs_of(j3: Dict[str, Any], sensitivity: bool = False) -> Dict[str, Optional[float]]:
+    """Cost per correct query at standard prices: {"": x} for an API arm, {"20%": x, ...} with an SLM; with
+    `sensitivity`, the SLM's at the sensitivity price ({} when J3 has none; an API arm's is the same)."""
     per_correct = j3["per_correct"]
     if "standard" in per_correct:
         return {"": per_correct["standard"]}
-    return {k.split("@", 1)[1]: v for k, v in per_correct.items() if k.startswith("standard@")}
+    return {k.split("@", 1)[1][:-len(SENSITIVITY)] if sensitivity else k.split("@", 1)[1]: v
+            for k, v in per_correct.items()
+            if k.startswith("standard@") and k.endswith(SENSITIVITY) == sensitivity}
 
 
 def per_arm(evals: Dict[str, str], split: str, ex_table: Callable) -> Dict[str, List[Dict[str, Any]]]:
@@ -366,6 +379,8 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         arms[arm] = {"n": summary["n"], "ex": summary["ex"],
                      "by_difficulty": {d: v["ex"] for d, v in summary["by_difficulty"].items()},
                      "run_id": j3["reads"]["run"]["run_id"], "cost_per_correct": costs_of(cost),
+                     "cost_per_correct_sensitivity": costs_of(cost, sensitivity=True),
+                     "slm_outside_slo": (cost.get("slm_cost_basis") or {}).get("outside_slo") or [],
                      "cost_label": cost["label"], "lower_bound": cost["lower_bound"], "upper_bound": cost["upper_bound"],
                      "cache_not_reported": cost["cache_not_reported"], "slm_cost_basis": basis,
                      "failed_unbilled": cost["failed_unbilled"], "prices_as_of": cost["prices_as_of"],
@@ -448,6 +463,8 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             "registry": registry, "prereg_in_force": in_force,
             "deviations": deviations(ref=remote if split == "test" else "HEAD"), "sources": sources}
     data["cost_ratios"] = cost_ratios(data, by_question, correct, config["seeds"]["bootstrap"], n_boot(config))
+    data["cost_ratios_sensitivity"] = cost_ratios(data, by_question, correct, config["seeds"]["bootstrap"],
+                                                  n_boot(config), sensitivity=True)
     return data
 
 
@@ -495,9 +512,12 @@ def several_of(data, arms: List[str]) -> Optional[str]:
     return f"no verdict (several test runs of one configuration of {', '.join(named)}: {', '.join(runs)})"
 
 
-def _cost(data, arm, u) -> Optional[float]:
-    costs = data["arms"].get(arm, {}).get("cost_per_correct") or {}
-    return costs.get("") if "" in costs else costs.get(u)
+def _cost(data, arm, u, sensitivity: bool = False) -> Optional[float]:
+    found = data["arms"].get(arm, {})
+    costs = found.get("cost_per_correct") or {}
+    if "" in costs:
+        return costs[""]
+    return (found.get("cost_per_correct_sensitivity") or {}).get(u) if sensitivity else costs.get(u)
 
 
 def _passes_v1(data, arm) -> bool:
@@ -536,9 +556,10 @@ def best_untrained(data) -> Tuple[Optional[str], Optional[float]]:
     return (min(options)[1], min(options)[0]) if options else (None, None)
 
 
-def best_slm(data, u) -> Tuple[Optional[str], Optional[float]]:
+def best_slm(data, u, sensitivity: bool = False) -> Tuple[Optional[str], Optional[float]]:
     """The cheapest per correct query, at utilization u, among the SLM arms that are non-inferior to B0."""
-    options = [(c, a) for a in slm_arms(data) if _passes_v1(data, a) for c in [_cost(data, a, u)] if c is not None]
+    options = [(c, a) for a in slm_arms(data) if _passes_v1(data, a) for c in [_cost(data, a, u, sensitivity)]
+               if c is not None]
     return (min(options)[1], min(options)[0]) if options else (None, None)
 
 
@@ -572,7 +593,7 @@ def cost_ratio_ci(bases: Dict[str, Dict[str, Tuple[float, bool]]], slms: Dict[st
 
 
 def cost_ratios(data, by_question: Dict[str, Dict[str, Dict[str, float]]], correct: Dict[str, Dict[str, bool]],
-                seed: int, n_boot: int) -> Dict[str, Dict[str, Any]]:
+                seed: int, n_boot: int, sensitivity: bool = False) -> Dict[str, Dict[str, Any]]:
     """Per configured utilization, V3's cost ratio with its interval: the best arm without training ÷ the
     cheapest SLM arm (T9), each read from J3's `by_question` and J1's answers. `base` and `slm` name the
     arms the full sample chose; the interval is over every arm non-inferior to B0, chosen again in each
@@ -581,11 +602,14 @@ def cost_ratios(data, by_question: Dict[str, Dict[str, Dict[str, float]]], corre
     base, _ = best_untrained(data)
     pairs = lambda arm, scenario: {q: (by_question[arm][q][scenario], correct[arm][q]) for q in correct[arm]}  # noqa: E731
     untrained = {a: pairs(a, "standard") for a in present(data, UNTRAINED) if _passes_v1(data, a)}
+    suffix = SENSITIVITY if sensitivity else ""
     for u in data["utilizations"]:
-        slm, _ = best_slm(data, u)
+        slm, _ = best_slm(data, u, sensitivity)
         if base is None or slm is None:
             continue
-        trained = {a: pairs(a, f"standard@{u}") for a in slm_arms(data) if _passes_v1(data, a)}
+        # an arm without a cost here (an engine outside its latency limit, or no sensitivity price) is left out
+        trained = {a: pairs(a, f"standard@{u}{suffix}") for a in slm_arms(data) if _passes_v1(data, a)
+                   and _cost(data, a, u, sensitivity) is not None}
         out[u] = {"base": base, "slm": slm, **cost_ratio_ci(untrained, trained, seed, n_boot)}
     return out
 
@@ -633,6 +657,9 @@ def cost_labels(data, used: List[str]) -> List[str]:
             labels.add(f"upper bound (cache not reported for {found['cache_not_reported']} calls of {arm})")
         if found.get("slm_cost_basis") and found["slm_cost_basis"] != "measured":
             labels.add(f"{found['slm_cost_basis']} ({arm})")
+        if found.get("slm_outside_slo"):
+            labels.add(f"no cost within the latency limit: {', '.join(found['slm_outside_slo'])} sustain no load level "
+                       f"within it ({arm})")
     return sorted(labels)
 
 
@@ -722,6 +749,17 @@ def claims_map(data: Dict[str, Any]) -> List[Dict[str, str]]:
     return rows
 
 
+def outside_slo(data, arms: List[str]) -> Optional[str]:
+    """The verdict of a cost claim none of whose SLM arms has a cost because its engines sustain no load level
+    within their latency limit (J8's `outside_slo`); None when an SLM arm of `arms` has a cost, or the reason
+    is another."""
+    priced = [a for a in arms if any(c is not None for c in (data["arms"][a].get("cost_per_correct") or {}).values())]
+    engines = sorted({e for a in arms for e in data["arms"][a].get("slm_outside_slo") or []})
+    if priced or not engines:
+        return None
+    return f"not testable at the API's latency ({', '.join(engines)} sustain no load level within the p95 limit)"
+
+
 def _bracket(data) -> Tuple[str, str]:
     """The lowest and the highest configured utilization: the SLM's worst and best case (T10). A cost
     claim confirms only if it holds at the lowest and refutes only if it fails at the highest."""
@@ -738,6 +776,9 @@ def _a6(data, t5) -> Dict[str, str]:
     base, base_cost = best_untrained(data)
     at_low, at_high = _cost(data, "B5", low), _cost(data, "B5", high)
     quality = f"{_against_b0('B5', t5)}, {outcome(t5)}"
+    latency = outside_slo(data, present(data, ["B5"]))
+    if latency:
+        return {**row, "result": quality, "verdict": cost_verdict(data, latency, arms)}
     if at_low is None or at_high is None or base_cost is None:
         return {**row, "result": quality, "verdict": cost_verdict(data, "no data", arms)}
     if "B5" not in slm_arms(data):  # allocated to an SLM, and no call reached one: an LLM system all the same
@@ -751,7 +792,12 @@ def _a6(data, t5) -> Dict[str, str]:
     elif at_low >= base_cost:
         verdict = f"utilization-dependent ({tipping_point(data, ['B5'], base_cost)})"
     elif _passes_v1(data, "B5"):
-        verdict = f"confirms (B5 is cheaper even at {low} utilization, and non-inferior to B0)"
+        at_low_modal = _cost(data, "B5", low, sensitivity=True)
+        if data["arms"]["B5"].get("cost_per_correct_sensitivity") and (at_low_modal is None or at_low_modal >= base_cost):
+            verdict = (f"inconclusive (B5 is cheaper at {low} utilization at the provider's price, not at Modal's: "
+                       f"{_usd(at_low_modal)})")
+        else:
+            verdict = f"confirms (B5 is cheaper even at {low} utilization, and non-inferior to B0)"
     else:
         verdict = _inconclusive(t5)
     return {**row, "result": result, "verdict": cost_verdict(data, verdict, arms)}
@@ -775,6 +821,10 @@ def _v3(data, t4, t5) -> Dict[str, str]:
     result = (f"cost per correct query, the best arm without training ÷ the cheapest SLM arm non-inferior to B0, per "
               f"utilization: {result or '—'}")
     passing = [a for a in slm_arms(data) if _passes_v1(data, a)]
+    modal = {u: cost_reading(found, bar) for u, found in (data.get("cost_ratios_sensitivity") or {}).items()}
+    latency = outside_slo(data, slm_arms(data))
+    if latency and base is not None:
+        return {**row, "result": result, "verdict": cost_verdict(data, latency, arms)}
     if base is not None and slm_arms(data) and all(outcome(data["tests"].get(f"B0|{a}")) == "worse" for a in slm_arms(data)):
         # decided on quality: no cost, and so no cost label, changes it
         return {**row, "result": result, "verdict": several_of(data, arms) or "not testable (every SLM arm is worse than B0)"}
@@ -784,10 +834,15 @@ def _v3(data, t4, t5) -> Dict[str, str]:
         verdict = f"{_inconclusive(t4, t5)} (no SLM arm is non-inferior to B0)"
     elif low not in ratios or high not in ratios:
         verdict = "no data"
-    elif readings[low] == "meets":
+    elif readings[low] in ("meets", "cheaper") and modal and modal.get(low) not in ("meets", "cheaper"):
+        # a confirmation holds at Modal's price too, or it is none (SPEC §6.6)
+        verdict = (f"inconclusive (at {low} utilization: {end[readings[low]]} at the provider's price, "
+                   f"{end.get(modal.get(low), 'no data')} at Modal's)")
+    elif readings[low] == "meets" and (not modal or modal[low] == "meets"):
         verdict = f"meets the paper's {bar:g}× bar (even at {low} utilization)"
-    elif readings[low] == "cheaper":
-        verdict = f"cheaper even at {low} utilization, below the {bar:g}× bar there"
+    elif readings[low] in ("meets", "cheaper"):
+        verdict = f"cheaper even at {low} utilization, below the {bar:g}× bar there" + (
+            f" (the bar is met at the provider's price, not at Modal's)" if readings[low] == "meets" else "")
     elif readings[high] == "refutes":
         verdict = f"refutes V3 (not cheaper even at {high} utilization)"
     elif readings[low] == "refutes" and readings[high] != "inconclusive":  # decided at both ends, in opposite ways

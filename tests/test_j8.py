@@ -16,9 +16,10 @@ def settings(cap_ms=1000, gpu_per_hour=0.8, cpu=0.0, memory=0.0):
     """Overrides of the shipped configuration: the SLO cap, no SLO execution fixed yet (the shipped one
     names the real pilot's; each test names its own), and the prices of an L4 container (CPU and memory
     free unless a test prices them, so the GPU's price is the container's)."""
-    return {"cost": {"p95_slo_cap_ms": cap_ms, "slo_from": None},
+    return {"cost": {"p95_slo_cap_ms": cap_ms, "slo_from": None, "limit_min_calls": 1, "limit_pool": {}},
             "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": gpu_per_hour / 3600},
-                                     "cpu_usd_per_core_s": cpu, "memory_usd_per_gib_s": memory}}}
+                                     "cpu_usd_per_core_s": cpu, "memory_usd_per_gib_s": memory},
+                      "gpu_prices_sensitivity": None}}  # none, unless a test prices one
 
 
 def pilot(latencies_ms=(5000,), run_id=PILOT, **manifest):
@@ -34,9 +35,13 @@ def export(p95_ms, rps):
             "request_throughput": {"unit": "requests/sec", "avg": rps}}
 
 
-def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b", gpu="L4", cache=True, sweep=None):
+def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b", gpu="L4", cache=True, sweep=None,
+             sites=None, kind="base", source=None):
+    """One level as F3 writes it: its sweep's pool by call site (`sites`), its traffic kind, its source run."""
     write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": gpu, "concurrency": concurrency, "prefix_cache": cache,
-                       "sweep_id": sweep or f"sweep-{engine}"}, files={j8.EXPORT: export(p95_ms, rps)})
+                       "sweep_id": sweep or f"sweep-{engine}", "traffic_kind": kind, "source_run_id": source,
+                       "composition": {"source": {"call_sites": sites or {"select_tables": 100}}}},
+              files={j8.EXPORT: export(p95_ms, rps)})
     return run_id
 
 
@@ -47,8 +52,13 @@ def test_sustained_throughput_is_the_best_within_the_bound():
     result = j8.judge(levels, 0.80, 1000, [0.2, 0.5, 1.0])
     assert result["sustained"]["concurrency"] == 8 and result["requests_per_hour"] == 36000
     assert result["cost_per_request"] == pytest.approx({"20%": 0.80 / 7200, "50%": 0.80 / 18000, "100%": 0.80 / 36000})
-    with pytest.raises(JudgmentError, match="no load level"):
-        j8.judge(levels, 0.80, 100, [0.5])
+    assert result["outside_slo"] is False
+    # the router's time is added to each level's p95: 900 + 150 is over 1000, so level 1 is the one sustained
+    assert j8.judge(levels, 0.80, 1000, [1.0], added_ms=150)["sustained"]["concurrency"] == 1
+    # no level within the limit is a result: the engine sustains none, and has no cost
+    outside = j8.judge(levels, 0.80, 100, [0.5])
+    assert outside["outside_slo"] is True and outside["levels"] == levels and outside["p95_slo_ms"] == 100
+    assert (outside["sustained"], outside["requests_per_hour"], outside["cost_per_request"]) == (None, None, None)
 
 
 def test_units_are_checked():
@@ -68,7 +78,8 @@ def test_run_reads_loadtests_and_pre_registered_settings(tmp_path, monkeypatch):
     assert result["result"]["gpu_prices_as_of"] == "2026-09-30"
     assert set(result["reads"]["loadtests"]) == set(runs)
     assert result["reads"]["slo_from"]["run_id"] == PILOT
-    assert result["reads"]["config"] == ["cost.p95_slo_cap_ms", "cost.slo_from", "cost.utilizations", "modal.gpu_prices",
+    assert result["reads"]["config"] == ["cost.limit_min_calls", "cost.limit_pool", "cost.p95_slo_cap_ms", "cost.slo_from",
+                                         "cost.utilizations", "modal.gpu_prices", "modal.gpu_prices_sensitivity",
                                          "serving.cpu", "serving.memory_gib"]  # the configuration keys J8 read
     loadtest("loadtest-other", 4, 500, 5.0, engine="slm:granite-4.2-8b")
     with pytest.raises(JudgmentError, match="one base"):
@@ -115,9 +126,10 @@ def test_the_slo_is_the_stricter_of_the_cap_and_the_llms_own_p95(tmp_path, monke
     assert (fast["slo"]["llm_p95_ms"], fast["slo"]["slo_ms"]) == (500.0, 500.0)
     assert fast["engines"]["slm:qwen3-8b"]["sustained"]["concurrency"] == 1
     assert fast["cost_per_request"]["100%"] == pytest.approx(0.8 / (2.0 * 3600))
-    # no level answers as fast as the LLM: no sustained throughput, never a silent fall back to the cap
-    with pytest.raises(JudgmentError, match="no load level keeps p95 within 300.0 ms"):
-        j8.run(runs, config, slo_from=pilot([300] * 20, "pilot-faster"))
+    # no level answers as fast as the LLM: no sustained throughput and no cost, never a silent fall back to the cap
+    faster = read_result(j8.run(runs, config, slo_from=pilot([300] * 20, "pilot-faster")), "J8")["result"]
+    assert faster["engines"]["slm:qwen3-8b"]["outside_slo"] is True and faster["cost_per_request"] is None
+    assert faster["outside_slo"] == ["slm:qwen3-8b"] and faster["combined"]["outside_slo"] == ["slm:qwen3-8b"]
 
 
 def test_the_llms_p95_is_over_the_first_attempts_of_a_done_b0_run_on_calib(tmp_path, monkeypatch):
@@ -127,7 +139,9 @@ def test_the_llms_p95_is_over_the_first_attempts_of_a_done_b0_run_on_calib(tmp_p
     spread = read_result(j8.run(runs, config, slo_from=pilot([700, 100, 200, 300, 400, 500, 600, 800, 900, 5000], "pilot-spread")),
                          "J8")["result"]
     assert spread["slo"] == {"cap_ms": 10000, "llm_p95_ms": 3155.0, "slo_ms": 3155.0, "first_attempts": 10}
-    assert spread["engines"]["slm:qwen3-8b"]["sustained"]["concurrency"] == 4  # 3000 ms is within it, 4000 ms is not
+    # the sweep's limit is the weighted quantile (inverse distribution): with 10 calls, the 10th, 5000 ms
+    assert spread["engines"]["slm:qwen3-8b"]["limit"]["slo_ms"] == 5000.0
+    assert spread["engines"]["slm:qwen3-8b"]["sustained"]["concurrency"] == 8  # 4000 ms is within it
     first = call("pilot-retries", "1", "select_tables", latency_ms=1000, parsed_ok=False)
     retry = call("pilot-retries", "1", "select_tables", latency_ms=9000, attempt=2, retry_of=first["call_id"])
     failed = call("pilot-retries", "2", "select_tables", latency_ms=3500, response=None, parsed_ok=False)
@@ -170,10 +184,15 @@ def test_the_price_is_the_containers_gpu_cpu_and_memory(tmp_path, monkeypatch):
 
 def test_the_shipped_configuration_prices_the_container_all_in(tmp_path, monkeypatch):
     _, config = repo(tmp_path, monkeypatch)
-    assert config["cost"]["p95_slo_cap_ms"] == 17000 and config["loadtest"]["concurrency"] == [4, 8, 16, 32, 64, 128]
+    assert config["cost"]["p95_slo_cap_ms"] == 17000 and config["loadtest"]["concurrency"] == [1, 2, 4, 8, 16, 32, 64, 128]
+    assert (config["cost"]["limit_min_calls"], config["cost"]["limit_pool"]) == (30, {"revise": "generate_candidate"})
+    assert config["loadtest"]["cold_prefix_cache"] == "always"
     per_second = j8.container_price(config, config["serving"]["gpu"])  # RunPod's A100 80GB PCIe pod
     assert per_second == pytest.approx({"gpu": 0.000497, "cpu": 0, "memory": 0})  # CPU and RAM bundled in the pod
     assert sum(per_second.values()) * 3600 == pytest.approx(1.7892)  # US$1.79/h, the pod's price
+    # the sensitivity: Modal's price for the same GPU, its CPU and memory billed apart
+    modal = j8.container_price(config, config["serving"]["gpu"], "gpu_prices_sensitivity")
+    assert sum(modal.values()) * 3600 == pytest.approx((0.000694 + 8 * 0.0000131 + 32 * 0.00000222) * 3600)
 
 
 def test_adapters_are_measured_apart_and_combined_by_the_stated_rule(tmp_path, monkeypatch):
@@ -187,8 +206,10 @@ def test_adapters_are_measured_apart_and_combined_by_the_stated_rule(tmp_path, m
     assert result["engines"]["slm:qwen3-8b+lora:c0"]["sustained"]["throughput_rps"] == 10.0
     # combined: the dearer engine's cost per request (c1 sustains 5 rps)
     assert result["cost_per_request"]["100%"] == pytest.approx(0.8 / (5.0 * 3600))
-    assert result["combined"] == {"rule": "the highest cost per request among the engines measured",
-                                  "engines": ["slm:qwen3-8b+lora:c0", "slm:qwen3-8b+lora:c1"], "loadtests": sorted(runs),
+    assert result["combined"] == {"rule": "the highest cost per request among the engines measured, none if one is "
+                                          "outside its limit; B4 as deployed apart",
+                                  "engines": ["slm:qwen3-8b+lora:c0", "slm:qwen3-8b+lora:c1"], "outside_slo": [],
+                                  "loadtests": sorted(runs),
                                   "sweeps": ["sweep-slm:qwen3-8b+lora:c0", "sweep-slm:qwen3-8b+lora:c1"]}
 
 
@@ -248,3 +269,119 @@ def test_the_configuration_refuses_an_unusable_slo_cap_price_or_memory(tmp_path,
     free["modal"]["gpu_prices"].update(cpu_usd_per_core_s=0, memory_usd_per_gib_s=0.0)  # a price may be zero
     del free["cost"]["p95_slo_cap_ms"]  # a key that is absent is J8's to refuse, when it runs
     assert validate_config(free) == []
+
+
+# ---------------------------------------------------------------- one limit rule: the teacher reweighted to the sweep
+
+def mixed_pilot(run_id="pilot-mixed"):
+    """The teacher's first attempts: 40 select_tables at 1000 ms, 40 generate_candidate at 9000 ms, 2 revise
+    at 20000 ms (too few on their own: pooled with generate_candidate)."""
+    calls = ([call(run_id, f"s{q}", "select_tables", latency_ms=1000) for q in range(40)]
+             + [call(run_id, f"g{q}", "generate_candidate", latency_ms=9000) for q in range(40)]
+             + [call(run_id, f"r{q}", "revise", latency_ms=20000) for q in range(2)])
+    write_run(run_id, {"type": "agent", "arm": "B0", "split": "calib"}, calls)
+    return run_id
+
+
+def test_the_weighted_quantile_is_the_inverse_of_the_weighted_distribution():
+    from fractions import Fraction
+
+    assert j8.weighted_quantile([1, 2, 3], [Fraction(1)] * 3) == 3.0  # 95% of 3 is reached at the third
+    assert j8.weighted_quantile([3, 1, 2], [Fraction(1), Fraction(97), Fraction(2)]) == 1.0  # 97% at the first
+    assert j8.weighted_quantile([5, 1], [Fraction(1, 20), Fraction(19, 20)]) == 1.0  # exactly 95%: reached
+
+
+def test_each_sweeps_limit_is_the_teachers_p95_reweighted_to_its_own_call_site_mix(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {**settings(cap_ms=17000)})
+    config["cost"].update(limit_min_calls=30, limit_pool={"revise": "generate_candidate"})
+    runs = [loadtest("a-8", 8, 900, 10.0, engine="slm:qwen3-8b+lora:c1", sites={"select_tables": 100}),
+            loadtest("b-8", 8, 8000, 5.0, engine="slm:qwen3-8b+lora:c2",
+                     sites={"select_tables": 10, "generate_candidate": 80, "revise": 10})]
+    result = read_result(j8.run(runs, config, slo_from=mixed_pilot()), "J8")["result"]
+    a, b = (result["engines"][e]["limit"] for e in ("slm:qwen3-8b+lora:c1", "slm:qwen3-8b+lora:c2"))
+    # all select_tables: the teacher's select_tables alone, 1000 ms
+    assert (a["weighted_p95_ms"], a["slo_ms"], a["shares"]) == (1000.0, 1000.0, {"select_tables": 1.0})
+    # 10% select_tables, 90% the SQL generation (revise pooled with generate_candidate: 42 calls weigh 0.9)
+    assert b["shares"] == {"generate_candidate": 0.9, "select_tables": 0.1} and b["pooled"] == {"revise": "generate_candidate"}
+    assert b["n"] == {"generate_candidate": 40, "revise": 2, "select_tables": 40}
+    # cumulative weight: 0.1 through the select_tables calls, 0.957 through the generate_candidate ones: 9000 ms
+    assert b["weighted_p95_ms"] == 9000.0 and b["slo_ms"] == 9000.0
+    # the teacher's own mix (equal weights) is the sensitivity: 82 calls, the 78th, 9000 ms for both sweeps
+    assert b["unweighted_p95_ms"] == 9000.0 and a["unweighted_slo_ms"] == 9000.0
+    assert result["engines"]["slm:qwen3-8b+lora:c1"]["outside_slo"] is False
+    assert result["engines"]["slm:qwen3-8b+lora:c1"]["unweighted_limit"]["outside_slo"] is False
+    # a rare call site with no pool is refused, never weighed on 2 calls
+    config["cost"]["limit_pool"] = {}
+    with pytest.raises(JudgmentError, match="call site revise has 2 teacher calls"):
+        j8.run(runs, config, slo_from="pilot-mixed")
+
+
+def routed_source(run_id="agent-B4-calib", embeds=(100.0,) * 19 + (300.0,), waits=(5000.0,) * 20):
+    write_run(run_id, {"type": "agent", "arm": "B4", "split": "calib"}, [],
+              files={"routes.jsonl": [{"question_id": str(i), "embed_ms": e, "embed_wait_ms": w}
+                                      for i, (e, w) in enumerate(zip(embeds, waits))]})
+    return run_id
+
+
+def test_the_routers_embedding_time_is_added_to_a_routed_sweep_and_never_its_queue(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, settings(cap_ms=5000))
+    pilot([1000] * 20)
+    source = routed_source()
+    runs = [loadtest("c0-1", 1, 850, 2.0, engine="slm:qwen3-8b+lora:c0", kind="adapter", source=source),
+            loadtest("c0-8", 8, 950, 10.0, engine="slm:qwen3-8b+lora:c0", kind="adapter", source=source),
+            loadtest("base-8", 8, 950, 10.0, engine="slm:qwen3-8b", kind="base")]
+    result = read_result(j8.run(runs, config, slo_from=PILOT), "J8")
+    adapter, base = result["result"]["engines"]["slm:qwen3-8b+lora:c0"], result["result"]["engines"]["slm:qwen3-8b"]
+    # p95 of the embedding: 100 + 0.05 x 200 = 110 ms; the 5000 ms waits for the lock are reported, not added
+    routes_sha256 = hashlib.sha256((tmp_path / "runs" / source / "routes.jsonl").read_bytes()).hexdigest()
+    assert adapter["router"] == {"run_id": source, "routes_sha256": routes_sha256, "n": 20,
+                                 "embed_p95_ms": pytest.approx(110.0), "embed_wait_p95_ms": 5000.0}
+    assert adapter["added_ms"] == pytest.approx(110.0) and adapter["sustained"]["concurrency"] == 1  # 950 + 110 > 1000
+    assert adapter["without_router"]["sustained"]["concurrency"] == 8  # the sensitivity: without the addition
+    assert (base["router"], base["added_ms"], base["sustained"]["concurrency"]) == (None, 0.0, 8)  # B3 is not routed
+    # what J8 read of the source: its manifest and the routes.jsonl itself, each hashed
+    assert result["reads"]["routes"][source]["run_id"] == source
+    assert result["reads"]["routes"][source]["routes.jsonl"] == routes_sha256
+    write_run("agent-B4-old", {"type": "agent", "arm": "B4", "split": "calib"}, [])
+    loadtest("old-8", 8, 900, 10.0, engine="slm:qwen3-8b+lora:c1", kind="adapter", source="agent-B4-old")
+    with pytest.raises(JudgmentError, match="has no routes.jsonl"):
+        j8.run(runs + ["old-8"], config, slo_from=PILOT)
+
+
+def test_b4_as_deployed_is_judged_apart_from_the_combination(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, settings(cap_ms=5000))
+    pilot([1000] * 20)
+    source = routed_source(embeds=(10.0,) * 20)
+    runs = [loadtest("c0-8", 8, 900, 10.0, engine="slm:qwen3-8b+lora:c0", kind="adapter", source=source),
+            loadtest("dep-8", 8, 900, 4.0, engine="slm:qwen3-8b+as-deployed", kind="as_deployed", source=source)]
+    result = read_result(j8.run(runs, config, slo_from=PILOT), "J8")["result"]
+    assert result["engine"] == "slm:qwen3-8b" and result["combined"]["engines"] == ["slm:qwen3-8b+lora:c0"]
+    assert result["cost_per_request"]["100%"] == pytest.approx(0.8 / (10.0 * 3600))  # not the as-deployed sweep's
+    deployed = result["as_deployed"]["slm:qwen3-8b+as-deployed"]
+    assert deployed["added_ms"] == 10.0 and deployed["cost_per_request"]["100%"] == pytest.approx(0.8 / (4.0 * 3600))
+
+
+def test_one_engine_outside_its_limit_leaves_the_others_judged(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, settings(cap_ms=1000))
+    pilot([1000] * 20)
+    runs = [loadtest("c0-8", 8, 900, 10.0, engine="slm:qwen3-8b+lora:c0"),
+            loadtest("c1-8", 8, 3000, 5.0, engine="slm:qwen3-8b+lora:c1")]
+    result = read_result(j8.run(runs, config, slo_from=PILOT), "J8")["result"]
+    assert result["engines"]["slm:qwen3-8b+lora:c0"]["cost_per_request"]["100%"] == pytest.approx(0.8 / 36000)
+    assert result["outside_slo"] == ["slm:qwen3-8b+lora:c1"] and result["cost_per_request"] is None
+
+
+def test_every_cost_is_also_given_at_the_sensitivity_price(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, settings(gpu_per_hour=1.79))
+    config["serving"].update(cpu=8, memory_gib=32)
+    config["modal"]["gpu_prices_sensitivity"] = {"as_of": "2026-11-09", "provider": "modal",
+                                                 "usd_per_s": {"L4": 0.000694}, "cpu_usd_per_core_s": 0.0000131,
+                                                 "memory_usd_per_gib_s": 0.00000222}
+    result = read_result(j8.run([loadtest("lt-8", 8, 900, 10.0)], config, slo_from=pilot()), "J8")["result"]
+    modal_hour = (0.000694 + 8 * 0.0000131 + 32 * 0.00000222) * 3600
+    assert result["sensitivity"]["price_per_hour"] == pytest.approx(modal_hour) and result["sensitivity"]["provider"] == "modal"
+    assert result["cost_per_request_sensitivity"]["20%"] == pytest.approx(modal_hour / (10.0 * 3600 * 0.2))
+    assert result["cost_per_request"]["20%"] == pytest.approx(1.79 / (10.0 * 3600 * 0.2))
+    del config["modal"]["gpu_prices_sensitivity"]
+    plain = read_result(j8.run(["lt-8"], config, slo_from=PILOT), "J8")["result"]
+    assert "sensitivity" not in plain and "cost_per_request_sensitivity" not in plain["engines"]["slm:qwen3-8b"]

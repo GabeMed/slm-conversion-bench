@@ -236,6 +236,12 @@ modal:
     # Modal's price for the same GPU (modal.com/pricing, fetched 2026-11-09), J8's sensitivity: A100-80GB 0.000694
     # per GPU-second, CPU 0.0000131 per core-second, memory 0.00000222 per GiB-second (before this deviation, on
     # 2026-09-30: L40S 0.000542, H100 0.001097)
+  gpu_prices_sensitivity:      # that price, which J8 reads: every cost is given at it too, and a V3 or A6 confirmation
+    as_of: "2026-11-09"        # must hold at both prices (SPEC 6.6). Modal bills CPU and memory apart: at serving.cpu
+    provider: modal            # and serving.memory_gib the container is $3.13/h, against the pod's $1.79/h
+    usd_per_s: {A100-80GB: 0.000694}
+    cpu_usd_per_core_s: 0.0000131
+    memory_usd_per_gib_s: 0.00000222
   volumes: {hf_cache: slm-bench-hf-cache, vllm_cache: slm-bench-vllm-cache, adapters: slm-bench-adapters}
   secrets:
     vllm_api_key: slm-bench-vllm-api-key   # holds VLLM_API_KEY: vLLM's own key, a second layer behind the proxy auth
@@ -311,9 +317,11 @@ train:                         # S5: one LoRA adapter per cluster on the chosen 
 
 loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's input
   aiperf_version: 0.13.0
-  concurrency: [4, 8, 16, 32, 64, 128]   # one run per level
-  request_count: 500           # per level: that many calls, each level its own (no prompt replayed twice,
-  warmup_request_count: 20     # so the prefix cache holds only what real traffic would share); warm-up calls apart
+  concurrency: [1, 2, 4, 8, 16, 32, 64, 128]   # one run per level, from 1: an engine that keeps up only alone has a cost
+  request_count: 500           # per level: that many calls, drawn from the engine's whole pool, stratified by
+  request_count_by_level: {1: 200, 2: 200}     # cluster, none twice within the level (a small pool's come back later)
+  warmup_request_count: 20     # warm-up calls apart
+  cold_prefix_cache: always    # every level of every sweep starts from an empty prefix cache (vLLM's /reset_prefix_cache)
   stream: false                # the agent does not stream (bench/agent/hooks.py): latency is the whole request
   request_timeout_s: 600
   ready_timeout_s: 1800        # a cold server loads its weights before the first answer
@@ -396,6 +404,11 @@ cost:                          # J3 and J8 (SPEC §6.6); the container's price i
   # 2000 ms to the first token + 100 ms per token. Sustained throughput is the highest with p95 within the SLO.
   p95_slo_cap_ms: 17000
   slo_from: agent-B0-calib-20261109T151141.039667Z  # before prereg: the pilot's B0 execution on calib (run id); J8 and the report refuse another
+  # each sweep's limit: the stricter of the cap and the teacher's p95 in slo_from reweighted to the sweep's call-site
+  # mix; a call site with fewer teacher calls than this counts with the one limit_pool names (revise: 5 calls, the
+  # same SQL generation as generate_candidate, p95 12,438 against 12,383 ms)
+  limit_min_calls: 30
+  limit_pool: {revise: generate_candidate}
   utilizations: [0.2, 0.5, 1.0]
 claims:                        # the SPEC §5 map (bench/report.py)
   v3_min_ratio: 3              # V3/A2: the paper's bar, met when the cost ratio's 95% CI lower bound is >= this (T9)

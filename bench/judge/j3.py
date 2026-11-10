@@ -16,13 +16,15 @@ correct query.
   at all. `estimated` usage is priced and the result is labelled `estimated`. A call with
   `source: api` and `cached_input: null` had its cache **not reported**: it is priced with no cache
   discount, so the arm's cost is an `upper_bound` (`cache_not_reported` counts them).
-- **The SLM** has no token price: each SLM call costs the load test's cost per request (J8) at each
-  utilization of `cost.utilizations` (J8 must have measured every SLM engine the calls used), so an arm with SLM calls has one total per API variant and
-  utilization (`standard@50%`), the highest cost per request among the engines these calls used
-  (J8 judges each engine apart). The SLM cost is `measured` only when every SLM call ran on one
-  engine and that engine is the base (B3); calls through adapters (B4, B5) spread over
-  several adapters on one server, which no single-engine load test measures, so their cost is
-  `extrapolated from per-adapter load tests` (`slm_cost_basis`).
+- **The SLM** has no token price: each SLM call costs a load test's cost per request (J8) at each
+  utilization J8 gives, so an arm with SLM calls has one total per API variant and utilization
+  (`standard@50%`). Which load test, by arm: **B4** at its as-deployed sweep (one server, every adapter, B4's
+  own mix: `measured`); **B3** at the base's (`measured`); **B5** (and any other arm) each call at its own
+  engine's sweep, the adapter of its cluster (`extrapolated from per-engine load tests`: B5 serves several
+  adapters on one server, which a sweep of one adapter does not measure). J8 must have measured every engine
+  needed. An engine with no load level within its latency limit (J8's `outside_slo`) has no cost: every total
+  its calls fall in is null, and `slm_cost_basis.outside_slo` names it. Where J8 gives the cost at the
+  sensitivity price too (Modal's), every SLM scenario has its twin at that price (`standard@50%@sensitivity`).
 - **Per correct query**: the total over the execution divided by its correct questions, read from
   its `eval` execution (J1's source).
 - **Per question** (`by_question`: {question id: {scenario: cost}}): the cost of each question's calls,
@@ -70,11 +72,14 @@ def api_cost(call: dict, entry: Dict[str, Any]) -> Dict[str, Optional[float]]:
             "batch": standard * (1 - discount) if discount is not None else None}
 
 
-def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Optional[Dict[str, float]] = None
-                ) -> Dict[str, Any]:
-    """Totals over `calls`: counts, tokens, API cost per variant, SLM cost per utilization."""
+def price_calls(calls: List[dict], prices: Dict[str, Any],
+                slm_per_request: Optional[Dict[str, Dict[str, Optional[float]]]] = None) -> Dict[str, Any]:
+    """Totals over `calls`: counts, tokens, API cost per variant, SLM cost per utilization. `slm_per_request`
+    is {engine: {label: cost per request}}, each SLM call priced at its engine's; a null cost (an engine
+    outside its latency limit) makes every total it falls in null."""
     table, api = prices.get("table") or {}, {v: 0.0 for v in API_VARIANTS}
-    slm: Dict[str, float] = {u: 0.0 for u in (slm_per_request or {})}
+    labels = sorted({u for costs in (slm_per_request or {}).values() for u in costs})
+    slm: Dict[str, Optional[float]] = {u: 0.0 for u in labels}
     counts = {"calls": 0, "slm_calls": 0, "failed_unbilled": 0, "estimated": 0, "cache_not_reported": 0}
     token_totals = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
     batch_known = True
@@ -95,9 +100,11 @@ def price_calls(calls: List[dict], prices: Dict[str, Any], slm_per_request: Opti
         if call["model_role"] == "slm":
             if slm_per_request is None:
                 raise JudgmentError("the calls include SLM calls: pass the load test's cost per request (J8)")
+            if call["engine"] not in slm_per_request:
+                raise JudgmentError(f"call {call['call_id']} ran on {call['engine']}, which the load test did not price")
             counts["slm_calls"] += 1
-            for u, cost in slm_per_request.items():
-                slm[u] += cost
+            for u, cost in slm_per_request[call["engine"]].items():
+                slm[u] = None if slm[u] is None or cost is None else slm[u] + cost
             continue
         if not prices.get("as_of"):
             raise JudgmentError("prices.as_of is not set: an undated price table prices nothing")
@@ -125,7 +132,7 @@ def scenarios(priced: Dict[str, Any]) -> Dict[str, Optional[float]]:
         if not priced["slm"]:
             out[variant] = api
         for u, slm in priced["slm"].items():
-            out[f"{variant}@{u}"] = None if api is None else api + slm
+            out[f"{variant}@{u}"] = None if api is None or slm is None else api + slm
     return out
 
 
@@ -148,7 +155,7 @@ def replaceable_fraction(calls: List[dict], prices: Dict[str, Any], production_m
 
 
 def judge(calls: List[dict], question_ids: List[str], correct: Optional[Dict[str, bool]], prices: Dict[str, Any],
-          production_model: str, slm_per_request: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+          production_model: str, slm_per_request: Optional[Dict[str, Dict[str, Optional[float]]]] = None) -> Dict[str, Any]:
     priced = price_calls(calls, prices, slm_per_request)
     totals = scenarios(priced)
     n_correct = sum(correct.values()) if correct is not None else None
@@ -182,29 +189,49 @@ def engines_used(calls: List[dict]) -> set:
     return {c["engine"] for c in calls if c["model_role"] == "slm"}
 
 
-def slm_cost_per_request(j8_path: Optional[str], calls: List[dict]) -> Tuple[Optional[Dict[str, float]], Dict[str, Any]]:
+def engine_costs(entry: Dict[str, Any], labels: List[str]) -> Dict[str, Optional[float]]:
+    """One J8 engine's cost per request at each label, and at the sensitivity price (`<label>@sensitivity`)
+    where J8 gives it; all null for an engine outside its latency limit."""
+    out = {u: (entry.get("cost_per_request") or {}).get(u) for u in labels}
+    if "cost_per_request_sensitivity" in entry:
+        out.update({f"{u}@sensitivity": (entry["cost_per_request_sensitivity"] or {}).get(u) for u in labels})
+    return out
+
+
+def slm_cost_per_request(j8_path: Optional[str], calls: List[dict], arm: Optional[str]
+                         ) -> Tuple[Optional[Dict[str, Dict[str, Optional[float]]]], Dict[str, Any]]:
+    """{engine as C1 records it: {label: cost per request}} for the SLM engines the calls used, by the arm's
+    rule (module docstring), and what was read."""
     engines = {c["engine"].split("+lora:")[0] for c in calls if c["model_role"] == "slm"}
     if not engines:
         return None, {}
     if not j8_path:
         raise JudgmentError(f"the execution has SLM calls ({sorted(engines)}): pass the J8 result of their load test")
-    j8 = read_result(j8_path, "J8")
-    if engines != {j8["result"]["engine"].split("+lora:")[0]}:
-        raise JudgmentError(f"the load test measured {j8['result']['engine']!r}, the calls used {sorted(engines)}")
-    measured_engines = set(j8["result"].get("combined", {}).get("engines") or [j8["result"]["engine"]])
-    uncovered = sorted(engines_used(calls) - measured_engines)
-    if uncovered:
-        raise JudgmentError(f"the load test did not measure every SLM engine the calls used: {uncovered}")
+    j8 = read_result(j8_path, "J8")["result"]
+    if engines != {j8["engine"].split("+", 1)[0]}:
+        raise JudgmentError(f"the load test measured {j8['engine']!r}, the calls used {sorted(engines)}")
+    labels = j8.get("utilizations") or []
     used = sorted(engines_used(calls))
-    per_engine = j8["result"].get("engines") or {}
-    if per_engine:  # the engines these calls used, not every engine the load test measured
-        cost = {u: max(per_engine[e]["cost_per_request"][u] for e in used) for u in per_engine[used[0]]["cost_per_request"]}
+    if arm == "B4":
+        deployed = (j8.get("as_deployed") or {}).get(f"{j8['engine']}+as-deployed")
+        if deployed is None:
+            raise JudgmentError("B4 is priced at its as-deployed sweep, which the load test does not have")
+        cost = {engine: engine_costs(deployed, labels) for engine in used}
+        basis, rule = "measured", "every SLM call at B4's as-deployed sweep (one server, every adapter, B4's mix)"
+        outside = [f"{j8['engine']}+as-deployed"] if deployed["outside_slo"] else []
     else:
-        cost = j8["result"]["cost_per_request"]
-    measured = len(used) == 1 and "+lora:" not in used[0]
-    basis = {"basis": "measured" if measured else "extrapolated from per-adapter load tests", "call_engines": used,
-             "rule": "the highest cost per request among the engines the calls used", "combined": j8["result"].get("combined")}
-    return cost, {"j8": result_reference(j8_path), "slm_cost_basis": basis}
+        per_engine = j8.get("engines") or {}
+        uncovered = [engine for engine in used if engine not in per_engine]
+        if uncovered:
+            raise JudgmentError(f"the load test did not measure every SLM engine the calls used: {uncovered}")
+        cost = {engine: engine_costs(per_engine[engine], labels) for engine in used}
+        measured = len(used) == 1 and "+lora:" not in used[0]
+        basis = "measured" if measured else "extrapolated from per-engine load tests"
+        rule = "each SLM call at its own engine's sweep"
+        outside = [engine for engine in used if per_engine[engine]["outside_slo"]]
+    return cost, {"j8": result_reference(j8_path), "slm_cost_basis": {
+        "basis": basis, "rule": rule, "call_engines": used, "outside_slo": outside,
+        "sensitivity": (j8.get("sensitivity") or {}).get("provider"), "combined": j8.get("combined")}}
 
 
 def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config: Dict[str, Any]):
@@ -220,7 +247,7 @@ def run(run_id: str, eval_run_id: Optional[str], j8_path: Optional[str], config:
             raise JudgmentError(f"{eval_run_id} evaluated {evaluated.get('source_run_id')}, not {run_id}")
         correct = {r["question_id"]: bool(r["correct"]) for r in read_jsonl(run_dir(eval_run_id) / "results.jsonl")}
         reads["eval"] = reference(eval_run_id)
-    slm, j8_read = slm_cost_per_request(j8_path, calls)
+    slm, j8_read = slm_cost_per_request(j8_path, calls, found.get("arm"))
     basis = j8_read.pop("slm_cost_basis", None)
     reads.update(j8_read)
     question_ids = found.get("question_ids") or sorted({c["question_id"] for c in calls})

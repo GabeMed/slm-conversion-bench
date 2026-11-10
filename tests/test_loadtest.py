@@ -11,8 +11,9 @@ import pytest
 
 from bench import cli, loadtest, paths
 from bench.contracts.config import engine_spec
-from bench.loadtest import (LoadtestError, aiperf_command, aiperf_config, build_payloads, env_headers, level_slice,
-                           scrub_secrets, server_root, shuffle_pool, wait_ready)
+from bench.loadtest import (LoadtestError, aiperf_command, aiperf_config, build_payloads, cold_cache, composition,
+                           draw_level, env_headers, largest_remainder, level_counts, reset_prefix_cache, scrub_secrets, select_traffic,
+                           server_root, shuffle_pool, wait_ready)
 from synthetic import make_repo
 from test_train_fixtures import TINY, TINY_NAME, make_s5_repo, save
 
@@ -138,6 +139,7 @@ class FakeServer:
 
     def __init__(self, models, ready_after=0):
         self.models, self.ready_after, self.seen, self.posted, self.headers = models, ready_after, [], [], []
+        self.resets, self.reset_answers = [], []  # POST /reset_prefix_cache: each an answer body, or an HTTP status
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -158,6 +160,15 @@ class FakeServer:
                 self._answer({"data": [{"id": m, "root": f"/adapters/{m}", "parent": "base"} for m in listed]})
 
             def do_POST(self):
+                if self.path == "/reset_prefix_cache":
+                    fake.resets.append(self.headers.get("Authorization"))
+                    answer = fake.reset_answers.pop(0) if fake.reset_answers else {"success": True}
+                    if isinstance(answer, int):
+                        self.send_response(answer)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    return self._answer(answer)
                 fake.posted.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 fake.headers.append(dict(self.headers))
                 self._answer({"choices": []})
@@ -182,46 +193,148 @@ def test_wait_ready_waits_for_the_model_to_be_listed():
         server.close()
 
 
-def _source_run(run_id="agent-B0-train-src", split="train", calls=CALLS):
+def _source_run(run_id="agent-B4-calib-src", split="calib", calls=CALLS, arm="B4"):
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
-    (run_dir / "manifest.json").write_text(json.dumps({"run_id": run_id, "arm": "B0", "split": split, "status": "done"}))
+    (run_dir / "manifest.json").write_text(json.dumps({"run_id": run_id, "arm": arm, "split": split, "status": "done"}))
     (run_dir / "calls.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
     return run_id
 
 
-def test_each_level_replays_its_own_calls_after_the_warm_up():
-    payloads = [{"i": i} for i in range(10)]
-    first, second = level_slice(payloads, 2, 0, 3), level_slice(payloads, 2, 1, 3)
-    assert [p["i"] for p in first["payloads"]] == [2, 3, 4] and [p["i"] for p in second["payloads"]] == [5, 6, 7]
-    assert (first["offset"], first["repeats"], second["repeats"]) == (2, False, False)
-    third = level_slice(payloads, 2, 2, 3)  # 8, 9, then the source is exhausted
-    assert [p["i"] for p in third["payloads"]] == [8, 9, 0] and third["repeats"] is True
+def test_largest_remainder_splits_a_count_in_proportion():
+    # 10 over 6/3/1: quotas 6, 3, 1 exactly
+    assert largest_remainder({"c0": 60, "c1": 30, "c2": 10}, 10) == {"c0": 6, "c1": 3, "c2": 1}
+    # 5 over 13128/614/200/2197 (B0's routed sizes): quotas 4.07, 0.19, 0.06, 0.68 -> 4, 0, 0, 1
+    assert largest_remainder({"c0": 13128, "c1": 614, "c2": 200, "c3": 2197}, 5) == {"c0": 4, "c1": 0, "c2": 0, "c3": 1}
+    # a tie of remainders goes to the smaller name
+    assert largest_remainder({"b": 1, "a": 1}, 1) == {"a": 1, "b": 0}
+    assert sum(largest_remainder({"x": 7, "y": 11, "z": 13}, 17).values()) == 17
 
 
-def test_the_shuffle_is_the_seeds_and_without_a_seed_the_pool_keeps_the_file_order():
+def test_each_level_draws_its_own_calls_stratified_by_cluster_none_twice():
+    strata = ["c0"] * 60 + ["c1"] * 30 + ["c2"] * 10
+    first, again, second = draw_level(strata, 20, 7, 0), draw_level(strata, 20, 7, 0), draw_level(strata, 20, 7, 1)
+    assert first == again and first["positions"] != second["positions"]  # seeded per level
+    for drawn in (first, second):
+        assert len(set(drawn["positions"])) == 20 and drawn["short_pool"] is False
+        assert drawn["strata"] == {"c0": 12, "c1": 6, "c2": 2}
+        assert sorted(strata[i] for i in drawn["positions"]) == ["c0"] * 12 + ["c1"] * 6 + ["c2"] * 2
+    # levels draw independently: a small pool's calls come back in a later level
+    assert set(first["positions"]) & set(second["positions"])
+    # a pool smaller than the level: all of it, once, flagged
+    whole = draw_level(strata[:7], 20, 7, 0)
+    assert sorted(whole["positions"]) == list(range(7)) and whole["short_pool"] is True
+
+
+def test_each_level_takes_its_own_count_where_the_configuration_gives_one():
+    settings = {"request_count": 500, "request_count_by_level": {1: 200, "2": 200}}
+    assert level_counts([1, 2, 4, 128], settings) == [200, 200, 500, 500]
+    assert level_counts([4], {"request_count": 500}) == [500]
+
+
+def test_the_cache_starts_cold_always_or_never():
+    assert (cold_cache("always"), cold_cache("never")) == (True, False)
+    with pytest.raises(LoadtestError, match="cold_prefix_cache must be one of"):
+        cold_cache("reduced")
+
+
+B4 = {"run_id": "agent-B4-calib-x", "arm": "B4", "split": "calib"}
+B3 = {"run_id": "agent-B3-calib-x", "arm": "B3", "split": "calib"}
+
+
+def test_each_slm_engine_is_load_tested_on_the_calls_its_own_arm_sent_it():
+    a0, a1 = "slm:q+lora:a0", "slm:q+lora:a1"
+    calls = [{"cluster": "c0", "engine": a0, "i": 0}, {"cluster": "c1", "engine": a1, "i": 1},
+             {"cluster": "c0", "engine": a0, "i": 2}]
+    # an adapter: the calls B4 sent it, one cluster's, and that cluster is the sweep's traffic
+    adapter = select_traffic(calls, a0, B4)
+    assert [c["i"] for c in adapter["calls"]] == [0, 2] and (adapter["traffic"], adapter["kind"]) == ("c0", "adapter")
+    # as deployed: all of B4's calls, each to its own adapter, the traffic all of it
+    deployed = select_traffic(calls, "slm:q", B4, as_deployed=True)
+    assert deployed["calls"] == calls and (deployed["traffic"], deployed["kind"]) == ("all", "as_deployed")
+    # the base: every call of B3
+    base = [{"cluster": None, "engine": "slm:q", "i": 0}]
+    assert select_traffic(base, "slm:q", B3) == {"calls": base, "traffic": "all", "kind": "base"}
+    # a non-SLM engine (the local smoke server) replays every call it is given
+    assert select_traffic(calls, "production_llm", B4)["kind"] == "replay"
+
+
+def test_an_slm_engine_is_never_load_tested_on_another_arms_traffic():
+    a0 = "slm:q+lora:a0"
+    calls = [{"cluster": "c0", "engine": a0}]
+    b0 = {"run_id": "agent-B0-calib-x", "arm": "B0", "split": "calib"}
+    with pytest.raises(LoadtestError, match="on B4's own end-to-end execution on calib, not on runs/agent-B0-calib-x"):
+        select_traffic(calls, a0, b0)
+    with pytest.raises(LoadtestError, match=r"on B4's own end-to-end execution on calib.*\(B4 on train\)"):
+        select_traffic(calls, a0, {**B4, "split": "train"})
+    with pytest.raises(LoadtestError, match="on B3's own end-to-end execution on calib"):
+        select_traffic([{"cluster": None, "engine": "slm:q"}], "slm:q", B4)
+    with pytest.raises(LoadtestError, match="sent no call to slm:q\\+lora:a9"):
+        select_traffic(calls, "slm:q+lora:a9", B4)
+    with pytest.raises(LoadtestError, match=r"the calls of clusters \['c0', 'c1'\]: an adapter serves one cluster"):
+        select_traffic(calls + [{"cluster": "c1", "engine": a0}], a0, B4)
+    with pytest.raises(LoadtestError, match=r"sent calls to \['production_llm', 'slm:q'\], not all to slm:q"):
+        select_traffic([{"engine": "slm:q"}, {"engine": "production_llm"}], "slm:q", B3)
+    with pytest.raises(LoadtestError, match="give the base"):
+        select_traffic(calls, a0, B4, as_deployed=True)
+    with pytest.raises(LoadtestError, match=r"sent calls to \['production_llm'\], not adapters of slm:q"):
+        select_traffic(calls + [{"cluster": "c1", "engine": "production_llm"}], "slm:q", B4, as_deployed=True)
+
+
+def test_the_composition_counts_clusters_call_sites_and_engines():
+    calls = [{"cluster": "c1", "call_site": "revise", "engine": "e1"}, {"cluster": None, "call_site": "agent_ir", "engine": "e0"},
+             {"cluster": "c1", "call_site": "select_tables", "engine": "e1"}]
+    assert composition(calls) == {"clusters": {"c1": 2, "none": 1},
+                                  "call_sites": {"agent_ir": 1, "revise": 1, "select_tables": 1},
+                                  "engines": {"e0": 1, "e1": 2}}
+
+
+def test_as_deployed_each_line_names_the_adapter_that_served_the_call():
+    sites = {"agent_ss": {"temperature": 0.0}, "select_tables": {"temperature": 0.0}}
+    calls = [dict(CALLS[0], engine="slm:q+lora:a0"), dict(CALLS[1], engine="slm:q+lora:a1")]
+    bodies = build_payloads(calls, "q", {"max_tokens": 8}, False, sites, {"slm:q+lora:a0": "a0", "slm:q+lora:a1": "a1"})
+    assert [b["model"] for b in bodies] == ["a0", "a1"]
+
+
+def test_the_prefix_cache_reset_must_say_success_and_is_retried_while_blocks_are_held(monkeypatch):
+    monkeypatch.setattr(loadtest.time, "sleep", lambda s: None)
+    server = FakeServer(["c0"])
+    try:
+        server.reset_answers = [{"success": False}, {"success": True}]
+        assert reset_prefix_cache(server.base_url, {"Authorization": "Bearer k"}, 5) == {"attempts": 2}
+        assert server.resets == ["Bearer k", "Bearer k"]  # at the server root, not under /v1
+        server.reset_answers = [{"success": False}] * 3
+        with pytest.raises(LoadtestError, match="did not empty the prefix cache in 3 attempts"):
+            reset_prefix_cache(server.base_url, {}, 5, attempts=3)
+        server.reset_answers = [404]
+        with pytest.raises(LoadtestError, match="VLLM_SERVER_DEV_MODE=1; serve with it, or restart vLLM between levels"):
+            reset_prefix_cache(server.base_url, {}, 5)
+    finally:
+        server.close()
+
+
+def test_the_shuffle_is_the_seeds():
     payloads = [{"i": i} for i in range(50)]
     once, again = shuffle_pool(payloads, 20260935), shuffle_pool(payloads, 20260935)
     assert once == again and once != payloads and sorted(p["i"] for p in once) == list(range(50))
     assert shuffle_pool(payloads, 20260936) != once  # another seed, another order
-    assert shuffle_pool(payloads, None) == payloads and shuffle_pool(payloads, None) is not payloads
 
 
-def test_shuffled_every_level_draws_from_the_whole_pools_mix():
-    """A source as C1 writes it: each question's calls together, the questions of a database together. In file
-    order a level of 40 replays 4 or 5 questions on 1 or 2 databases; shuffled, each level holds most
-    questions, every database, and about the pool's share of each call site."""
-    pool = [{"q": q, "db": f"db{q // 8}", "site": "filter_column" if c < 8 else f"agent_{c}"}
-            for q in range(30) for c in range(10)]
-    in_file_order = [level_slice(pool, 20, level, 40)["payloads"] for level in range(6)]
-    assert all(len({p["q"] for p in chosen}) <= 5 and len({p["db"] for p in chosen}) <= 2 for chosen in in_file_order)
-    for level in range(6):
-        chosen = level_slice(shuffle_pool(pool, 20260935), 20, level, 40)["payloads"]
+def test_every_level_holds_most_questions_and_every_database():
+    """A source as C1 writes it: each question's calls together, the questions of a database together. Each
+    level draws at random from the whole pool, so it holds most questions and every database."""
+    strata = ["c0" if c < 8 else "c1" for q in range(30) for c in range(10)]
+    pool = [{"q": q, "db": f"db{q // 8}"} for q in range(30) for c in range(10)]
+    for index in range(6):
+        chosen = [pool[i] for i in draw_level(strata, 40, 20260935, index)["positions"]]
         assert len({p["q"] for p in chosen}) >= 15 and len({p["db"] for p in chosen}) == 4
-        assert abs(sum(p["site"] == "filter_column" for p in chosen) / 40 - 0.8) <= 0.15
 
 
-SOURCE = [dict(CALLS[i % 2], call_id=f"00000000-0000-4000-8000-{i:012d}", invocation_key=f"k:{i}") for i in range(12)]
+# as B4 recorded them on calib: the router sent these calls, of cluster c0, to its adapter
+SOURCE = [dict(CALLS[i % 2], call_id=f"00000000-0000-4000-8000-{i:012d}", invocation_key=f"k:{i}", cluster="c0",
+               engine=f"slm:{TINY_NAME}+lora:c0", model_role="slm") for i in range(12)]
+# as B3 recorded them on calib: every call to the base
+BASE = [dict(c, cluster=None, engine=f"slm:{TINY_NAME}") for c in SOURCE]
 
 
 @pytest.fixture
@@ -234,8 +347,9 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setenv("T_MODAL_KEY", "mk-live")
     monkeypatch.setenv("T_MODAL_SECRET", "ms-live")
     monkeypatch.setattr(loadtest, "local_aiperf", lambda: __import__("sys").executable)  # a file that exists
-    config["loadtest"].update({"concurrency": [1, 4], "request_count": 5, "warmup_request_count": 2})
-    config["seeds"].pop("loadtest_shuffle", None)  # the file order, unless a test sets the seed
+    config["loadtest"].update({"concurrency": [1, 4], "request_count": 5, "warmup_request_count": 2,
+                               "request_count_by_level": {}, "cold_prefix_cache": "never"})
+    config["seeds"]["loadtest_shuffle"] = 7
     yield config_path, save(config, config_path), server
     server.close()
 
@@ -258,27 +372,36 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     config_path, config, server = served
     calls = []
     monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf(calls=calls))
-    source = _source_run(calls=SOURCE)
+    other = [dict(c, call_id=f"00000000-0000-4000-8001-{i:012d}", invocation_key=f"o:{i}", cluster="c1",
+                  engine=f"slm:{TINY_NAME}+lora:c1") for i, c in enumerate(SOURCE[:5])]
+    source = _source_run(calls=SOURCE[:6] + other + SOURCE[6:])  # another cluster's calls, never replayed here
     run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", source, "local")
     assert [json.loads((d / "manifest.json").read_text())["concurrency"] for d in run_dirs] == [1, 4]
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["model"] == "c0" and manifest["engine"] == f"slm:{TINY_NAME}+lora:c0"
     assert manifest["gpu"] == config["serving"]["gpu"] and manifest["prefix_cache"] is True
-    assert manifest["source_run_id"] == source and manifest["source_split"] == "train"
-    assert (manifest["source_calls"], manifest["n_questions"]) == (12, 1)
+    assert manifest["source_run_id"] == source and manifest["source_split"] == "calib"
+    assert (manifest["source_calls"], manifest["source_calls_all"], manifest["n_questions"]) == (12, 17, 1)
+    assert (manifest["traffic"], manifest["traffic_kind"], manifest["cluster"]) == ("c0", "adapter", "c0")
+    assert manifest["models"] is None and manifest["short_pool"] is False and manifest["strata"] == {"c0": 5}
+    assert manifest["stratified_by"] == "cluster"
+    assert (manifest["request_count"], manifest["request_count_configured"]) == (5, 5)
+    assert manifest["cold_prefix_cache"] is False and manifest["prefix_cache_reset"] is None and not server.resets
+    assert manifest["composition"]["source"]["clusters"] == {"c0": 12}
+    assert sum(manifest["composition"]["level"]["call_sites"].values()) == 5
     assert manifest["tokenizer"] == TINY and manifest["where"] == "local" and manifest["aiperf_returncode"] == 0
     assert manifest["run_id"].startswith(f"loadtest-slm_{TINY_NAME}_lora_c0-c1-")
     assert manifest["served_model"] == {"id": "c0", "root": "/adapters/c0", "parent": "base"}  # what the server said
     assert manifest["observed"] == {"gpus": None, "vllm_command": None, "prompt_cache_read_pct": 37.5}
     levels = [[json.loads(line) for line in (d / "payloads.jsonl").read_text().splitlines()] for d in run_dirs]
     assert {p["model"] for p in levels[0]} == {"c0"} and levels[0][0]["max_tokens"] == 64
-    # the warm-up calls (sent before each level), then level 1 and level 2 each on their own calls
+    # the warm-up calls (the seed's first two, sent before each level), then each level its own seeded draw
     expected = build_payloads(SOURCE, "c0", config["roles"]["slm_candidates"][-1]["params"], False, config["call_sites"])
-    assert levels == [expected[2:7], expected[7:12]]
-    assert server.posted == expected[:2] * 2
+    strata = ["c0"] * 12
+    assert levels == [[expected[i] for i in draw_level(strata, 5, 7, k)["positions"]] for k in (0, 1)]
+    assert server.posted == shuffle_pool(expected, 7)[:2] * 2
     second = json.loads((run_dirs[1] / "manifest.json").read_text())
-    assert (manifest["payload_offset"], second["payload_offset"], second["payloads_repeat"]) == (2, 7, False)
-    assert manifest["payload_shuffle_seed"] is None  # no seeds.loadtest_shuffle: the file order, as replayed above
+    assert (manifest["payload_shuffle_seed"], manifest["level_seed"], second["level_seed"]) == (7, "7:0", "7:1")
     _, cmd, aiperf_yaml = calls[1]
     phases, endpoint = aiperf_yaml["benchmark"]["phases"], aiperf_yaml["benchmark"]["endpoint"]
     assert (phases["concurrency"], aiperf_yaml["benchmark"]["model"]) == (4, "c0")
@@ -287,28 +410,15 @@ def test_one_run_per_concurrency_level_each_with_its_manifest(served, monkeypatc
     # the model list and the warm-up carry the proxy-auth headers; the leaked value is scrubbed afterwards
     assert {(h["Modal-Key"], h["Modal-Secret"]) for h in server.headers} == {("mk-live", "ms-live")}
     assert manifest["secrets_redacted_in"] == ["aiperf.log"] and "mk-live" not in (run_dirs[0] / "aiperf.log").read_text()
-    assert manifest["source_arm"] == "B0" and manifest["levels"] == [1, 4] and manifest["level_index"] == 0
+    assert manifest["source_arm"] == "B4" and manifest["levels"] == [1, 4] and manifest["level_index"] == 0
     assert second["sweep_id"] == manifest["sweep_id"] and second["level_index"] == 1
-
-
-def test_with_the_seed_the_warm_up_and_every_level_come_from_the_shuffled_pool(served, monkeypatch):
-    config_path, config, server = served
-    config["seeds"]["loadtest_shuffle"] = 7
-    save(config, config_path)
-    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf())
-    run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", _source_run(calls=SOURCE), "local")
-    levels = [[json.loads(line) for line in (d / "payloads.jsonl").read_text().splitlines()] for d in run_dirs]
-    expected = build_payloads(SOURCE, "c0", config["roles"]["slm_candidates"][-1]["params"], False, config["call_sites"])
-    shuffled = shuffle_pool(expected, 7)
-    assert shuffled != expected and levels == [shuffled[2:7], shuffled[7:12]] and server.posted == shuffled[:2] * 2
-    assert [json.loads((d / "manifest.json").read_text())["payload_shuffle_seed"] for d in run_dirs] == [7, 7]
 
 
 def test_a_failed_level_is_recorded_and_stops_the_sweep(served, monkeypatch):
     config_path, _, _ = served
     monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf(returncode=1))
     with pytest.raises(LoadtestError, match="AIPerf failed at concurrency 1"):
-        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(), "local")
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=BASE, arm="B3"), "local")
     manifests = [json.loads(p.read_text()) for p in paths.RUNS.glob("loadtest-*/manifest.json")]
     assert [(m["concurrency"], m["status"]) for m in manifests] == [(1, "failed")]
 
@@ -324,6 +434,13 @@ def test_refusals(served, monkeypatch):
         loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-bad", calls=bad), "local")
     with pytest.raises(LoadtestError, match="is not an SLM: give its tokenizer"):
         loadtest.loadtest(str(config_path), "production_llm", _source_run("agent-ok"), "local")
+    with pytest.raises(LoadtestError, match="on B3's own end-to-end execution on calib, not on runs/agent-B4-calib-src"):
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local")
+    seedless = {**config, "seeds": {k: v for k, v in config["seeds"].items() if k != "loadtest_shuffle"}}
+    with pytest.raises(LoadtestError, match="seeds.loadtest_shuffle is not set"):
+        loadtest.loadtest(str(save(seedless, config_path) and config_path), f"slm:{TINY_NAME}+lora:c0",
+                          "agent-B4-calib-src", "local")
+    save(config, config_path)
     config["roles"]["slm_candidates"][-1]["endpoint"]["base_url"] = None
     with pytest.raises(LoadtestError, match="no endpoint.base_url"):
         loadtest.loadtest(str(save(config, config_path) and config_path), f"slm:{TINY_NAME}", "agent-ok", "local")
@@ -368,6 +485,7 @@ def test_on_modal_the_client_runs_beside_the_server_and_its_artifacts_come_back(
     assert (args["base_url"], args["url"], args["model"], args["concurrency"]) == (
         endpoint["base_url"], endpoint["base_url"][:-3], "c0", 8)
     assert len(args["warmup"]) == 2 and calls["app.run"] == [{}] and args["candidate"] == TINY_NAME
+    assert (args["models"], args["reset_prefix_cache"], args["request_count"]) == (None, False, 5)
     assert args["headers_env"] == endpoint["headers_env"]  # the variable names, never their values
     assert "mk-live" not in json.dumps(args) and "ms-live" not in json.dumps(args)
     assert (run_dirs[0] / "logs" / "aiperf.log").read_bytes() == b"ok"
@@ -386,7 +504,7 @@ def test_a_failure_is_recorded_without_local_paths(served, monkeypatch):
 
     monkeypatch.setattr(loadtest, "run_aiperf", crash)
     with pytest.raises(OSError):
-        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-B3-calib-src", calls=BASE, arm="B3"), "local", concurrency=[1])
     manifest = json.loads(next(paths.RUNS.glob("loadtest-*/manifest.json")).read_text())
     assert manifest["status"] == "failed" and "<repo>/somewhere" in manifest["stopped_by"]
     assert str(paths.ROOT) not in manifest["stopped_by"]
@@ -396,7 +514,7 @@ def test_without_aiperf_the_load_test_says_so_before_anything(served, monkeypatc
     config_path, _, server = served
     monkeypatch.setattr(loadtest, "local_aiperf", lambda: None)
     with pytest.raises(LoadtestError, match="AIPerf is not installed"):
-        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1, 4])
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-B3-calib-src", calls=BASE, arm="B3"), "local", concurrency=[1, 4])
     assert not list(paths.RUNS.glob("loadtest-*")) and not server.seen and not server.posted
 
 
@@ -427,7 +545,7 @@ def test_a_missing_proxy_auth_variable_stops_the_load_test_before_any_request(se
     config_path, _, server = served
     monkeypatch.delenv("T_MODAL_SECRET")
     with pytest.raises(LoadtestError, match="T_MODAL_SECRET"):
-        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-B3-calib-src", calls=BASE, arm="B3"), "local", concurrency=[1])
     assert not server.seen and not server.posted
 
 
@@ -441,7 +559,7 @@ def test_an_interrupted_aiperf_still_leaves_no_credential(served, monkeypatch):
 
     monkeypatch.setattr(loadtest, "run_aiperf", interrupted)
     with pytest.raises(KeyboardInterrupt):
-        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "local", concurrency=[1])
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-B3-calib-src", calls=BASE, arm="B3"), "local", concurrency=[1])
     run_dir = next(paths.RUNS.glob("loadtest-*"))
     assert "mk-live" not in (run_dir / "profile_export_aiperf.json").read_text()
 
@@ -458,8 +576,82 @@ def test_a_warm_up_error_is_a_load_test_error_not_a_traceback(served, monkeypatc
         self.end_headers()
 
     handler.do_POST = refuse
-    _source_run(calls=SOURCE)
+    _source_run("agent-B3-calib-src", calls=BASE, arm="B3")
     assert cli.main(["loadtest", "--config", str(config_path), "--engine", f"slm:{TINY_NAME}", "--source",
-                     "agent-B0-train-src", "--on", "local", "--concurrency", "1"]) == 2
+                     "agent-B3-calib-src", "--on", "local", "--concurrency", "1"]) == 2
     assert "warm-up refused" in capsys.readouterr().err and "HTTP 503" in json.loads(
         next(paths.RUNS.glob("loadtest-*/manifest.json")).read_text())["stopped_by"]
+
+
+def test_as_deployed_b4_is_served_by_one_server_each_call_to_its_own_adapter(served, monkeypatch):
+    config_path, config, server = served
+    server.models.append("c1")
+    calls = []
+    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf(calls=calls))
+    mixed = [dict(c, cluster="c1", engine=f"slm:{TINY_NAME}+lora:c1") if i % 3 == 0 else c for i, c in enumerate(SOURCE)]
+    run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run(calls=mixed), "local", as_deployed=True)
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text())
+    assert manifest["engine"] == f"slm:{TINY_NAME}+as-deployed" and manifest["run_id"].startswith(
+        f"loadtest-slm_{TINY_NAME}_as-deployed-c1-")
+    assert (manifest["traffic"], manifest["traffic_kind"], manifest["cluster"]) == ("all", "as_deployed", None)
+    assert manifest["models"] == ["c0", "c1"] and manifest["composition"]["source"]["clusters"] == {"c0": 8, "c1": 4}
+    levels = [[json.loads(line) for line in (d / "payloads.jsonl").read_text().splitlines()] for d in run_dirs]
+    replayed = [mixed[i] for k in (0, 1) for i in draw_level([c["cluster"] for c in mixed], 5, 7, k)["positions"]]
+    assert [p["model"] for level in levels for p in level] == [c["cluster"] for c in replayed]  # each to its adapter
+    # stratified: 5 of 8 c0 and 4 c1 -> quotas 3.33 and 1.67: 3 and 2
+    assert manifest["strata"] == {"c0": 3, "c1": 2}
+    assert {p["model"] for p in server.posted} <= {"c0", "c1"}  # the warm-up too
+    assert calls[0][2]["benchmark"]["model"] == TINY_NAME  # AIPerf's model; each raw line carries its own
+    assert ("/v1/models", None) in server.seen
+
+
+def test_every_level_starts_from_an_empty_prefix_cache_and_a_small_pool_is_reused(served, monkeypatch):
+    config_path, config, server = served
+    config["loadtest"].update({"cold_prefix_cache": "always", "request_count": 10})
+    save(config, config_path)
+    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf())
+    run_dirs = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", _source_run(calls=SOURCE), "local")
+    manifests = [json.loads((d / "manifest.json").read_text()) for d in run_dirs]
+    # 12 calls: each level draws 10 of them, the second again from all 12
+    assert [(m["concurrency"], m["request_count"], m["short_pool"]) for m in manifests] == [(1, 10, False), (4, 10, False)]
+    assert all(m["cold_prefix_cache"] for m in manifests)
+    assert [m["prefix_cache_reset"] for m in manifests] == [{"attempts": 1}] * 2 and len(server.resets) == 2
+    # a pool smaller than a level: replayed whole, once, and flagged
+    config["loadtest"]["request_count"] = 50
+    save(config, config_path)
+    short = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", "agent-B4-calib-src", "local")
+    assert [json.loads((d / "manifest.json").read_text())["short_pool"] for d in short] == [True, True]
+    assert [json.loads((d / "manifest.json").read_text())["request_count"] for d in short] == [12, 12]
+    config["loadtest"]["cold_prefix_cache"] = "never"
+    save(config, config_path)
+    loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", "agent-B4-calib-src", "local")
+    assert len(server.resets) == 4  # never: no reset
+
+
+def test_a_server_without_the_reset_route_stops_the_cold_sweep(served, monkeypatch):
+    config_path, config, server = served
+    config["loadtest"]["cold_prefix_cache"] = "always"
+    save(config, config_path)
+    server.reset_answers = [404]
+    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf())
+    with pytest.raises(LoadtestError, match="VLLM_SERVER_DEV_MODE"):
+        loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}+lora:c0", _source_run(calls=SOURCE), "local")
+    manifest = json.loads(next(paths.RUNS.glob("loadtest-*/manifest.json")).read_text())
+    assert manifest["status"] == "failed" and "VLLM_SERVER_DEV_MODE" in manifest["stopped_by"]
+
+
+def test_the_base_is_stratified_by_call_site_since_b3_does_not_route(served, monkeypatch):
+    config_path, config, server = served
+    config["loadtest"].update({"concurrency": [1], "request_count": 6})
+    save(config, config_path)
+    monkeypatch.setattr(loadtest, "run_aiperf", _fake_aiperf())
+    # 12 calls of B3: 9 agent_ss and 3 select_tables (no cluster); a level of 6 holds them in proportion, 4.5 and 1.5
+    sites = ["agent_ss"] * 9 + ["select_tables"] * 3
+    calls = [dict(c, call_site=site, **({"parsed_output": {"tool": "x"}} if site == "agent_ss" else {}))
+             for c, site in zip(BASE, sites)]
+    run_dir, = loadtest.loadtest(str(config_path), f"slm:{TINY_NAME}", _source_run("agent-B3-calib-src", calls=calls,
+                                                                                  arm="B3"), "local")
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["stratified_by"] == "call_site" and manifest["traffic_kind"] == "base"
+    assert manifest["strata"] == {"agent_ss": 5, "select_tables": 1}  # largest remainder, ties to the smaller name
+    assert manifest["composition"]["level"]["call_sites"] == {"agent_ss": 5, "select_tables": 1}
