@@ -10,6 +10,11 @@ does not change, and nothing on the test split runs before step 12.
 - `<...>` is a value a previous step printed (a run id, a result path).
 - **Run the blocks in `bash`**, from the repository root, in the agent environment unless a step
   says otherwise. They use bash arrays; zsh splits words differently.
+- **`bench judge`, `bench verify` and `bench report` run in the analysis environment**
+  (`.venv-analysis`, Python 3.12, `env/analysis`), whatever the step: its `sum()` of floats is
+  compensated, so a sum over a set does not move with `PYTHONHASHSEED` and a judgment recomputes to
+  the same bytes (under the agent environment's 3.11, J6's score moves in the last digit), and its
+  numpy is the pinned one J5's floats were tested with.
 - **Paths written into `config.yaml` are relative to the repository root** (`judgments/J6/<sha>/choice.json`).
   The commands print absolute paths: cut the prefix. The configuration is registered and published.
 
