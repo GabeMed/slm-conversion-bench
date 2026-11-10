@@ -1,9 +1,12 @@
 """`bench loadtest --engine <engine> --source <run_id>`: the execution `loadtest` (SPEC 6.6; J8's input).
 
 Replays the real calls of an execution: every line of the source run's `calls.jsonl` (every invocation and
-attempt the agent sent, retries included, in file order) becomes one request body, the one the agent's
+attempt the agent sent, retries included) becomes one request body, the one the agent's
 client sends (`bench/agent/hooks.py:chat_model`: model, messages, temperature, max_tokens and the engine's
-other params, no streaming), with `model` set to the engine's served name. The first
+other params, no streaming), with `model` set to the engine's served name. The pool is shuffled first with
+`seeds.loadtest_shuffle`: the file groups each question's calls together, so in file order every level would
+replay a handful of questions on a few databases, each its own mix. Without that seed the pool keeps the file
+order, as before it existed, and the manifest says which order was replayed. The first
 `warmup_request_count` calls warm the server up; then each concurrency level replays its own next
 `request_count` calls, once each, as AIPerf v0.13.0 `raw_payload` lines: no prompt is sent twice, so the
 prefix cache holds only what real traffic shares, never an exact repeat carried over from a previous level
@@ -33,6 +36,7 @@ Modal-Key verbatim into its export).
 """
 import hashlib
 import json
+import random
 import re
 import subprocess
 import sys
@@ -100,6 +104,16 @@ def server_root(base_url: str) -> str:
     if not base.endswith("/v1"):
         raise LoadtestError(f"endpoint.base_url {base_url!r} does not end in /v1 (an OpenAI-compatible base)")
     return base[:-len("/v1")]
+
+
+def shuffle_pool(payloads: List[dict], seed: Optional[int]) -> List[dict]:
+    """The pool in the order it is replayed: shuffled with `seed`, the same seed giving the same order (so every
+    level draws from the whole source's mix of call sites, questions and databases); no seed, the file order."""
+    if seed is None:
+        return list(payloads)
+    order = list(range(len(payloads)))
+    random.Random(seed).shuffle(order)
+    return [payloads[i] for i in order]
 
 
 def level_slice(payloads: List[dict], warmup: int, level: int, count: int) -> Dict[str, Any]:
@@ -304,8 +318,10 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 raise LoadtestError(f"environment variable {endpoint['api_key_env']} is not set")
         headers = env_headers(endpoint.get("headers_env"))
     source_run = _source_calls(config, source)
-    payloads = build_payloads(source_run["calls"], spec["model"], spec.get("params") or {}, settings["stream"],
-                              config["call_sites"])
+    # absent, the file order: the seed is a configuration key, and a configuration without it replays as it did
+    shuffle_seed = config["seeds"].get("loadtest_shuffle")
+    payloads = shuffle_pool(build_payloads(source_run["calls"], spec["model"], spec.get("params") or {},
+                                           settings["stream"], config["call_sites"]), shuffle_seed)
     warmup = payloads[:min(settings["warmup_request_count"], len(payloads))]
     tok = _tokenizer(config, engine, tokenizer)
     vllm = endpoint["kind"] == "vllm"
@@ -353,6 +369,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 "source_run_id": source, "source_arm": source_run["arm"], "source_split": source_run["split"],
                 "source_status": source_run["status"],
                 "source_calls": len(payloads), "n_questions": len({c["question_id"] for c in source_run["calls"]}),
+                "payload_shuffle_seed": shuffle_seed,  # null: the file order; the offset is in the order replayed
                 "payload_offset": chosen["offset"], "payloads_repeat": chosen["repeats"],
                 "payloads_sha256": hashlib.sha256(raw).hexdigest(), "concurrency": level,
                 "request_count": settings["request_count"], "warmup_request_count": len(warmup),
