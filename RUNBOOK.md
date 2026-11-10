@@ -617,6 +617,8 @@ keys' length and the registry):
   (12 h), counted from its creation, not from the test's start. Run `down` and `up --hours <h>` just
   before, with `<h>` covering B3, B4, B5 and the B4 replay with a margin (step 5's time projection), and
   check that it serves every adapter (the RunPod section after step 9).
+- **The serving pod runs vLLM in dev mode**, as in the load test (`VLLM_SERVER_DEV_MODE=1`, set by `bench serve up`):
+  the test's SLM arms and the sweeps are served by the same kind of server.
 - **The machine stays awake** for the whole loop: `caffeinate -dims` in another terminal (macOS). A
   sleeping laptop drops the SSH tunnels; `bench serve --on runpod tunnel` reopens one.
 - **No merges, pulls, checkouts or other git activity in this checkout while the runs go.** Each run

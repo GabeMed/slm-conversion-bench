@@ -1467,3 +1467,18 @@ def test_runpod_settings_say_what_is_missing():
         rs.gpu_id(settings, "H100")
     with pytest.raises(RunPodError, match="RUNPOD_API_KEY is not set"):
         rs.api_key(settings, {})
+
+
+def test_every_variable_the_serving_pod_sets_reaches_the_jobs_started_over_ssh(runpod_repo):
+    # vLLM is started over SSH (start_job), which inherits only what BOOTSTRAP saves into /bench/env: a variable
+    # the pod's body sets but the filter drops (VLLM_SERVER_DEV_MODE, before this test) never reaches vLLM
+    import re
+    world = runpod_repo
+    ready_volume(world)
+    rserve.up(world.provider(), TINY_NAME, tunnel=fake_tunnel(world))
+    body = world.fake.created()[-1]
+    pattern = re.search(r"grep -E '(\^\(.*?\)\$)'", rp.BOOTSTRAP).group(1)
+    for name in body["env"]:
+        if name == "PUBLIC_KEY":
+            continue  # authorized_keys, written by the bootstrap itself
+        assert re.match(pattern, name), f"{name} is set on the pod but not saved for SSH jobs"
