@@ -821,7 +821,8 @@ def test_p4_on_runpod_serves_again_when_the_reference_fails(runpod_repo, monkeyp
     assert (shell.pod_dir / "bench/jobs/serve.ready").is_file() and list(world.fake.pods) == [served_now["pod_id"]]
 
 
-def test_p4_on_runpod_says_so_when_the_server_does_not_come_back(runpod_repo, monkeypatch):
+def test_p4_on_runpod_keeps_the_reference_when_the_server_does_not_come_back(runpod_repo, monkeypatch, capsys):
+    """A server that does not come back is reported beside the reference's result, never in place of it."""
     from runpod_apps import parity
 
     world = runpod_repo
@@ -830,8 +831,59 @@ def test_p4_on_runpod_says_so_when_the_server_does_not_come_back(runpod_repo, mo
     world.jobs["parity"] = parity_job(reference)
     world.jobs["serve"] = lambda shell, name, command: 1  # vLLM exits before it is warm
     sha, base, kwargs = _p4_args()
-    with pytest.raises(RunPodError, match=f"(?s)the server of {TINY_NAME} did not come back.*job serve exited.*still billing"):
+    returned = parity.peft_reference(world.config, "c0", sha, base, prompts, kwargs, 8, 5)
+    assert returned["base"] and returned["adapter"] and returned["function_seconds"] == 31.5  # the reference, kept
+    assert returned["pod_id"] == served_now["pod_id"]
+    assert re.search(f"(?s)the server of {TINY_NAME} did not come back.*job serve exited.*still billing", returned["restart_error"])
+    assert "did not come back" in capsys.readouterr().err
+    assert world.shells[served_now["pod_id"]].started == ["serve", "serve-stop", "parity", "serve"]
+
+
+def test_p4_on_runpod_keeps_the_references_error_when_the_server_does_not_come_back_either(runpod_repo, monkeypatch):
+    from runpod_apps import parity
+
+    world = runpod_repo
+    served_now, server, prompts, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["parity"] = lambda shell, name, command: 1
+    world.jobs["serve"] = lambda shell, name, command: 1
+    sha, base, kwargs = _p4_args()
+    with pytest.raises(RunPodError, match="job parity exited with 1") as raised:  # the reference's error, not the restart's
         parity.peft_reference(world.config, "c0", sha, base, prompts, kwargs, 8, 5)
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert f"the server of {TINY_NAME} did not come back" in notes and "still billing" in notes
+
+
+def test_p4_on_runpod_starts_no_second_server_when_the_stop_stopped_nothing(runpod_repo, monkeypatch):
+    """Without nvidia-smi the stop exits 3 before it touches anything: the server still serves, and starting
+    another beside it would hold the GPU twice. P-4 fails, saying why, and leaves the server alone."""
+    from runpod_apps import parity
+
+    world = runpod_repo
+    served_now, server, prompts, reference = serving_for_p4(world, monkeypatch)
+    server.close()
+    world.jobs["serve-stop"] = lambda shell, name, command: parity.NO_GPU_VIEW
+    world.jobs["parity"] = parity_job(reference)
+    sha, base, kwargs = _p4_args()
+    with pytest.raises(RunPodError, match="no nvidia-smi.*left serving, untouched"):
+        parity.peft_reference(world.config, "c0", sha, base, prompts, kwargs, 8, 5)
+    shell = world.shells[served_now["pod_id"]]
+    assert shell.started == ["serve", "serve-stop"]  # no reference, no second server
+    assert (shell.pod_dir / "bench/jobs/serve.ready").is_file()  # the first one, still up
+
+
+def test_p4_on_runpod_stop_signals_only_processes_it_found_in_the_containers_proc():
+    """nvidia-smi's PIDs may be the host's inside a container: the stop reads the GPU's memory from it, never
+    whom to kill. Every kill names a process group or a PID found under /proc."""
+    from runpod_apps import parity
+
+    script = parity.STOP_SERVE.format(timeout=300, free=1024, work="/bench", no_gpu_view=parity.NO_GPU_VIEW)
+    kills = [line for line in script.splitlines() if "kill " in line]
+    assert kills and not any("nvidia-smi" in line for line in kills)
+    assert "--query-compute-apps" not in script
+    assert all(re.search(r'kill -(TERM|KILL) (-- "-\$g"|\$\(server\)|\$alive)', line) for line in kills)
+    assert 'alive=$( { server; members; }' in script  # the server and every member of its process groups
+    assert script.index(f"exit {parity.NO_GPU_VIEW}") < script.index("kill ")  # exit 3 before anything is touched
 
 
 def test_p4_on_runpod_needs_a_serving_pod_and_fails_with_that_reason(runpod_repo):

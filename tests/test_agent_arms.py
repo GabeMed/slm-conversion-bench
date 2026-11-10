@@ -157,6 +157,9 @@ def test_a_short_step_is_filled_from_the_nearest_steps():
     assert few_shot.resolve(steps, "agent_ir", "ir:4") == "b" and few_shot.resolve(steps, "agent_ir", "ir:40") == "c"
     assert few_shot.resolve({"*": "x"}, "filter_column", "Laboratory.ALB") == "x"
     assert few_shot.resolve({}, "agent_cg", "cg:0") == []  # a run with no prefix (a fixed engine)
+    assert few_shot.resolve({}, "agent_cg", "single") == []  # no prefix: the key is never read (B2's one call)
+    with pytest.raises(hooks.HarnessError, match="is not <step name>:<index>"):
+        few_shot.resolve({"cg:0": "a"}, "agent_cg", "single")  # a prefix by step: a malformed key is refused
     assert few_shot.resolve({"*": []}, "agent_cg", "cg:4") == []  # k = 0
     with pytest.raises(hooks.HarnessError, match="not <step name>:<index>"):
         few_shot.step_of("agent_ss", "single")

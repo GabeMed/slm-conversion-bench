@@ -499,6 +499,7 @@ def train_cluster(config_path: str, cluster: str, on: str) -> Dict[str, Any]:
                        "cost_usd": round(seconds * run["price_usd_per_s"], 4),
                        "price_usd_per_s": run["price_usd_per_s"], "price_as_of": run["price_as_of"]}
             code = {"commit": run["commit"], "dirty": run["dirty"], "code_sha256": run["code_sha256"],
+                    **{k: run[k] for k in ("dirty_paths", "dirty_paths_total") if k in run},  # an older result has none
                     "modal_key": modal_key(plan, identity)}
             times = {"started_at": run["started_at"], "finished_at": run["finished_at"]}
         else:

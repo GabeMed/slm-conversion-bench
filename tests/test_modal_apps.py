@@ -202,19 +202,26 @@ def _names(spec):
     return ({path: repr(v) for path, v in spec.volumes.items()}, sorted(repr(s) for s in spec.secrets))
 
 
-@pytest.fixture
-def apps(serving, monkeypatch):
+APP_MODULES = ("modal_apps.serve_vllm", "modal_apps.train", "modal_apps.loadtest")
+
+
+def _import_apps(monkeypatch):
+    """The three apps, imported afresh against the configuration BENCH_CONFIG names (no Modal account)."""
     pytest.importorskip("modal")
     for name in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"):
         monkeypatch.delenv(name, raising=False)
-    modules = ("modal_apps.serve_vllm", "modal_apps.train", "modal_apps.loadtest")
-    for name in modules:
+    for name in APP_MODULES:
         sys.modules.pop(name, None)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        loaded = [importlib.import_module(name) for name in modules]
+        return [importlib.import_module(name) for name in APP_MODULES]
+
+
+@pytest.fixture
+def apps(serving, monkeypatch):
+    loaded = _import_apps(monkeypatch)
     yield serving[1], loaded
-    for name in modules:
+    for name in APP_MODULES:
         sys.modules.pop(name, None)
 
 
@@ -251,7 +258,32 @@ def test_the_apps_build_their_objects_without_an_account(apps):
     service = synchronizer._translate_in(serve.Server)._service_function
     loader = dict(zip(service._load.__code__.co_freevars, [c.cell_contents for c in service._load.__closure__]))
     assert (loader["min_containers"], loader["max_containers"], loader["scaledown_window"]) == (0, 1, 300)
-    assert service._function_info._inner_server_info.unauthenticated is config["serving"]["unauthenticated"]
+
+
+@pytest.mark.parametrize("unauthenticated", [False, True])
+def test_the_server_deploys_with_the_auth_the_configuration_says(serving, monkeypatch, unauthenticated):
+    """Each setting, stated here, not read back from the shipped file: unauthenticated false deploys behind
+    Modal's proxy auth (and vLLM's key when set); true deploys with no proxy auth, and then the container
+    starts only with vLLM's key (fail closed)."""
+    config_path, config = serving
+    config["serving"]["unauthenticated"] = unauthenticated
+    save(config, config_path)
+    try:
+        serve = _import_apps(monkeypatch)[0]
+        from modal._utils.async_utils import synchronizer
+
+        service = synchronizer._translate_in(serve.Server)._service_function
+        assert service._function_info._inner_server_info.unauthenticated is unauthenticated
+        assert serve.PLAN["unauthenticated"] is unauthenticated
+        assert common.check_auth(serve.PLAN, {"VLLM_API_KEY": "k"}) == ("vllm-key" if unauthenticated else "proxy+vllm-key")
+        if unauthenticated:
+            with pytest.raises(common.SettingsError, match="neither Modal proxy auth nor a VLLM_API_KEY"):
+                common.check_auth(serve.PLAN, {})
+        else:
+            assert common.check_auth(serve.PLAN, {}) == "proxy"
+    finally:
+        for name in APP_MODULES:
+            sys.modules.pop(name, None)
 
 
 def test_the_images_install_the_locks_and_carry_the_plan(apps):

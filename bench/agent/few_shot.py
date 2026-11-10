@@ -61,11 +61,11 @@ def resolve(steps: Dict[str, Any], call_site: str, invocation_key: str) -> Any:
     the nearest one's, the lower on a tie."""
     if ANY_STEP in steps:
         return steps[ANY_STEP]
+    if not steps:  # no prefix at all (no few-shot): the key is not read, whatever its shape
+        return []
     step = step_of(call_site, invocation_key)
     if step in steps:
         return steps[step]
-    if not steps:
-        return []
     target = _index(step)
     return steps[min(steps, key=lambda s: (abs(_index(s) - target), _index(s)))]
 
