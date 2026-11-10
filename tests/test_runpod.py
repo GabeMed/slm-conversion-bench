@@ -1020,6 +1020,103 @@ def test_p4_on_runpod_runs_the_reference_in_the_serving_pod_between_two_servers(
     assert world.tunnels[-1] == ("203.0.113.7", 40001, world.port)  # health checked through the tunnel
     command = next(c for c in shell.commands if c.startswith("# bench-job parity"))
     assert "env/train/requirements.lock" in command and "/opt/bench-train" in command  # the train lock's environment
+    # the code the reference ran is this checkout's (the pod held it since `up`: nothing uploaded)
+    state = git_state(rp.REPO)
+    assert (verdict["pod_code_sha256"], verdict["pod_code_commit"], verdict["pod_code_dirty"], verdict["pod_code_uploaded"]) == (
+        hashlib.sha256(rp.code_archive()).hexdigest(), state["commit"] or None, state["dirty"], False)
+
+
+def older_code_on(shell):
+    """The pod holds code an older checkout uploaded (its record names another sha256), every file in place."""
+    stale = shell.pod_dir / "bench/code/bench/preflight.py"
+    stale.write_text("# an older version, without what this checkout has\n")
+    (shell.pod_dir / "bench/code.json").write_text(json.dumps({"sha256": "0" * 64, "commit": "1" * 40, "dirty": False}))
+    return stale
+
+
+def count_uploads(monkeypatch):
+    uploads = []
+    original = rp.Provider.put_code
+    monkeypatch.setattr(rp.Provider, "put_code", lambda self, remote, archive: uploads.append(1) or original(self, remote, archive))
+    return uploads
+
+
+def test_p4_on_runpod_replaces_older_code_on_the_serving_pod_before_the_reference(runpod_repo, monkeypatch):
+    """A pod brought up by older code has every file the reference needs: only the sha256 tells it apart."""
+    from bench.preflight import PASS, lora_parity
+
+    world = runpod_repo
+    served_now, server, prompts, reference = serving_for_p4(world, monkeypatch)
+    shell = world.shells[served_now["pod_id"]]
+    stale = older_code_on(shell)
+    uploads = count_uploads(monkeypatch)
+    ran_with = []
+
+    def job(shell, name, command):
+        ran_with.append((stale.read_text(), json.loads((shell.pod_dir / "bench/code.json").read_text())["sha256"]))
+        return parity_job(reference)(shell, name, command)
+
+    world.jobs["parity"] = job
+    try:
+        first = lora_parity(world.config, "c0", "runpod")
+        second = lora_parity(world.config, "c0", "runpod")
+    finally:
+        server.close()
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    assert ran_with == [((rp.REPO / "bench/preflight.py").read_text(), sha)] * 2  # the reference ran this checkout's code
+    assert len(uploads) == 1  # the second run found the pod's code already this checkout's
+    assert first["status"] == PASS and (first["pod_code_sha256"], first["pod_code_uploaded"]) == (sha, True)
+    assert (first["pod_code_commit"], first["pod_code_dirty"]) == (git_state(rp.REPO)["commit"] or None, git_state(rp.REPO)["dirty"])
+    assert (second["pod_code_sha256"], second["pod_code_uploaded"]) == (sha, False)
+
+
+@pytest.mark.parametrize("record, recorded", [(None, "no record"), ('{"sha256": "%s"}' % ("0" * 64), "sha256 " + "0" * 64),
+                                              ("not json", "no record")])
+def test_p4_on_runpod_is_refused_before_the_stop_when_the_pods_code_record_is_not_this_checkouts(
+        runpod_repo, monkeypatch, record, recorded):
+    """After the sync the pod's record must name this checkout's archive: absent or another, nothing is touched."""
+    from bench.preflight import FAIL, check_lora_parity
+
+    world = runpod_repo
+    served_now, server, prompts, reference = serving_for_p4(world, monkeypatch)
+    shell = world.shells[served_now["pod_id"]]
+    world.jobs["parity"] = parity_job(reference)
+    path = shell.pod_dir / "bench/code.json"
+
+    def sync(self, remote):  # a sync that left the pod without this checkout's record
+        path.unlink(missing_ok=True) if record is None else path.write_text(record)
+        return {"sha256": hashlib.sha256(rp.code_archive()).hexdigest(), "uploaded": True}
+
+    monkeypatch.setattr(rp.Provider, "sync_code", sync)
+    try:
+        failed = check_lora_parity(world.config, "c0", "runpod")
+    finally:
+        server.close()
+    assert failed["status"] == FAIL
+    assert f"RunPodError: P-4's reference is refused: the code recorded on the pod (/bench/code.json: {recorded})" in failed["evidence"]["error"]
+    assert hashlib.sha256(rp.code_archive()).hexdigest() in failed["evidence"]["error"]
+    assert shell.started == ["serve"] and (shell.pod_dir / "bench/jobs/serve.ready").is_file()  # nothing stopped, nothing run
+
+
+def test_p4_on_runpod_refuses_a_reference_whose_pod_changed_code_while_it_ran(runpod_repo, monkeypatch):
+    """Another checkout uploading its code while the reference runs: the result is refused, the server served again."""
+    from runpod_apps import parity
+
+    world = runpod_repo
+    served_now, server, prompts, reference = serving_for_p4(world, monkeypatch)
+    server.close()
+    shell = world.shells[served_now["pod_id"]]
+
+    def job(shell, name, command):
+        older_code_on(shell)
+        return parity_job(reference)(shell, name, command)
+
+    world.jobs["parity"] = job
+    sha, base, kwargs = _p4_args()
+    with pytest.raises(RunPodError, match=r"the result of P-4's reference is refused: .*sha256 0{64}\) is not this checkout's"):
+        parity.peft_reference(world.config, "c0", sha, base, prompts, kwargs, 8, 5)
+    assert shell.started == ["serve", "serve-stop", "parity", "serve"]
+    assert (shell.pod_dir / "bench/jobs/serve.ready").is_file()
 
 
 def _p4_args():
@@ -1209,24 +1306,60 @@ def test_the_base_check_scores_the_last_steps_rows_in_the_serving_pod_between_tw
     assert "env/train/requirements.lock" in command  # the train lock's environment
     assert result["pod_id"] == served_now["pod_id"] and result["function_seconds"] == 12.5
     assert not world.fake.created("basecheck") and list(world.fake.pods) == [served_now["pod_id"]]
+    state = git_state(rp.REPO)
+    assert (result["pod_code_sha256"], result["pod_code_commit"], result["pod_code_dirty"], result["pod_code_uploaded"]) == (
+        hashlib.sha256(rp.code_archive()).hexdigest(), state["commit"] or None, state["dirty"], False)
 
 
-def test_the_base_check_uploads_the_code_only_to_a_pod_whose_code_lacks_it(runpod_repo, monkeypatch):
+def test_the_base_check_replaces_older_code_on_the_serving_pod_and_keeps_the_same(runpod_repo, monkeypatch):
+    """The pod's code is this checkout's by sha256, not by a file being there: older code that has
+    bench/basecheck.py is replaced too, and a pod without a record gets the code as well."""
     from bench.basecheck import base_check
 
     world = runpod_repo
     served_now, server, _, _ = serving_for_p4(world, monkeypatch)
     server.close()
     world.jobs["basecheck"] = basecheck_job(world)
-    uploads = []
-    original = rp.Provider.upload_code
-    monkeypatch.setattr(rp.Provider, "upload_code", lambda self, remote: uploads.append(1) or original(self, remote))
-    code = world.shells[served_now["pod_id"]].pod_dir / "bench/code/bench/basecheck.py"
-    code.unlink()  # a pod brought up by code that predates the base check
-    base_check(world.config, "c0", "runpod", {})
-    assert code.is_file()
-    base_check(world.config, "c0", "runpod", {})
-    assert len(uploads) == 1
+    uploads = count_uploads(monkeypatch)
+    shell = world.shells[served_now["pod_id"]]
+    stale = older_code_on(shell)
+    assert (shell.pod_dir / "bench/code/bench/basecheck.py").is_file()  # what the check looked at before
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    first = base_check(world.config, "c0", "runpod", {})
+    assert stale.read_text() == (rp.REPO / "bench/preflight.py").read_text() and len(uploads) == 1
+    assert (first["pod_code_sha256"], first["pod_code_uploaded"]) == (sha, True)
+    second = base_check(world.config, "c0", "runpod", {})
+    assert len(uploads) == 1 and (second["pod_code_sha256"], second["pod_code_uploaded"]) == (sha, False)
+    (shell.pod_dir / "bench/code.json").unlink()  # code from before the record
+    third = base_check(world.config, "c0", "runpod", {})
+    assert len(uploads) == 2 and (third["pod_code_sha256"], third["pod_code_uploaded"]) == (sha, True)
+
+
+def test_the_base_check_is_refused_with_exit_2_when_the_pods_code_record_is_not_this_checkouts(runpod_repo, monkeypatch, capsys):
+    world = runpod_repo
+    served_now, server, _, _ = serving_for_p4(world, monkeypatch)
+    server.close()
+    save(world.config, world.config_path)  # the endpoint serving_for_p4 set
+    world.jobs["basecheck"] = basecheck_job(world)
+    shell = world.shells[served_now["pod_id"]]
+    sha = hashlib.sha256(rp.code_archive()).hexdigest()
+    argv = ["preflight", "--config", str(world.config_path), "--base-check", "c0", "--on", "runpod"]
+
+    def job(shell, name, command):  # another checkout uploads its code while the job runs
+        older_code_on(shell)
+        return basecheck_job(world)(shell, name, command)
+
+    world.jobs["basecheck"] = job
+    assert cli.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "RunPodError: the result of the base check is refused" in err and f"is not this checkout's (sha256 {sha})" in err
+    assert shell.started == ["serve", "serve-stop", "basecheck", "serve"] and not list(paths.RUNS.glob("basecheck-*"))
+
+    world.jobs["basecheck"] = basecheck_job(world)
+    monkeypatch.setattr(rp.Provider, "sync_code", lambda self, remote: (shell.pod_dir / "bench/code.json").unlink() or {"uploaded": True})
+    assert cli.main(argv) == 2  # no record after the sync: refused before the server is touched
+    assert "RunPodError: the base check is refused: the code recorded on the pod (/bench/code.json: no record)" in capsys.readouterr().err
+    assert shell.started == ["serve", "serve-stop", "basecheck", "serve"] and not list(paths.RUNS.glob("basecheck-*"))
 
 
 def test_the_base_check_fails_when_the_pinned_base_does_not_reproduce_tinkers_losses(runpod_repo, monkeypatch):
@@ -1363,11 +1496,21 @@ def test_the_serve_job_checks_the_vllm_version_and_the_weights_then_records_itse
     assert job.versions(["pytest", "no-such-distribution"]) == {"pytest": pytest.__version__, "no-such-distribution": None}
     monkeypatch.setattr(job, "versions", lambda packages: {p: "x" for p in packages})
     monkeypatch.setenv("BENCH_IMAGE", "vllm/vllm-openai:v0.30.0")
+    assert job.CODE_RECORD == rp.CODE_RECORD
+    monkeypatch.setattr(job, "CODE_RECORD", str(tmp_path / "code.json"))
+    expected = {"gpus": ["NVIDIA A100 80GB PCIe"], "auth": "vllm-key", "provider": "runpod",
+                "image": "vllm/vllm-openai:v0.30.0", "pod_id": None, "vllm_version": "0.30.0",
+                "versions": {"vllm": "x", "torch": "x", "transformers": "x", "flashinfer-python": "x"}}
     assert job.serve(str(tmp_path / "plan.json")) == 0
     state = json.loads(Path((tmp_path / "serve.ready").read_text()).read_text())
-    assert state == {"gpus": ["NVIDIA A100 80GB PCIe"], "auth": "vllm-key", "provider": "runpod",
-                     "image": "vllm/vllm-openai:v0.30.0", "pod_id": None, "vllm_version": "0.30.0",
-                     "versions": {"vllm": "x", "torch": "x", "transformers": "x", "flashinfer-python": "x"}}
+    assert state == {**expected, "code": None}  # a pod without a code record
+    # the code the server was started from: the pod's record as it was when the job began
+    record = {"sha256": "c" * 64, "commit": "1" * 40, "dirty": False}
+    (tmp_path / "code.json").write_text(json.dumps(record))
+    common.state_path(common.VLLM_CACHE, plan["name"]).unlink()
+    common.state_path(common.VLLM_CACHE, plan["name"]).parent.rmdir()
+    assert job.serve(str(tmp_path / "plan.json")) == 0
+    assert json.loads(Path((tmp_path / "serve.ready").read_text()).read_text()) == {**expected, "code": record}
 
 
 def test_a_tunnel_is_only_ever_an_ssh_process():

@@ -12,8 +12,15 @@ reference's result or error, never in place of it.
 
 The serving image (runpod.images.serve) has no training environment: the train lock is installed at the first
 job onto the volume (a venv keyed by the lock's sha256, Python managed by uv, reused by every later job and by
-the load client), or taken from /opt/bench-train when the image has it. The reference runs the code the
-serving pod was given at `up`.
+the load client), or taken from /opt/bench-train when the image has it.
+
+The reference runs this checkout's code: the serving pod's code is made this checkout's before anything is
+stopped (Provider.sync_code: uploaded unless its sha256 is already the pod's), so a pod brought `up` by older
+code never runs the reference with it. The result is refused (RunPodError) when the code record on the pod is
+absent or names another sha256 than this checkout's archive, right after the sync and again once the job has
+ended; it carries the record (`pod_code`: sha256, and the commit and dirtiness of the checkout it was uploaded
+from), which P-4's verdict and the base check's report state as `pod_code_sha256`, `pod_code_commit` and
+`pod_code_dirty`. The server started again afterwards runs that code too.
 
 `bench preflight --base-check <cluster> --on runpod` (bench/basecheck.py) runs the same way, its job
 `runpod_apps.job basecheck` in place of `parity`; with `--no-restart` the server is left stopped (the pod goes
@@ -22,7 +29,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from bench import paths
 from runpod_apps import pods as rp
@@ -99,16 +106,15 @@ def base_identity(config: Dict[str, Any], cluster: str, adapter_sha256: str, bas
     """bench.basecheck.teacher_forced in the serving pod, as P-4's reference runs there (`--base-check`)."""
     spec = {"base": base, "rows": rows, "template_kwargs": template_kwargs, "max_length": max_length,
             "max_context": max_context}
-    return run_with_server_stopped(config, cluster, adapter_sha256, "basecheck", spec, "the base check", restart,
-                                   needs="bench/basecheck.py")
+    return run_with_server_stopped(config, cluster, adapter_sha256, "basecheck", spec, "the base check", restart)
 
 
 def run_with_server_stopped(config: Dict[str, Any], cluster: str, adapter_sha256: str, job: str, spec: Dict[str, Any],
-                            label: str, restart: bool = True, needs: Optional[str] = None) -> Dict[str, Any]:
+                            label: str, restart: bool = True) -> Dict[str, Any]:
     """`python -m runpod_apps.job <job> <spec> <out>` in the train environment of the pod serving the cluster's
     SLM, with its server stopped, then started again (unless `restart` is False: the pod is about to go down).
-    `needs`: a file of the code the job runs; when the pod's code (uploaded at `up`) lacks it, this checkout's
-    code is uploaded first (a superset of what serves)."""
+    The pod's code is made this checkout's first (by sha256), and the job's result is refused unless the pod's
+    code record names this checkout's archive, before the server is stopped and after the job (`pod_code`)."""
     provider = rp.make_provider(config)
     slm = json.loads((paths.ROOT / "train" / "adapters" / cluster / "manifest.json").read_text())["slm"]
     record = provider.state.serving(slm)
@@ -119,8 +125,8 @@ def run_with_server_stopped(config: Dict[str, Any], cluster: str, adapter_sha256
     remote = provider.remote(pod)
     provider.ensure_adapters(remote, [{"cluster": cluster, "sha256": adapter_sha256}])
     provider.clear_stale_train_lock(remote)
-    if needs and not remote.exists(f"{WORK}/code/{needs}"):  # a pod brought `up` by code without this job
-        provider.upload_code(remote)
+    uploaded = provider.sync_code(remote)["uploaded"]  # a pod brought `up` by other code gets this checkout's
+    provider.require_code(remote, label)  # before anything is stopped: the server is left as it is
     spec = {"adapter_sha256": adapter_sha256, **spec,
             "serving_state": f"{VOLUME}/vllm-cache/bench-serving/{slm}.json"}  # the server compared with
     with tempfile.TemporaryDirectory() as work:
@@ -146,7 +152,9 @@ def run_with_server_stopped(config: Dict[str, Any], cluster: str, adapter_sha256
         out = remote.read(f"{WORK}/{job}.out.json")
         if out is None:
             raise RunPodError(f"{label} ended without its output")
-        result = {**json.loads(out), "pod_id": pod["id"], "usd_per_hour": pod.get("cost")}
+        code = provider.require_code(remote, f"the result of {label}")  # still this checkout's: the code that ran
+        result = {**json.loads(out), "pod_id": pod["id"], "usd_per_hour": pod.get("cost"),
+                  "pod_code": {**code, "uploaded": uploaded}}
     except ServerNotStopped:
         raise  # a second server would be started beside the first
     except BaseException as e:  # noqa: B902 -- an interrupted job serves again too, then is re-raised

@@ -319,13 +319,29 @@ class Provider:
         record of the code the pod now runs (its sha256, and the commit and dirtiness of the checkout it was
         uploaded from), with `uploaded`."""
         archive = code_archive()
+        held = self.held_code(remote)
+        if held is not None and held.get("sha256") == hashlib.sha256(archive).hexdigest():
+            return {**held, "uploaded": False}
+        return {**self.put_code(remote, archive), "uploaded": True}
+
+    def held_code(self, remote: Remote) -> Optional[Dict[str, Any]]:
+        """The record the last upload left on the pod (CODE_RECORD), None when there is none to read."""
         try:
             held = json.loads(remote.read(CODE_RECORD) or "null")
         except ValueError:
             held = None
-        if isinstance(held, dict) and held.get("sha256") == hashlib.sha256(archive).hexdigest():
-            return {**held, "uploaded": False}
-        return {**self.put_code(remote, archive), "uploaded": True}
+        return held if isinstance(held, dict) else None
+
+    def require_code(self, remote: Remote, what: str) -> Dict[str, Any]:
+        """The pod's code record, when it names this checkout's archive; otherwise `what` is refused (no
+        record, or another sha256: the pod does not hold the code of this checkout)."""
+        local = hashlib.sha256(code_archive()).hexdigest()
+        held = self.held_code(remote)
+        if held is None or held.get("sha256") != local:
+            recorded = f"sha256 {held.get('sha256')}" if held is not None else "no record"
+            raise RunPodError(f"{what} is refused: the code recorded on the pod ({CODE_RECORD}: {recorded}) is not "
+                              f"this checkout's (sha256 {local})")
+        return held
 
     def ensure_adapters(self, remote: Remote, adapters: List[Dict[str, Any]]) -> List[str]:
         """Each adapter (train/adapters/<cluster>/adapter) at /runpod-volume/adapters/<sha256>, uploaded when

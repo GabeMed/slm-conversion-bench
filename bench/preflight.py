@@ -562,6 +562,10 @@ def lora_parity(config: Dict[str, Any], cluster: str, on: str,
         verdict["reference_versions"] = ref["versions"]
     if (ref.get("serving_state") or {}).get("versions"):  # and the serving image's vllm, torch, transformers, flashinfer
         verdict["serving_versions"] = ref["serving_state"]["versions"]
+    if ref.get("pod_code"):  # RunPod: the code the reference ran, this checkout's by sha256 (runpod_apps/parity.py)
+        code = ref["pod_code"]
+        verdict.update({"pod_code_sha256": code.get("sha256"), "pod_code_commit": code.get("commit"),
+                        "pod_code_dirty": code.get("dirty"), "pod_code_uploaded": code.get("uploaded")})
     if ref.get("restart_error"):  # RunPod: the reference ran, the server did not come back after it
         verdict["restart_error"] = ref["restart_error"]
     return verdict

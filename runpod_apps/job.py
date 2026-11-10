@@ -19,6 +19,7 @@ from pathlib import Path
 
 HF_COMPLETE = "/root/.cache/huggingface/bench-complete"  # one marker per snapshot downloaded whole
 READY = "/bench/jobs/serve.ready"
+CODE_RECORD = "/bench/code.json"  # runpod_apps.pods.CODE_RECORD: the record of the code uploaded to this pod
 SERVING_PACKAGES = ("vllm", "torch", "transformers", "flashinfer-python")
 REFERENCE_PACKAGES = ("torch", "transformers", "peft", "accelerate")
 
@@ -40,10 +41,22 @@ def complete_marker(repo: str, revision: str) -> str:
     return f"{HF_COMPLETE}/{repo.replace('/', '--')}@{revision}"
 
 
+def code_record():
+    """The record of the code on this pod (CODE_RECORD: its sha256, commit and dirtiness), None without one."""
+    try:
+        record = json.loads(Path(CODE_RECORD).read_text())
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
 def serve(plan_path: str) -> int:
     """common.start_serving as the Modal server runs it (auth fails closed first, the adapters' bytes, vLLM,
     health, warm-up, the server's own state), with the weights offline; the vLLM in the image must be the
-    version the configuration pins. Writes READY once warm, then lives as long as vLLM."""
+    version the configuration pins. Writes READY once warm, then lives as long as vLLM. The state records the
+    code this server was started from (`code`: the pod's code record as it was when the job began, None
+    without one), which a later upload to the pod does not change."""
+    code = code_record()
     from modal_apps import common
 
     plan = json.loads(Path(plan_path).read_text())
@@ -64,7 +77,7 @@ def serve(plan_path: str) -> int:
     state = common.state_path(common.VLLM_CACHE, plan["name"])
     recorded = json.loads(state.read_text())
     recorded.update({"provider": "runpod", "image": environ.get("BENCH_IMAGE"), "pod_id": environ.get("RUNPOD_POD_ID"),
-                     "vllm_version": vllm.__version__, "versions": versions(SERVING_PACKAGES)})
+                     "vllm_version": vllm.__version__, "versions": versions(SERVING_PACKAGES), "code": code})
     state.write_text(json.dumps(recorded, indent=2))
     Path(READY).write_text(str(state))
     return process.wait()
