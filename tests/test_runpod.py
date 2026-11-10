@@ -684,7 +684,8 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     small_sweep(world)
     # the adapter's traffic: the calls B4 sent it on calib, cluster c0's
     source = write_run("agent-B4-calib-src", {"type": "agent", "arm": "B4", "split": "calib"},
-                       [dict(c, run_id="agent-B4-calib-src", engine=engine) for c in SOURCE]).name
+                       [dict(c, run_id="agent-B4-calib-src", engine=engine) for c in SOURCE],
+                       files={"routes.jsonl": [{"question_id": "1", "embed_ms": 100.0, "embed_wait_ms": 0.0}]}).name
     run_dirs = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1, 4])
     manifests = [json.loads((d / "manifest.json").read_text()) for d in run_dirs]
     for m, level in zip(manifests, (1, 4)):
@@ -718,14 +719,18 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     patched = copy.deepcopy(world.config)
     patched["modal"]["gpu_prices"] = {"as_of": "2026-11-09", "usd_per_s": {"A100-80GB": 0.000497},
                                       "cpu_usd_per_core_s": 0, "memory_usd_per_gib_s": 0}
-    patched["cost"].update(p95_slo_cap_ms=5000, slo_from=None)
+    patched["cost"].update(p95_slo_cap_ms=5000, slo_from=None, limit_min_calls=1)
     pilot = "agent-B0-calib-pilot"
+    # the teacher on both of the sweep's call sites (its limit is the teacher reweighted to the sweep's mix)
     write_run(pilot, {"type": "agent", "arm": "B0", "split": "calib"},
-              [call(pilot, str(q), "select_tables", latency_ms=3000) for q in (1, 2, 3)])
+              [call(pilot, str(q), site, latency_ms=3000, parsed={"tool": "x"} if site == "agent_ss" else None)
+               for q in (1, 2, 3) for site in ("select_tables", "agent_ss")])
     result = read_result(j8.run([d.name for d in run_dirs], patched, slo_from=pilot), "J8")["result"]
     assert result["gpu"] == "A100-80GB" and result["gpu_prices_as_of"] == "2026-11-09"
     assert result["price_per_hour"] == pytest.approx(0.000497 * 3600)
     assert result["cost_per_request"]["100%"] == pytest.approx(0.000497 * 3600 / (2.5 * 3600))
+    adapter = result["engines"][engine]  # the router feeds an adapter's sweep: its embedding time is added
+    assert adapter["traffic_kind"] == "adapter" and adapter["added_ms"] == 100.0 and adapter["limit"]["slo_ms"] == 3000.0
 
 
 def test_the_load_test_needs_the_server_up(runpod_repo):

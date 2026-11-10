@@ -8,7 +8,7 @@ from fixtures.fake import call, repo, write_run
 
 def loadtest(run_id, concurrency, p95_ms, rps):
     write_run(run_id, {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
-                       "prefix_cache": True, "sweep_id": "sweep-1"},
+                       "prefix_cache": True, "sweep_id": "sweep-1", "composition": {"source": {"call_sites": {"select_tables": 1}}}},
               files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95_ms},
                                                     "request_throughput": {"unit": "requests/sec", "avg": rps}}})
     return run_id
@@ -16,7 +16,7 @@ def loadtest(run_id, concurrency, p95_ms, rps):
 
 def test_a_judgment_runs_and_prints_its_result(tmp_path, monkeypatch, capsys):
     # no SLO execution fixed in the configuration (the shipped one names the real pilot's): --slo-from names it
-    config_path, _ = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_cap_ms": 1000, "slo_from": None},
+    config_path, _ = repo(tmp_path, monkeypatch, {"cost": {"p95_slo_cap_ms": 1000, "slo_from": None, "limit_min_calls": 1},
                                                   "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.001}},
                                                             "gpu_prices_sensitivity": None}})
     runs = [loadtest("lt-1", 1, 300, 2.0), loadtest("lt-8", 8, 800, 9.0)]

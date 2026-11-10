@@ -35,9 +35,9 @@ def without_centroids(config):
     return config
 
 
-def loadtest(run_id, concurrency, p95_ms, rps):
-    write_run(run_id, {"type": "loadtest", "engine": "slm:qwen3-8b", "gpu": "L4", "concurrency": concurrency,
-                       "prefix_cache": True, "sweep_id": "sweep-1"},
+def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b"):
+    write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": "L4", "concurrency": concurrency,
+                       "prefix_cache": True, "sweep_id": f"sweep-{engine}", "composition": {"source": {"call_sites": {"select_tables": 1}}}},
               files={j8.EXPORT: {"request_latency": {"unit": "ms", "p95": p95_ms},
                                  "request_throughput": {"unit": "requests/sec", "avg": rps}}})
     return run_id
@@ -51,7 +51,7 @@ def world(tmp_path, monkeypatch):
     config_path, config = repo(tmp_path, monkeypatch, {
         "prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}},
         "allocation": {"min_calls": 5}, "stats": {"n_boot": 100},
-        "cost": {"p95_slo_cap_ms": 1000, "slo_from": "agent-B0-calib"},  # this world's pilot, not the shipped one's
+        "cost": {"p95_slo_cap_ms": 1000, "slo_from": "agent-B0-calib", "limit_min_calls": 1},  # this world's pilot
         "modal": {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600}}, "gpu_prices_sensitivity": None},
         "arms": NO_CENTROIDS})
     # what J7 reads beside its arguments: the size of the test split and the registered pilot
@@ -71,7 +71,10 @@ def world(tmp_path, monkeypatch):
         zeroshots[f"zeroshot-{name}"] = per_call_eval(f"eval-zeroshot-{name}", f"zeroshot-{name}", calls,
                                                       lambda c, n=name, q=quality: teacher_ok(c) and gold_correct(n, q)(c))
     j6_path, choice = j6.run(zeroshots, "eval-t", config)
-    j8_path = j8.run([loadtest("lt-4", 4, 60, 5.0), loadtest("lt-8", 8, 80, 12.0)], config, slo_from="agent-B0-calib")
+    # the base and each cluster's adapter, each its own sweep (J7 reads each cluster's own)
+    j8_path = j8.run([loadtest("lt-4", 4, 60, 5.0), loadtest("lt-8", 8, 80, 12.0)]
+                     + [loadtest(f"lt-{c}-8", 8, 80, 12.0, engine=f"slm:qwen3-8b+lora:qwen3-8b-{c}") for c in ("c0", "c1")],
+                     config, slo_from="agent-B0-calib")
 
     embedding = {"model": "fake-embedder", "revision": "0" * 40, "max_seq_length": 64, "truncation": "tail", "text": "prompt"}
     centroids = facts.write_fact("J5", "centroids", {"embedding": embedding, "clusters": {"c0": [1.0, 0.0], "c1": [0.0, 1.0]}})
@@ -153,7 +156,8 @@ def test_a_fabricated_result_does_not_come_out_of_its_own_reads(world):
     forged = forge(world)
     verified, divergences = verify.verify(world["config"], {**world["plan"], "j8": relative(forged)})
     assert divergences == [f"{relative(forged)}: recomputes to {relative(world['results']['j8'])}, not to the stored bytes "
-                           "(read cost.p95_slo_cap_ms, cost.slo_from, cost.utilizations, modal.gpu_prices, serving.cpu, serving.memory_gib "
+                           "(read cost.limit_min_calls, cost.limit_pool, cost.p95_slo_cap_ms, cost.slo_from, cost.utilizations, "
+                           "modal.gpu_prices, modal.gpu_prices_sensitivity, serving.cpu, serving.memory_gib "
                            "of the configuration)"]
     assert relative(world["results"]["j8"]) in verified  # the genuine one, which the J3 cost and J7 built on
 

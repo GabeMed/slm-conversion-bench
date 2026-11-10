@@ -771,7 +771,7 @@ def build_pipeline(tmp_path, monkeypatch):
     config["prices"] = {"as_of": "2026-09-30", "table": {
         "teacher-model": {"provider": "provider-x", "input_per_mtok": 3.0, "cached_input_per_mtok": 0.3, "output_per_mtok": 12.0, "batch_discount": 0.5},
         "engine-model": {"provider": "provider-x", "input_per_mtok": 0.2, "cached_input_per_mtok": 0.02, "output_per_mtok": 0.6, "batch_discount": 0.5}}}
-    config["cost"].update(p95_slo_cap_ms=1000, slo_from="agent-B0-slo")
+    config["cost"].update(p95_slo_cap_ms=1000, slo_from="agent-B0-slo", limit_min_calls=1)  # a one-call pilot
     config["modal"] = {"gpu_prices": {"as_of": "2026-09-30", "usd_per_s": {"L4": 0.8 / 3600},  # F3's key
                                       "cpu_usd_per_core_s": 0.0, "memory_usd_per_gib_s": 0.0}}
     config["stats"] = {"n_boot": 100}  # F2's key
@@ -823,11 +823,13 @@ def build_pipeline(tmp_path, monkeypatch):
     assigned = lambda c: clusters.assign(c["prompt_messages"], payload)  # noqa: E731
     # load test and S6 on calib
     loadtests = []
-    for engine, slug in (("slm:qwen3-8b", "base"), ("slm:qwen3-8b+lora:c", "lora-c")):  # B3's base, B4/B5's adapter
+    for engine, slug in (("slm:qwen3-8b", "base"), ("slm:qwen3-8b+lora:c", "lora-c"),  # B3's base, B5's adapter
+                         ("slm:qwen3-8b+as-deployed", "deployed"),  # B4 as deployed, which prices B4
+                         *((f"slm:qwen3-8b+lora:qwen3-8b-{c}", f"lora-{c}") for c in payload["clusters"])):  # J7's
         for concurrency, p95, rps in ((1, 300, 3.0), (8, 800, 12.0), (32, 2500, 20.0)):
             run_id = f"loadtest-{slug}-{concurrency}"
             write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": "L4", "concurrency": concurrency,
-                               "prefix_cache": True, "sweep_id": f"sweep-{slug}"},
+                               "prefix_cache": True, "sweep_id": f"sweep-{slug}", "composition": {"source": {"call_sites": {"select_tables": 1}}}},
                       files={"profile_export_aiperf.json": {"request_latency": {"unit": "ms", "p95": p95},
                                                              "request_throughput": {"unit": "requests/sec", "avg": rps}}})
             loadtests.append(run_id)
@@ -1079,10 +1081,11 @@ def test_report_end_to_end_on_a_fake_execution(pipeline):
     assert data["d_pilot"] == sum(pilot_rows["B0"][q] != pilot_rows["B3"][q] for q in PILOT) / len(PILOT)  # the pilot ids only
     assert [r["run_id"] for r in data["registry"]["runs"]] == sorted(f"agent-{arm}-test" for arm in QUALITY) + ["replay-B4-test"]
     assert data["arms"]["B5"]["replaceable_fraction"] is not None
+    # B3 at the base's sweep and B4 at its as-deployed one: measured; B5 each call at its own engine's
     assert [data["arms"][a]["slm_cost_basis"] for a in ("B3", "B4", "B5")] == [
-        "measured", "extrapolated from per-adapter load tests", "extrapolated from per-adapter load tests"]
-    b4_row = next(line for line in markdown.splitlines() if line.startswith("| B4 |"))
-    assert b4_row.endswith("| measured; extrapolated from per-adapter load tests (B4) |")  # the arm table's labels
+        "measured", "measured", "extrapolated from per-engine load tests"]
+    b5_row = next(line for line in markdown.splitlines() if line.startswith("| B5 |"))
+    assert b5_row.endswith("| measured; extrapolated from per-engine load tests (B5) |")  # the arm table's labels
     j5 = read_result(pipeline["j5"], "J5")["result"]
     assert f"ARI {j5['ari_call_sites']:.3f}" in markdown
     svg = ET.fromstring((out / "ex_cost.svg").read_text())
@@ -1136,7 +1139,7 @@ def test_generation_and_repair_get_their_own_tests_with_the_pilot_restricted(pip
     a4 = next(r for r in data["map"] if r["claim"].startswith("A4"))
     assert a4["result"].endswith(f"B5 against B0: {report.outcome(data['tests']['B0|B5'])}")
     a6 = next(r for r in data["map"] if r["claim"].startswith("A6"))
-    assert "[costs: extrapolated from per-adapter load tests (B5)]" in a6["verdict"]  # B5's SLM cost
+    assert "[costs: extrapolated from per-engine load tests (B5)]" in a6["verdict"]  # B5's SLM cost
 
 
 def test_the_report_refuses_prices_of_different_dates_and_mismatched_results(pipeline):
@@ -1289,8 +1292,8 @@ def test_the_report_refuses_a_cost_that_cannot_say_what_it_is_or_used_another_lo
     pipeline["plan"].write_text(yaml.safe_dump(changed))
     with pytest.raises(JudgmentError, match="records no upper_bound, cache_not_reported"):
         report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
-    only_adapter = [f"loadtest-lora-c-{c}" for c in (1, 8, 32)]
-    other = relative(j8.run(only_adapter, pipeline["config"], slo_from="agent-B0-slo"))
+    only_deployed = [f"loadtest-deployed-{c}" for c in (1, 8, 32)]  # another J8: B4's as-deployed sweep alone
+    other = relative(j8.run(only_deployed, pipeline["config"], slo_from="agent-B0-slo"))
     b4 = read_result(plan["arms"]["B4"]["cost"], "J3")
     from bench.judge import j3
     changed = json.loads(json.dumps(plan))
@@ -1422,3 +1425,44 @@ def test_the_report_refuses_a_j2_without_its_call_sites_and_a_j7_on_other_prices
         pipeline["plan"].write_text(yaml.safe_dump(changed))
         with pytest.raises(JudgmentError, match=message):
             report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+
+
+def test_a_cost_confirmation_must_also_hold_at_modals_price():
+    """SPEC §6.6: a V3 or A6 confirmation at the provider's price holds only if it holds at Modal's too."""
+    costs = {"B0": {"": 1.0}, "B4": {"20%": 0.25, "50%": 0.1, "100%": 0.05}}
+
+    def v3(low, modal_low):
+        data = data_with(j4_results(), costs, ratios={"20%": low, "100%": ratio(20, 16, 24)})
+        data["cost_ratios_sensitivity"] = {"20%": modal_low, "100%": ratio(10, 8, 12)}
+        return row(report.claims_map(data), "V3")["verdict"]
+    assert v3(ratio(4, 3.2, 5), ratio(3.5, 3.1, 4)) == "meets the paper's 3× bar (even at 20% utilization)"
+    assert v3(ratio(4, 3.2, 5), ratio(2, 1.5, 2.5)) == \
+        "cheaper even at 20% utilization, below the 3× bar there (the bar is met at the provider's price, not at Modal's)"
+    assert v3(ratio(4, 3.2, 5), ratio(1, 0.8, 1.3)) == \
+        "inconclusive (at 20% utilization: meets the 3× bar at the provider's price, the interval holds 1 at Modal's)"
+    # without a sensitivity price the verdict is the provider's
+    assert row(report.claims_map(data_with(j4_results(), costs, ratios={"20%": ratio(4, 3.2, 5), "100%": ratio(20, 16, 24)})),
+               "V3")["verdict"] == "meets the paper's 3× bar (even at 20% utilization)"
+
+    tests = {**j4_results(), "B0|B1": j4(False)}
+
+    def a6(modal):
+        data = data_with(tests, {"B0": {"": 1.0}, "B1": {"": 0.2}, "B5": {"20%": 0.4, "100%": 0.05}})
+        data["arms"]["B5"]["cost_per_correct_sensitivity"] = modal
+        return row(report.claims_map(data), "A6")["verdict"]
+    assert a6({"20%": 0.7, "100%": 0.1}).startswith("confirms")
+    assert a6({"20%": 1.2, "100%": 0.2}) == \
+        "inconclusive (B5 is cheaper at 20% utilization at the provider's price, not at Modal's: $1.2)"
+
+
+def test_an_slm_arm_outside_its_latency_limit_is_not_testable_at_the_apis_latency():
+    costs = {"B0": {"": 1.0}, "B4": {"20%": None, "50%": None, "100%": None},
+             "B5": {"20%": None, "50%": None, "100%": None}}
+    data = data_with(j4_results(), costs)
+    for arm in ("B4", "B5"):
+        data["arms"][arm]["slm_outside_slo"] = ["slm:qwen3-8b+lora:c1"]
+    rows = report.claims_map(data)
+    said = "not testable at the API's latency (slm:qwen3-8b+lora:c1 sustain no load level within the p95 limit)"
+    assert row(rows, "V3")["verdict"].startswith(said) and row(rows, "A6")["verdict"].startswith(said)
+    assert "no cost within the latency limit: slm:qwen3-8b+lora:c1 sustain no load level within it (B5)" in \
+        row(rows, "A6")["verdict"]
