@@ -31,9 +31,10 @@ with more than one **completed** test run gets no verdict, and every run is list
 that did not finish as "not completed", which never blocks its re-run, and one under an earlier
 registration as "superseded by re-registration". Every attempt of each configuration is listed with how
 it ended (`end_reason`), the defect stated to run it again (`redo_reason`) or the attempt it resumed, and
-its n and EX: the final run's, and for an attempt abandoned with predictions, its partial EX on the
-questions it completed (`bench eval --partial`, which the plan's `attempts` names, checked against the
-predictions the registry recorded), never read for a verdict; `prereg/DEVIATIONS.md`, one line per new registration,
+its n and EX: the final run's, and for an attempt abandoned with predictions, or killed outright (its
+manifest still `running`), its partial EX on the questions it completed (`bench eval --partial`, which the
+plan's `attempts` names, checked against the predictions the registry recorded, or for a killed one against
+its journal's hashes), never read for a verdict; `prereg/DEVIATIONS.md`, one line per new registration,
 is printed when it exists (T13); the facts the B3–B5 runs recorded are the ones the plan's J5, J6 and J7 name; the per-call evaluation
 replays the plan's B0 run; and the pilot finished before the first test execution started. The test
 registry is read from git as F1 records it: `registry/test/<run_id>.intent.json` before a test
@@ -128,6 +129,8 @@ ROUTINE = ("extract_keywords", "filter_column", "select_tables", "select_columns
 PAIRS = (("B4", "B0"), ("B5", "B0"), ("B4", "B3"), ("B5", "B4"), ("B1", "B0"), ("B2-production", "B0"),
          ("B2-cheap", "B0"), ("B3", "B0"))  # (candidate, reference)
 REGISTRY_DIR = "registry/test"
+KILLED = "running"  # a test attempt killed outright: the manifest the registry published as it started never closed
+DATASETS_MANIFEST = "train/datasets/manifest.json"  # what `bench datasets` wrote: the rows S5 trains on
 DEVIATIONS = "prereg/DEVIATIONS.md"
 
 
@@ -187,7 +190,7 @@ def pilot_d(pilot_evals: Dict[str, str], pilot_ids: List[str], ex_table: Callabl
     missing = sorted(set(pilot_ids) - (set(b0) & set(b3)), key=int)
     if missing:
         raise JudgmentError(f"the pilot's B0 and B3 executions did not answer every pilot question: {missing[:5]}")
-    return j4.discordance({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids})
+    return j4.discordance({q: b3[q] for q in pilot_ids}, {q: b0[q] for q in pilot_ids}, names=("B3", "B0"))
 
 
 def planned(test: Dict[str, Any], d_pilot: Optional[float]) -> Dict[str, Any]:
@@ -312,6 +315,33 @@ def _registry_bindings(split: str, arms: Dict[str, Any], registry: Dict[str, Any
     return replay_several
 
 
+def training_datasets(plan: Dict[str, Any], sources: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The rows S5 trains on, per cluster, as `bench datasets` recorded them (`train/datasets/manifest.json`,
+    or the plan's `datasets`): written from the plan's J5 clusters, which it must name. The routed sites
+    (`routed_sites`, and `agent_sites` where a manifest has it) are drawn by their own rule, with no
+    deduplication or cap: curate's count of examples is not what trains there. None when the plan has no
+    J5, or the default manifest is absent."""
+    if not plan.get("j5"):
+        return None
+    rel = plan.get("datasets") or DATASETS_MANIFEST
+    path = paths.ROOT / rel
+    if not path.is_file():
+        if plan.get("datasets"):
+            raise JudgmentError(f"the plan's datasets {rel} is not there")
+        return None
+    raw = path.read_bytes()
+    found = json.loads(raw)
+    if found.get("j5") != Path(plan["j5"]).parent.name:
+        raise JudgmentError(f"{rel} was written from the J5 result {found.get('j5')}, not the plan's j5 "
+                            f"{Path(plan['j5']).parent.name}")
+    sources["datasets"] = {"path": str(rel), "sha256": hashlib.sha256(raw).hexdigest()}
+    rules = {key: {k: found[key].get(k) for k in ("call_sites", "rule", "rows", "by_cluster")}
+             for key in ("routed_sites", "agent_sites") if isinstance(found.get(key), dict)}
+    return {"rows": {c: v["n"] for c, v in found["clusters"].items()},
+            "rule_of_thumb": found.get("rule_of_thumb"),
+            "rule_of_thumb_reading": {c: v.get("rule_of_thumb") for c, v in found["clusters"].items()}, "rules": rules}
+
+
 REQUIRED_COST = ("upper_bound", "cache_not_reported", "lower_bound", "failed_unbilled", "prices", "by_question")
 
 
@@ -430,13 +460,15 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     uncovered = sorted(set(GOLD_SITES) - set(coverage)) if coverage is not None else []
 
     margin = config["thresholds"]["delta_pp"] / 100  # the one fixed margin of every non-inferiority (T3)
-    test_of = lambda a, b: plain(noninferiority(a, b, config["seeds"]["bootstrap"], n_boot(config), margin=margin))  # noqa: E731
+    test_of = lambda a, b, names: plain(noninferiority(a, b, config["seeds"]["bootstrap"], n_boot(config),  # noqa: E731
+                                                       margin=margin, names=names))
     d_pilot = pilot_d(pilot_plan, pilot_ids, ex_table)
     tests = {}
     for candidate, reference_arm in PAIRS:
         if candidate in correct and reference_arm in correct:
             several = sorted(set((arms[candidate].get("several_runs") or []) + (arms[reference_arm].get("several_runs") or [])))
-            tests[f"{reference_arm}|{candidate}"] = {**planned(test_of(correct[candidate], correct[reference_arm]), d_pilot),
+            tests[f"{reference_arm}|{candidate}"] = {**planned(test_of(correct[candidate], correct[reference_arm],
+                                                                       (candidate, reference_arm)), d_pilot),
                                                      "several_runs": several or None}
     formats = {}
     for arm, path in (plan.get("format") or {}).items():
@@ -456,9 +488,11 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
         ids = sorted(set(pilot_ids) & set(gold["by_question"]["teacher"])) if gold else []
         if ids:
             d = j4.discordance({q: gold["by_question"]["replay"][q] for q in ids},
-                               {q: gold["by_question"]["teacher"][q] for q in ids})
+                               {q: gold["by_question"]["teacher"][q] for q in ids},
+                               names=(f"J6's zero-shot replay of {site}", "the teacher"))
         # the replay's several runs, and its teacher's (B0's run), as the registry binding found them
-        gold_tests[site] = {**planned(test_of(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"]), d),
+        gold_tests[site] = {**planned(test_of(entry["gold"]["by_question"]["replay"], entry["gold"]["by_question"]["teacher"],
+                                              (f"the replay of {site}", "the teacher")), d),
                             "several_runs": replay_several}
     thresholds = config["thresholds"]
     data = {"split": split, "scope": SCOPE, "arms": arms, "tests": tests, "d_pilot": d_pilot,
@@ -470,7 +504,8 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             "registry": registry, "prereg_in_force": in_force,
             "attempts": attempts_by_configuration(registry, in_force, arms, plan.get("attempts") or {})
             if split == "test" else [],
-            "deviations": deviations(ref=remote if split == "test" else "HEAD"), "sources": sources}
+            "deviations": deviations(ref=remote if split == "test" else "HEAD"),
+            "datasets": training_datasets(plan, sources), "sources": sources}
     data["cost_ratios"] = cost_ratios(data, by_question, correct, config["seeds"]["bootstrap"], n_boot(config))
     data["cost_ratios_sensitivity"] = cost_ratios(data, by_question, correct, config["seeds"]["bootstrap"],
                                                   n_boot(config), sensitivity=True)
@@ -687,16 +722,39 @@ def cost_verdict(data, verdict: str, arms: List[str]) -> str:
     return f"{verdict} [costs: {'; '.join(labels)}]" if labels else verdict
 
 
+def _plannable(t) -> bool:
+    """A comparison whose planned power can be stated: it has a pilot, and the pilot's arms disagreed on
+    some question. With d = 0 J4's `power` is 1 by its formula (no discordance, no variance), which says
+    nothing of the test: the power is printed as "—" (the stored `planned_power` is unchanged)."""
+    return bool(t) and t.get("planned_power") is not None and t.get("d_pilot") != 0
+
+
 def _power(*tests) -> str:
-    """The planned power of these comparisons: from the pilot's d, at the fixed margin (T3)."""
-    return ", ".join(f"{t['planned_power']:.2f}" for t in tests if t and t.get("planned_power") is not None) or "—"
+    """The planned power of these comparisons: from the pilot's d, at the fixed margin (T3); "—" for one
+    with no pilot or a pilot d of 0 (`_plannable`)."""
+    return ", ".join(f"{t['planned_power']:.2f}" for t in tests if _plannable(t)) or "—"
 
 
 def _inconclusive(*tests) -> str:
     """A row that neither confirms nor refutes is inconclusive, with its planned power (SPEC §6.4): a
     low power never makes a comparison untestable."""
     power = _power(*tests)
-    return f"inconclusive (planned power {power})" if power != "—" else "inconclusive (no pilot: planned power unknown)"
+    if power != "—":
+        return f"inconclusive (planned power {power})"
+    if any(t and t.get("d_pilot") == 0 for t in tests):
+        return "inconclusive (the pilot's d is 0: planned power not estimable)"
+    return "inconclusive (no pilot: planned power unknown)"
+
+
+def repair_calls_below_floor(data) -> Optional[int]:
+    """The repair calls (`revise`, with gold) of the per-call evaluation when they are fewer than
+    `allocation.min_calls`: Appendix B and its K4 row are then inconclusive by design, with no planned
+    power. None otherwise."""
+    per_call, floor = data["judgments"].get("per_call"), data.get("min_calls")
+    if not per_call or floor is None:
+        return None
+    calls = ((per_call["per_call_site"].get("revise") or {}).get("gold") or {}).get("n", 0)
+    return calls if calls < floor else None
 
 
 def v1_verdict(t4) -> str:
@@ -922,10 +980,9 @@ def _appendix_b(data) -> Dict[str, str]:
     result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])}, {_ci(repair)}), {repaired}; "
               f"routine agreement with the teacher, a proxy with no effect on the verdict (D15): "
               + (", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())) or "none measured"))
-    floor = data.get("min_calls")
-    calls = ((per_call["per_call_site"].get("revise") or {}).get("gold") or {}).get("n", 0)
-    if floor is not None and calls < floor:  # too few repairs for any reading, whatever the bootstrap says
-        return {**row, "result": f"{calls} repair calls; " + result,
+    floor, calls = data.get("min_calls"), repair_calls_below_floor(data)
+    if calls is not None:  # too few repairs for any reading, whatever the bootstrap says: no planned power either
+        return {**row, "power": "—", "result": f"{calls} repair calls; " + result,
                 "verdict": f"inconclusive by design ({calls} repair calls, fewer than allocation.min_calls = {floor})"}
     verdict = _several(data, repair) or {"worse": "confirms (the SLM is worse on repair)",
                                          "non-inferior": "refutes (the SLM is non-inferior on repair)"}.get(repaired) \
@@ -943,14 +1000,32 @@ def steps(data: Dict[str, Any]) -> List[Dict[str, str]]:
              "cost": (_usd(train["total"].get("standard")) if train else "—"), "changed": "the training data exists"}]
     if j5:
         c = j5["curation"]["total"]
-        rows.append({"step": "S2 · curation",
-                     "did": (f"{c['invocations']} invocations; {c['passed_filter']} passed the production signal; "
-                             f"{c.get('masked_sql', 0)} SQL completions dropped because masking changed them; "
-                             f"{c['exact_duplicates']} exact and {c['near_duplicates']} near duplicates removed; "
-                             f"{sum(j5['curation']['mask_detections'].values())} sensitive-data detections masked; paraphrase not applied"),
-                     "cost": unmeasured,
-                     "changed": f"{c['kept']} training examples" + (f" ({c['over_cap']} above the cap per question and "
-                                                                    f"call site left out)" if c.get("over_cap") else "")})
+        curated = (f"{c['invocations']} invocations; {c['passed_filter']} passed the production signal; "
+                   f"{c.get('masked_sql', 0)} SQL completions dropped because masking changed them; "
+                   f"{c['exact_duplicates']} exact and {c['near_duplicates']} near duplicates removed; "
+                   f"{sum(j5['curation']['mask_detections'].values())} sensitive-data detections masked; paraphrase not applied")
+        kept = f"{c['kept']} training examples" + (f" ({c['over_cap']} above the cap per question and "
+                                                   f"call site left out)" if c.get("over_cap") else "")
+        datasets = data.get("datasets")
+        if datasets:  # what S5 trains on (bench datasets); curate's figures are context only
+            per_cluster = ", ".join(f"{cl} {n}" for cl, n in sorted(datasets["rows"].items()))
+            low, high = datasets["rule_of_thumb"] or (None, None)
+            readings = ", ".join(f"{cl} {r}" for cl, r in sorted(datasets["rule_of_thumb_reading"].items()))
+            routed = "; ".join(
+                f"{', '.join(rule['call_sites'] or [])}: {rule['rule']}; their rows per cluster: "
+                + (", ".join(f"{cl} " + " + ".join(f"{n} {site}" for site, n in sorted(sites.items()))
+                             for cl, sites in sorted((rule["by_cluster"] or {}).items()) if sites) or "none")
+                for rule in datasets["rules"].values())
+            rows.append({"step": "S2 · curation",
+                         "did": (f"training rows per cluster (bench datasets): {per_cluster}"
+                                 + (f" (against the rule of thumb {low}–{high}: {readings})" if low is not None else "")
+                                 + (f"; routed sites {routed}" if routed else "")
+                                 + f". Context, curate's own figures (not the routed sites' rows): {curated}; {kept}"),
+                         "cost": unmeasured,
+                         "changed": f"{sum(datasets['rows'].values())} training rows in {len(datasets['rows'])} clusters: "
+                                    f"{per_cluster}"})
+        else:
+            rows.append({"step": "S2 · curation", "did": curated, "cost": unmeasured, "changed": kept})
         calib = j5["assignment"]["calib"]
         rows.append({"step": "S3 · clustering",
                      "did": f"{j5['k']} clusters on prompt+action, ARI {j5['ari_call_sites']:.3f} against call sites",
@@ -1037,7 +1112,8 @@ def attempts_by_configuration(registry: Dict[str, Any], in_force: Optional[str],
     attempt it resumed, and its n and EX. A done run the plan binds as an arm carries the arm's; an attempt
     abandoned under the registration in force with predictions carries its partial EX, from the
     `bench eval --partial` the plan's `attempts` names, whose predictions are the ones the registry
-    recorded (`predictions_sha256`). A plan that leaves one out is refused: no attempt is hidden."""
+    recorded (`predictions_sha256`); so does an attempt killed outright (`running`, no predictions recorded),
+    scored on its journal. A plan that leaves one out is refused: no attempt is hidden."""
     runs = registry.get("runs") or []
     unknown = sorted(set(partial_evals) - {r["run_id"] for r in runs})
     if unknown:
@@ -1055,14 +1131,17 @@ def attempts_by_configuration(registry: Dict[str, Any], in_force: Optional[str],
                    "n": None, "ex": None, "partial": False}
             if run["status"] == "done" and run["run_id"] in final:
                 row["n"], row["ex"] = final[run["run_id"]]
-            elif run["status"] != "done" and run.get("n_predictions") and run["type"] == "agent" \
-                    and in_force is not None and run["prereg_hash"] == in_force:
+            elif run["status"] != "done" and (run.get("n_predictions") or run["status"] == KILLED) \
+                    and run["type"] == "agent" and in_force is not None and run["prereg_hash"] == in_force:
                 eval_run_id = partial_evals.get(run["run_id"])
                 if eval_run_id is None:
-                    raise JudgmentError(f"the abandoned attempt {run['run_id']} left {run['n_predictions']} predictions: "
+                    left = (f"was killed outright (its manifest still says {KILLED}): what it completed is in its journal"
+                            if run["status"] == KILLED else f"left {run['n_predictions']} predictions")
+                    raise JudgmentError(f"the abandoned attempt {run['run_id']} {left}: "
                                         f"name its `bench eval --partial` under the plan's attempts")
                 scored = manifest(eval_run_id)
-                if not scored.get("partial") or scored.get("source_run_id") != run["run_id"]:
+                if not scored.get("partial") or scored.get("source_run_id") != run["run_id"] \
+                        or (run["status"] == KILLED) != (scored.get("source_status") == KILLED):
                     raise JudgmentError(f"{eval_run_id} is not a partial evaluation of {run['run_id']}")
                 if scored.get("predictions_sha256") != run.get("predictions_sha256"):
                     raise JudgmentError(f"{eval_run_id} scored other predictions than the ones the registry recorded "
@@ -1197,6 +1276,14 @@ def render(data: Dict[str, Any]) -> str:
     parts += [_table(["arm", "n", "EX"] + [f"EX {d}" for d in difficulties] + ["cost per correct query (standard prices)", "usage"], rows), ""]
     parts += ["## The SPEC §5 map", "", data["scope"], "", _table(["claim", "result", "verdict", "planned power"],
                                                [[r["claim"], r["result"], r["verdict"], r["power"]] for r in data["map"]]), ""]
+    tests = data.get("tests") or {}
+    comparisons = [(key, tests[key]) for key in (f"{r}|{c}" for c, r in PAIRS) if key in tests]
+    if comparisons:
+        parts += ["## J4 comparisons: non-inferiority at the fixed margin", "",
+                  _table(["pair", "n", "diff (Δ)", "CI", "outcome", "planned power"],
+                         [[f"{key.split('|')[1]} against {key.split('|')[0]}", t["n"],
+                           f"{_pp(t['diff'])} (Δ {_margin(t['delta'])})", _ci(t), outcome(t), _power(t)]
+                          for key, t in comparisons]), ""]
     parts += ["## S1–S6: what each step did, cost and changed", "",
               _table(["step", "what it did", "cost", "what it changed"], [[s["step"], s["did"], s["cost"], s["changed"]] for s in data["steps"]]), ""]
     parts += ["## S4 desk triage", ""]
@@ -1225,14 +1312,17 @@ def render(data: Dict[str, Any]) -> str:
                          _pct(e["agreement"]["rate"]) if e["agreement"] else "—"])
         parts += [f"## Per-call-site evaluation ({per_call.get('arm') or per_call.get('engine')}, teacher's context)", "",
                   _table(["call site", "n", "format valid", "EX (gold)", "agreement with the teacher (fidelity)"], rows), ""]
+    k4 = f"## Clusters with gold: per-call non-inferiority on the {data['split']} inputs (SPEC §7.2 K4)"
     if data["per_call_uncovered"]:
-        parts += ["## Clusters with gold: per-call non-inferiority on the test inputs (SPEC §7.2 K4)", "",
-                  f"No data: the per-call replay covers only {', '.join(per_call['call_sites'])}.", ""]
+        parts += [k4, "", f"No data: the per-call replay covers only {', '.join(per_call['call_sites'])}.", ""]
     elif data["gold_tests"]:
-        parts += ["## Clusters with gold: per-call non-inferiority on the test inputs (SPEC §7.2 K4)", "",
+        by_design = repair_calls_below_floor(data)
+        parts += [k4, "",
                   _table(["call site", "n (questions)", "pilot d", "Δ", "SLM − teacher", "CI", "outcome", "planned power"],
                          [[site, t["n"], "—" if t.get("d_pilot") is None else f"{t['d_pilot']:.3f}", _margin(t["delta"]),
-                           _pp(t["diff"]), _ci(t), outcome(t), _power(t)] for site, t in sorted(data["gold_tests"].items())]), ""]
+                           _pp(t["diff"]), _ci(t), outcome(t),
+                           "—" if site == "revise" and by_design is not None else _power(t)]
+                          for site, t in sorted(data["gold_tests"].items())]), ""]
     registry = data["registry"]
     parts += ["## Test registry", ""]
     if not registry["available"]:

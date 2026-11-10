@@ -41,10 +41,15 @@ def power(d: float, n: int, margin: float) -> float:
     return 1.0 if margin > 0 else 0.0
 
 
-def discordance(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool]) -> float:
-    """d: the fraction of the paired questions exactly one of the two arms gets right."""
+def discordance(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool],
+                names: Tuple[str, str] = ("A", "B")) -> float:
+    """d: the fraction of the paired questions exactly one of the two arms gets right. `names` (the
+    candidate's, the reference's) only names the pair in a refusal."""
     if set(correct_a) != set(correct_b) or not correct_a:
-        raise JudgeError("the two arms must be scored on the same questions, and on at least one")
+        a, b = names
+        raise JudgeError(f"the two arms of {a} against {b} must be scored on the same questions, and on at least one: "
+                         f"{len(set(correct_a) - set(correct_b))} only in {a}, {len(set(correct_b) - set(correct_a))} "
+                         f"only in {b}, {len(set(correct_a) & set(correct_b))} in both")
     return sum(bool(correct_a[q]) != bool(correct_b[q]) for q in correct_a) / len(correct_a)
 
 
@@ -71,10 +76,10 @@ def _bounds(diffs: list, seed: int, n_boot: int) -> Tuple[float, float]:
 
 
 def noninferiority(correct_a: Mapping[str, bool], correct_b: Mapping[str, bool], seed: int, n_boot: int, *,
-                   margin: float) -> Dict[str, Any]:
+                   margin: float, names: Tuple[str, str] = ("A", "B")) -> Dict[str, Any]:
     """A (the candidate) against B (the reference), paired by question_id: both must cover the same
-    questions. `margin` is the fixed Δ, in EX units within [0, 1]."""
-    d = discordance(correct_a, correct_b)
+    questions. `margin` is the fixed Δ, in EX units within [0, 1]. `names` only names the pair in a refusal."""
+    d = discordance(correct_a, correct_b, names)
     if n_boot < 1:
         raise JudgeError(f"n_boot must be at least 1, not {n_boot}")
     if not 0 <= margin <= 1:

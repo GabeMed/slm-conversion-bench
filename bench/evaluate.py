@@ -263,6 +263,7 @@ def check_golds(questions: Dict[str, List[dict]], db_path: Callable[[str], Path]
 
 
 PARTIAL = ("failed", "interrupted")  # an abandoned test attempt, scored on what it answered (`--partial`)
+KILLED = "running"  # an attempt killed outright: its manifest never closed (`bench.agent.resume`)
 
 
 def _source(source_run_id: str, partial: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, dict]]:
@@ -282,9 +283,12 @@ def _source(source_run_id: str, partial: bool = False) -> Tuple[Dict[str, Any], 
             raise data.DataError(f"run {source_run_id} ran under pre-registration {run_manifest.get('prereg_hash')}, "
                                  f"not the one in force ({in_force}): it is reported, never scored")
     if partial:
-        if split != "test" or run_manifest["status"] not in PARTIAL:
-            raise data.DataError(f"--partial scores an abandoned test attempt (failed or interrupted), for the report's "
-                                 f"list of attempts; {source_run_id} is {run_manifest['status']!r} on {split}")
+        if split != "test" or run_manifest["status"] not in PARTIAL + (KILLED,):
+            raise data.DataError(f"--partial scores an abandoned test attempt (failed, interrupted, or killed), for the "
+                                 f"report's list of attempts; {source_run_id} is {run_manifest['status']!r} on {split}")
+        if run_manifest["status"] == KILLED:  # killed outright only once its session's lock is free, as resume reads it
+            from bench.agent.resume import check_resumable
+            check_resumable(run_manifest, "test attempt")
     elif run_manifest["status"] != "done":
         raise data.DataError(f"run {source_run_id} is {run_manifest['status']!r}, not 'done': "
                              f"an incomplete or failed run is never scored")
@@ -336,7 +340,7 @@ def _write(kind: str, source_run_id: str, run_manifest: Dict[str, Any], config: 
 def evaluate(source_run_id: str, partial: bool = False) -> Path:
     """The eval execution of a run's final SQL per question (predictions.json).
 
-    `partial` scores an abandoned test attempt (failed or interrupted) on the questions it completed,
+    `partial` scores an abandoned test attempt (failed, interrupted, or killed) on the questions it completed,
     never read for a verdict: the report lists it, as descriptive, beside the configuration's final run
     (SPEC 6.1). Completed means the question ended with an entry in predictions.json, the model's
     failures included: the agent swallows them (a failed call is a tool error, the question still ends)
@@ -346,8 +350,11 @@ def evaluate(source_run_id: str, partial: bool = False) -> Path:
     raised (`failures`: an exception the agent did not swallow, so not the model's) and those that met a
     harness error (`harness_errors`), the same questions `bench run --resume-from` answers again. Its
     predictions must hash to what the attempt's manifest recorded when it ended (`predictions_sha256`,
-    which the registry published)."""
+    which the registry published). A test attempt killed outright (its manifest still `running`, its
+    session's lock free) recorded no such hash: `_evaluate_killed` scores it."""
     run_manifest, config, gold = _source(source_run_id, partial)
+    if partial and run_manifest["status"] == KILLED:
+        return _evaluate_killed(source_run_id, run_manifest, config, gold)
     path = paths.RUNS / source_run_id / "predictions.json"
     if not path.is_file():
         raise data.DataError(f"{source_run_id} left no predictions.json: nothing to score")
@@ -367,6 +374,50 @@ def evaluate(source_run_id: str, partial: bool = False) -> Path:
         raise data.DataError(f"the predictions of {source_run_id} are not exactly its question ids")
     databases = _check_paired(list(predictions), gold, config, run_manifest["split"])
     return _write("eval-partial" if partial else "eval", source_run_id, run_manifest, config, databases, lambda day: score(
+        predictions, gold, lambda db_id: paths.sqlite_path(config, db_id), config["eval"]["timeout_s"], day), **extra)
+
+
+def recorded_source_hashes(source_run_id: str) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
+    """The resume of a killed attempt that recorded the sha256 of its outputs (`unregistered_source_hashes`,
+    computed before the resume read anything), and those hashes, from the test registry's intents (each
+    published before its run's first question); (None, None) when no resume of it recorded any."""
+    found = []
+    for path in sorted((paths.ROOT / "registry" / "test").glob("*.intent.json")):
+        intent = json.loads(path.read_text())
+        if intent.get("resumed_from") == source_run_id and intent.get("unregistered_source_hashes"):
+            found.append((intent.get("started_at") or "", intent.get("run_id"), intent["unregistered_source_hashes"]))
+    if not found:
+        return None, None
+    _, run_id, hashes = min(found, key=lambda f: (f[0], str(f[1])))  # the first resume read it before anyone else
+    return run_id, hashes
+
+
+def _evaluate_killed(source_run_id: str, run_manifest: Dict[str, Any], config: Dict[str, Any],
+                     gold: Dict[str, dict]) -> Path:
+    """`--partial` of a test attempt killed outright (its manifest still `running`, its session's lock free):
+    no manifest recorded `predictions_sha256` when it ended, so the questions it completed are those its
+    session journaled as they ended (answers*.jsonl, as `--resume-from` reads them: no question that raised or
+    met a harness error is journaled; the model's failures are, and are scored as wrong). The sha256 of every
+    output it left is computed now and checked against the ones a resume of it recorded before reading
+    anything (`unregistered_source_hashes`, in its intent), or recorded as vouched for by no earlier record.
+    An attempt that journaled no question is scored on none (n = 0): the report lists it all the same."""
+    from bench.agent import resume
+    hashes = resume.unregistered_source_hashes(run_manifest)
+    resumed_by, recorded = recorded_source_hashes(source_run_id)
+    if recorded is not None and recorded != hashes:
+        changed = sorted(name for name in set(recorded) | set(hashes) if recorded.get(name) != hashes.get(name))
+        raise data.DataError(f"the outputs of {source_run_id} do not hash to what {resumed_by} recorded when it resumed "
+                             f"it (unregistered_source_hashes): {', '.join(changed[:5])}")
+    answers = resume.source_answers(run_manifest)
+    stray = sorted(set(answers) - set(run_manifest["question_ids"]))
+    if stray:
+        raise data.DataError(f"{source_run_id} journaled questions it was not given: {stray[:5]}")
+    predictions = {q: answers[q]["prediction"] for q in run_manifest["question_ids"] if q in answers}
+    extra = {"partial": True, "predictions_sha256": None, "of_questions": len(run_manifest["question_ids"]),
+             "source_status": KILLED, "source_hashes": hashes,
+             "source_hashes_recorded_by": resumed_by}  # None: no earlier record vouches for them
+    databases = _check_paired(list(predictions), gold, config, run_manifest["split"])
+    return _write("eval-partial", source_run_id, run_manifest, config, databases, lambda day: score(
         predictions, gold, lambda db_id: paths.sqlite_path(config, db_id), config["eval"]["timeout_s"], day), **extra)
 
 
