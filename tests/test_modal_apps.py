@@ -251,7 +251,7 @@ def test_the_apps_build_their_objects_without_an_account(apps):
     service = synchronizer._translate_in(serve.Server)._service_function
     loader = dict(zip(service._load.__code__.co_freevars, [c.cell_contents for c in service._load.__closure__]))
     assert (loader["min_containers"], loader["max_containers"], loader["scaledown_window"]) == (0, 1, 300)
-    assert service._function_info._inner_server_info.unauthenticated is False  # Modal proxy auth
+    assert service._function_info._inner_server_info.unauthenticated is config["serving"]["unauthenticated"]
 
 
 def test_the_images_install_the_locks_and_carry_the_plan(apps):
@@ -490,7 +490,7 @@ def test_the_training_function_refuses_a_gpu_other_than_its_own(apps, monkeypatc
 
     config, (_, train, _) = apps
     plan, raw = training_plan(config, "c1")
-    with pytest.raises(RuntimeError, match="this function runs on L40S, the plan asks H100"):
+    with pytest.raises(RuntimeError, match=f"this function runs on {config['train']['gpu']}, the plan asks H100"):
         train.train_adapter.local(plan, raw, {**run_identity(config), "gpu": "H100"})
 
 
