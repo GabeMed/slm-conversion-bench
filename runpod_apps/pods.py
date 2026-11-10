@@ -63,7 +63,7 @@ if [ -n "${BENCH_DEADLINE_S:-}" ]; then
     touch "$W/stop" ) &
 fi
 # the secrets RunPod substituted, for the jobs started over SSH (an SSH session does not inherit them)
-names=$(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | grep -E '^(VLLM_API_KEY|HF_TOKEN|RUNPOD_POD_ID|BENCH_[A-Z_]+|HF_[A-Z_]+)$')
+names=$(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | grep -E '^(VLLM_API_KEY|VLLM_SERVER_DEV_MODE|HF_TOKEN|RUNPOD_POD_ID|BENCH_[A-Z_]+|HF_[A-Z_]+)$')
 ( umask 077; : > "$W/env"; [ -z "$names" ] || declare -px $names > "$W/env" 2>/dev/null )
 mkdir -p /root/.ssh /run/sshd && chmod 700 /root/.ssh
 printf '%s\n' "${PUBLIC_KEY:-}" > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
