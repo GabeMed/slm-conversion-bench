@@ -207,3 +207,8 @@ Changes after Stage 0 that can change a result or its interpretation.
   the report listed attempts by status only. Direction: none on any measured value; it narrows which test
   executions can be produced and makes every attempt, its reason and its partial accuracy public, so no
   configuration can be rerun until a preferred outcome appears
+- 2026-11-10 · SPEC.md and SPEC-v1.md translated from Portuguese into English after Stage 0 (PR #45), with no change
+  of content: every rule, number, threshold, identifier and section number is unchanged (checked line by line
+  against the original by an independent review and by script), dates are written in ISO form and numbers with
+  English separators. The Portuguese originals remain in the history (Stage 0 ae60d1b; 3a28b19 before the
+  translation), so `git diff STAGE0 -- SPEC.md` shows the whole file as changed. Direction: none

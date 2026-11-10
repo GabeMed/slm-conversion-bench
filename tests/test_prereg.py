@@ -588,6 +588,62 @@ def test_an_abandoned_test_attempt_is_scored_partially_on_the_predictions_it_rec
         evaluate(run_id, partial=True)
 
 
+def test_a_test_attempt_killed_outright_is_scored_partially_on_its_journal(published):
+    """D3: an attempt killed outright never closed its manifest (`running`, no predictions_sha256). Once its
+    session's lock is free (the rule a resume reads), `--partial` scores the questions its session journaled
+    (answers*.jsonl; a last line cut off by the kill is dropped), the model's failures as wrong, and checks
+    the hashes of what it left against the ones a resume of it recorded, or records that none existed."""
+    import fcntl
+    import os
+    from bench.agent.resume import unregistered_source_hashes
+    from bench.agent.runner import SESSION_LOCK
+    config, prereg_hash = published
+    run_id = test_run(config, prereg_hash, predictions={"9": "SELECT 9"})
+    run_dir = paths.RUNS / run_id
+    (run_dir / "predictions.json").unlink()  # killed before the end: no predictions.json
+    manifest = {**json.loads((run_dir / "manifest.json").read_text()), "status": "running"}
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    (run_dir / "answers.jsonl").write_text(json.dumps({"question_id": "9", "prediction": "SELECT 9", "tool_errors": {}})
+                                           + '\n{"question_id": "1')  # the kill cut the last line
+    with pytest.raises(DataError, match="left no session lock"):
+        evaluate(run_id, partial=True)
+    fd = os.open(run_dir / SESSION_LOCK, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(DataError, match="still running"):
+            evaluate(run_id, partial=True)
+    finally:
+        os.close(fd)
+    with pytest.raises(DataError, match="not 'done'"):
+        evaluate(run_id)  # never scored whole
+    out = evaluate(run_id, partial=True)
+    scored = json.loads((out / "manifest.json").read_text())
+    assert (scored["partial"], scored["n"], scored["correct"], scored["of_questions"]) == (True, 1, 1, 1)
+    assert (scored["source_status"], scored["predictions_sha256"], scored["source_hashes_recorded_by"]) == ("running", None, None)
+    assert scored["source_hashes"] == unregistered_source_hashes(manifest) and "answers.jsonl" in scored["source_hashes"]
+
+    registry = paths.ROOT / "registry" / "test"  # a resume of it published the hashes in its intent
+    registry.mkdir(parents=True, exist_ok=True)
+    intent = {"run_id": "agent-B0-test-y", "started_at": "2026-10-02T09:00:00+00:00", "resumed_from": run_id,
+              "unregistered_source_hashes": unregistered_source_hashes(manifest)}
+    (registry / "agent-B0-test-y.intent.json").write_text(json.dumps(intent))
+    assert json.loads((evaluate(run_id, partial=True) / "manifest.json").read_text())["source_hashes_recorded_by"] == \
+        "agent-B0-test-y"
+    (run_dir / "answers.jsonl").write_text(json.dumps({"question_id": "9", "prediction": None,
+                                                       "tool_errors": {"generate_candidate": "APIStatusError"}}) + "\n")
+    with pytest.raises(DataError, match="do not hash to what agent-B0-test-y recorded when it resumed it"):
+        evaluate(run_id, partial=True)
+    (registry / "agent-B0-test-y.intent.json").unlink()
+    out = evaluate(run_id, partial=True)  # the model's failure, journaled: scored, as wrong
+    assert [json.loads(line)["pred_error"] for line in (out / "results.jsonl").read_text().splitlines()] == ["no prediction"]
+    assert json.loads((out / "manifest.json").read_text())["correct"] == 0
+    (run_dir / "answers.jsonl").write_text("")  # it journaled nothing: scored on no question, and still listed
+    assert json.loads((evaluate(run_id, partial=True) / "manifest.json").read_text())["n"] == 0
+    (run_dir / "manifest.json").write_text(json.dumps({**manifest, "split": "calib"}))
+    with pytest.raises(DataError, match="--partial scores an abandoned test attempt"):
+        evaluate(run_id, partial=True)
+
+
 def test_a_partial_evaluation_scores_the_models_failures_as_wrong_and_leaves_out_what_did_not_finish(published):
     """A question the model failed (a null prediction, its failed call a tool error) ended: it is scored,
     as wrong. One that raised or met a harness error did not finish: it is left out, as a resume answers

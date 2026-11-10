@@ -401,6 +401,132 @@ def test_appendix_b_is_inconclusive_by_design_below_min_calls_repairs():
     assert appendix_b(j4(False, diff=-0.2), 100)["verdict"] == "confirms (the SLM is worse on repair)"  # the floor counts
 
 
+def test_no_planned_power_from_a_pilot_d_of_0_or_for_a_repair_inconclusive_by_design():
+    """J4's power is 1 at d = 0 by its formula (the pilot's arms never disagreed: no variance), which says
+    nothing of the test: the report prints "—" there, and for repair when it is inconclusive by design. The
+    stored planned_power is J4's, unchanged."""
+    zero = {**j4(False, diff=0.0, pilot=0.0), "planned_power": 1.0}
+    assert report._power(zero) == "—" and report._power(zero, j4()) == "0.80"
+    assert report._inconclusive(zero) == "inconclusive (the pilot's d is 0: planned power not estimable)"
+    assert report._inconclusive(j4(pilot=None)) == "inconclusive (no pilot: planned power unknown)"
+
+    def appendix_b(repair, repairs):
+        return row(report.claims_map(data_with({}, {}, repair=repair, per_call=per_call({"filter_column": 0.97}, repairs))),
+                   "Appendix B")
+    assert appendix_b(j4(False, diff=-0.02), 5)["power"] == "—"  # inconclusive by design, whatever its pilot
+    assert appendix_b(j4(False, diff=-0.02), 100)["power"] == "0.80"
+    assert appendix_b(zero, 100)["power"] == "—"
+    assert appendix_b(zero, 100)["verdict"] == "inconclusive (the pilot's d is 0: planned power not estimable)"
+
+
+def render_data(**more):
+    return {"split": "calib", "scope": report.SCOPE, "arms": {}, "map": [], "steps": [], "per_call_uncovered": [],
+            "gold_tests": {}, "prereg_in_force": None, "deviations": None, "tests": {}, "min_calls": 100,
+            "judgments": {"j6": None, "per_call": None, "j7": None}, "registry": {"available": True, "runs": []}, **more}
+
+
+def test_the_k4_table_names_the_reports_split_and_leaves_out_an_unplannable_power():
+    gold = {"generate_candidate": j4(True), "revise": {**j4(False, diff=0.0, pilot=0.0), "planned_power": 1.0}}
+    calls = {"per_call_site": {"generate_candidate": {"n": 300, "format_valid_rate": 1.0, "gold": None, "agreement": None},
+                               "revise": {"n": 5, "format_valid_rate": 1.0, "agreement": None, "gold": {
+                                   "n": 5, "ex_replay": 0.2, "ex_teacher": 0.2, "ex_by_question": {"replay": 0.2, "teacher": 0.2}}}},
+             "arm": "B4"}
+    page = report.render(render_data(gold_tests=gold, judgments={"j6": None, "per_call": calls, "j7": None}))
+    assert "## Clusters with gold: per-call non-inferiority on the calib inputs (SPEC §7.2 K4)" in page
+    assert "on the test inputs" not in page
+    lines = {line.split(" | ")[0]: line for line in page.split("(SPEC §7.2 K4)", 1)[1].splitlines()
+             if line.startswith("| generate_candidate |")
+             or line.startswith("| revise |")}
+    assert lines["| generate_candidate"].endswith("| non-inferior | 0.80 |")
+    assert lines["| revise"].endswith("| inconclusive | — |")
+    calls["per_call_site"]["revise"]["gold"]["n"] = 100  # enough repairs: only the pilot's d of 0 leaves it out
+    gold["revise"] = j4(False, diff=-0.02)
+    page = report.render(render_data(split="test", gold_tests=gold, judgments={"j6": None, "per_call": calls, "j7": None}))
+    assert "non-inferiority on the test inputs" in page
+    k4 = page.split("(SPEC §7.2 K4)", 1)[1]  # its revise row, not the per-call-site table's
+    assert next(line for line in k4.splitlines() if line.startswith("| revise |")).endswith("| inconclusive | 0.80 |")
+
+
+def test_every_j4_comparison_is_printed():
+    """The comparisons the map does not print (B1, B2 and B3 against B0, B4 against B3) are in report.json:
+    the page prints every one, with its planned power under the same rule."""
+    tests = {"B0|B1": j4(True), "B0|B2-production": j4(False, diff=-0.2), "B0|B2-cheap": j4(False, diff=-0.02, pilot=None),
+             "B0|B3": {**j4(False, diff=-0.02, pilot=0.0), "planned_power": 1.0}, "B3|B4": j4(True, diff=0.1)}
+    page = report.render(render_data(tests=tests))
+    section = page.split("## J4 comparisons: non-inferiority at the fixed margin\n\n", 1)[1].split("\n\n", 1)[0]
+    assert section.splitlines()[0] == "| pair | n | diff (Δ) | CI | outcome | planned power |"
+    assert section.splitlines()[2:] == [
+        "| B4 against B3 | 498 | +10.0 pp (Δ 5.0 pp) | CI [+0.0 pp, +15.0 pp] | non-inferior | 0.80 |",
+        "| B1 against B0 | 498 | -1.0 pp (Δ 5.0 pp) | CI [+0.0 pp, +4.0 pp] | non-inferior | 0.80 |",
+        "| B2-production against B0 | 498 | -20.0 pp (Δ 5.0 pp) | CI [-9.0 pp, -15.0 pp] | worse | 0.80 |",
+        "| B2-cheap against B0 | 498 | -2.0 pp (Δ 5.0 pp) | CI [-9.0 pp, +3.0 pp] | inconclusive | — |",
+        "| B3 against B0 | 498 | -2.0 pp (Δ 5.0 pp) | CI [-9.0 pp, +3.0 pp] | inconclusive | — |"]
+    assert "## J4 comparisons" not in report.render(render_data())
+
+
+def test_the_s2_row_states_the_rows_s5_trains_on(tmp_path, monkeypatch):
+    """Since the routed sites train on `bench datasets`' own draw (no deduplication, no cap), S2 states the
+    training rows per cluster from train/datasets/manifest.json and its rule; curate's figures are context."""
+    monkeypatch.setattr(paths, "ROOT", tmp_path)
+    manifest = {"j5": "f" * 64, "clusters": {"c0": {"n": 11982, "rule_of_thumb": "within"}, "c1": {"n": 18, "rule_of_thumb": "below"}},
+                "rule_of_thumb": [10000, 100000],
+                "routed_sites": {"call_sites": ["agent_ir", "filter_column"], "rule": "no deduplication and no cap",
+                                 "rows": {"agent_ir": 3336, "filter_column": 12000},
+                                 "by_cluster": {"c0": {"filter_column": 11982}, "c1": {"filter_column": 18}}}}
+    (tmp_path / "train" / "datasets").mkdir(parents=True)
+    (tmp_path / report.DATASETS_MANIFEST).write_text(json.dumps(manifest))
+    sources = {}
+    assert report.training_datasets({}, sources) is None and not sources  # no J5, no S2
+    found = report.training_datasets({"j5": f"judgments/J5/{'f' * 64}/result.json"}, sources)
+    assert found["rows"] == {"c0": 11982, "c1": 18} and sources["datasets"]["path"] == report.DATASETS_MANIFEST
+    with pytest.raises(JudgmentError, match="was written from the J5 result f+, not the plan's j5 e+"):
+        report.training_datasets({"j5": f"judgments/J5/{'e' * 64}/result.json"}, {})
+    with pytest.raises(JudgmentError, match="the plan's datasets elsewhere.json is not there"):
+        report.training_datasets({"j5": "x/y/result.json", "datasets": "elsewhere.json"}, {})
+    (tmp_path / report.DATASETS_MANIFEST).unlink()
+    assert report.training_datasets({"j5": f"judgments/J5/{'f' * 64}/result.json"}, {}) is None
+
+    curation = {"total": {"invocations": 10, "passed_filter": 8, "masked_sql": 1, "exact_duplicates": 2,
+                          "near_duplicates": 3, "kept": 2, "over_cap": 5}, "mask_detections": {"email": 4}}
+    data = data_with({}, {})
+    data["datasets"] = found
+    data["judgments"].update(teacher_train_cost=None, j6=None, j7=None, j5={
+        "curation": curation, "k": 2, "ari_call_sites": 0.5, "assignment": {"train_in_sample": 1.0, "calib": None}})
+    s2 = report.steps(data)[1]
+    assert s2["changed"] == "12000 training rows in 2 clusters: c0 11982, c1 18"
+    assert s2["did"].startswith("training rows per cluster (bench datasets): c0 11982, c1 18 (against the rule of thumb "
+                                "10000–100000: c0 within, c1 below); routed sites agent_ir, filter_column: no deduplication "
+                                "and no cap; their rows per cluster: c0 11982 filter_column, c1 18 filter_column. ")
+    assert s2["did"].endswith("Context, curate's own figures (not the routed sites' rows): 10 invocations; 8 passed the "
+                              "production signal; 1 SQL completions dropped because masking changed them; 2 exact and 3 "
+                              "near duplicates removed; 4 sensitive-data detections masked; paraphrase not applied; "
+                              "2 training examples (5 above the cap per question and call site left out)")
+
+
+def test_an_attempt_killed_outright_is_asked_for_its_partial_ex(tmp_path, monkeypatch):
+    """D3: a test attempt killed outright stays `running` in the registry, with no n_predictions; the report
+    asks for its `bench eval --partial` (scored on its journal) like any abandoned attempt's."""
+    monkeypatch.setattr(paths, "RUNS", tmp_path)
+    killed = {"run_id": "b0-1", "type": "agent", "arm": "B0", "engine": None, "status": "running", "prereg_hash": "h",
+              "started_at": "2026-10-01T09:00", "commit": "c" * 40, "end_reason": None, "redo_reason": None,
+              "resumed_from": None, "n_predictions": None, "predictions_sha256": None}
+    registry = {"available": True, "runs": [killed]}
+    with pytest.raises(JudgmentError, match="b0-1 was killed outright .* name its `bench eval --partial`"):
+        report.attempts_by_configuration(registry, "h", {}, {})
+    partial = tmp_path / "eval-partial-b0-1"
+    partial.mkdir()
+    scored = {"run_id": partial.name, "partial": True, "source_run_id": "b0-1", "predictions_sha256": None,
+              "source_status": "running", "n": 4, "correct": 3}
+    (partial / "manifest.json").write_text(json.dumps({**scored, "source_status": None}))
+    with pytest.raises(JudgmentError, match="is not a partial evaluation of b0-1"):  # not scored as a killed attempt
+        report.attempts_by_configuration(registry, "h", {}, {"b0-1": partial.name})
+    (partial / "manifest.json").write_text(json.dumps(scored))
+    ((group,),) = [report.attempts_by_configuration(registry, "h", {}, {"b0-1": partial.name})]
+    assert [(a["status"], a["n"], a["ex"], a["partial"]) for a in group["attempts"]] == \
+        [("not completed (running)", 4, 0.75, True)]
+    assert report.attempts_by_configuration(registry, "g", {}, {})[0]["attempts"][0]["n"] is None  # an earlier registration
+
+
 def test_the_steps_table_reads_the_judgments():
     curation = {"total": {"invocations": 10, "passed_filter": 8, "masked_sql": 1, "exact_duplicates": 2,
                           "near_duplicates": 3, "kept": 2}, "mask_detections": {"email": 4}}

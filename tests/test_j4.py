@@ -147,3 +147,12 @@ def test_the_margin_is_required():
     a, b = arms(30, 6, 4, 10)
     with pytest.raises(TypeError):
         noninferiority(a, b, seed=1, n_boot=100)  # no margin derived from the pairs, ever
+
+
+def test_a_refusal_names_the_pair():
+    a, b = arms(10, 3, 1, 6)
+    with pytest.raises(JudgeError, match=r"the two arms of B4 against B0 must be scored on the same questions.*"
+                                         r"0 only in B4, 1 only in B0, 20 in both"):
+        noninferiority(a, {**b, "extra": True}, seed=2, n_boot=300, margin=0.05, names=("B4", "B0"))
+    assert noninferiority(a, b, seed=2, n_boot=300, margin=0.05, names=("B4", "B0")) == \
+        noninferiority(a, b, seed=2, n_boot=300, margin=0.05)  # the names change no number
