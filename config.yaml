@@ -42,7 +42,7 @@ roles:
       routing: null
     terms:                     # what allows training on the outputs, as the runner records it (README, D6)
       weights_license: "none: closed model, weights not public"
-      provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, verbal permission from Anthropic held by the author; K1 through Claude Code on the author's Claude subscription, verbally authorized by Anthropic for this project only (SPEC D25)"
+      provider_terms: "https://www.anthropic.com/legal/commercial-terms; research use, verbal permission from Anthropic held by the author"
       checked_on: "2026-10-21"
   cheap_alt:                   # cheaper open-weight generalist, no training (B1)
     model: openai/gpt-oss-120b   # OpenRouter's name for it
@@ -222,8 +222,8 @@ arms:                          # the facts each arm uses: judgments/<J>/<sha256>
   B1:                          # "same few-shot and cache" (REQ-002; design §5.1), whenever the engine is cheap_alt:
     few_shot: {k: 3, source_run: agent-B0-train-20261109T214533.609401Z}  # k teacher examples per call site from a done B0 run on train (run id); before runs
   B3: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json}         # J6 (S4)
-  B4: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null}                 # J6, J5 (S3), S5
-  B5: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: null, allocation: null}  # J6, J5, S5, J7 (S6)
+  B4: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: judgments/S5/437f885cf2d73b31adc233e7cf405691d480c777aa9a9389754aa57c780ebe02/adapters.json}                 # J6, J5 (S3), S5
+  B5: {choice: judgments/J6/b95bc438fe8a64c14293cb13c4d34f30d12b4e06c9cb8dbbb828d0fbf71a3dae/choice.json, centroids: judgments/J5/b98b66cd987d36702dae7ed6ff0e0ec8580cfdffd276abece3cb79cd41834a5b/centroids.json, adapters: judgments/S5/437f885cf2d73b31adc233e7cf405691d480c777aa9a9389754aa57c780ebe02/adapters.json, allocation: null}  # J6, J5, S5, J7 (S6)
 
 # F3 · serving, training (S5), load test and preflight (modal_apps/, bench/train.py, bench/loadtest.py,
 # bench/preflight.py). Values are proposals; the author confirms them before runs.
