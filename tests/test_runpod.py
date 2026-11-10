@@ -522,6 +522,8 @@ def test_up_serves_the_modal_plan_on_a_gpu_pod_behind_ssh(runpod_repo):
     assert body["image"] == "vllm/vllm-openai:v0.30.0" and body["cloud"] == "SECURE"
     assert body["dataCenterIds"] == ["CA-MTL-1"] and body["ports"] == ["22/tcp"]  # vLLM's port is not published
     assert body["env"]["VLLM_API_KEY"] == "{{ RUNPOD_SECRET_slm-bench-vllm-api-key }}"  # RunPod substitutes it
+    # vLLM's POST /reset_prefix_cache (a cold level of the load test), reached through the tunnel only (above)
+    assert body["env"]["VLLM_SERVER_DEV_MODE"] == "1"
     assert body["env"]["PUBLIC_KEY"] == "ssh-ed25519 AAAAoperator me@laptop"
     assert body["env"]["BENCH_DEADLINE_S"] == str(12 * 3600)
     assert body["entrypoint"] == ["bash", "-c"] and body["cmd"] == [rp.BOOTSTRAP]
