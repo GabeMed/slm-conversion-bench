@@ -12,7 +12,9 @@ at the registered code (its commit holds the registered commit's tree outside pr
 and the outputs it copies still hash to what its manifest recorded when it ended (`predictions_sha256`,
 `calls_sha256`). This session must itself be clean and at the registered code
 (`barrier.ensure_execution_allowed`). Anything else is refused: the configuration is then run again
-from its first question, which on test needs a stated defect (`--redo-reason`, `runner.open_run`).
+from its first question, which on test needs a stated defect (`--redo-reason`, `runner.open_run`) and
+its line in prereg/DEVIATIONS.md; and a resumable attempt is resumed, never redone, unless the defect
+affects questions it completed (`--redo-affects-completed`).
 
 A question of the source is complete when it has a prediction and neither raised (`failures`) nor
 met a harness error (`harness_errors`): the runner removes the prediction of a question that was in
@@ -68,8 +70,9 @@ def check_test_source(source: Dict[str, Any], prereg_hash: str, attempts: List[D
     run_id = source["run_id"]
 
     def refuse(why: str) -> None:
-        raise barrier.TestSplitLocked(f"refusing to resume {run_id} on the test split: {why}; run the configuration "
-                                      f"again from its first question with --redo-reason instead")
+        raise barrier.TestSplitLocked(f"refusing to resume {run_id} on the test split: {why}; resuming it is "
+                                      f"impossible, so the configuration is run again from its first question "
+                                      f"(--redo-reason, with its line in prereg/DEVIATIONS.md)")
     if published is None:
         refuse("the published registry holds no manifest of it")
     killed = source.get("status") == KILLED
@@ -94,6 +97,26 @@ def check_test_source(source: Dict[str, Any], prereg_hash: str, attempts: List[D
         now = data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
         if key not in source or now != source[key]:
             refuse(f"its {name} does not hash to what its manifest recorded when it ended ({key})")
+
+
+def why_not_resumable(run_id: str, prereg_hash: str, attempts: List[Dict[str, Any]],
+                      published: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why the attempt `run_id` cannot be resumed on test, or None when it can: its run directory and
+    manifest are here, it is failed, interrupted or killed (its lock free), and `check_test_source`
+    accepts it (the published record, the registration, a clean tree at the registered code, the latest
+    attempt, outputs that still hash to what was recorded). What `runner.open_run` reads before it lets
+    a configuration be redone from its first question."""
+    from bench import barrier
+    path = paths.RUNS / run_id / "manifest.json"
+    if not path.is_file():
+        return f"{run_id} has no run directory here (runs/{run_id}/manifest.json)"
+    try:
+        source = json.loads(path.read_text())
+        check_resumable(source, str(source.get("type")))
+        check_test_source(source, prereg_hash, attempts, published)
+    except (data.DataError, barrier.TestSplitLocked, ValueError) as e:
+        return str(e)
+    return None
 
 
 def load_source(source_run_id: str, split: str) -> Dict[str, Any]:

@@ -41,9 +41,12 @@ def main(argv=None) -> int:
                         "source's. On test: only the latest attempt, under the same pre-registration, clean and at "
                         "the registered code, both the source and this session")
     p.add_argument("--redo-reason", metavar="DEFECT",
-                   help="test only: run again from the first question a configuration that has an earlier attempt "
-                        "in the registry, for this defect (recorded in the intent and the manifest; the earlier "
-                        "attempts stay listed)")
+                   help="test only: run again from the first question a configuration whose latest attempt cannot be "
+                        "resumed, for this defect (recorded in the intent and the manifest; the earlier attempts stay "
+                        "listed); prereg/DEVIATIONS.md, as published, must name that attempt")
+    p.add_argument("--redo-affects-completed", action="store_true",
+                   help="with --redo-reason: the defect affects questions the latest attempt completed, so it is redone "
+                        "although it could be resumed")
     teacher = p.add_mutually_exclusive_group()
     teacher.add_argument("--batch", action="store_true",
                          help="K1 only (B0 on train, Anthropic teacher): send the calls through the Message Batches "
@@ -69,8 +72,12 @@ def main(argv=None) -> int:
                         "and sends the others; source, engine or arm, call sites, ids and configuration (by hash) "
                         "must be the failed replay's. On test, as `bench run --resume-from` there")
     p.add_argument("--redo-reason", metavar="DEFECT",
-                   help="test only: replay again from scratch a replay that has an earlier attempt in the registry, "
-                        "for this defect (recorded in the intent and the manifest; the earlier attempts stay listed)")
+                   help="test only: replay again from scratch a replay whose latest attempt cannot be resumed, for this "
+                        "defect (recorded in the intent and the manifest; the earlier attempts stay listed); "
+                        "prereg/DEVIATIONS.md, as published, must name that attempt")
+    p.add_argument("--redo-affects-completed", action="store_true",
+                   help="with --redo-reason: the defect affects invocations the latest attempt completed, so it is "
+                        "redone although it could be resumed")
 
     p = sub.add_parser("call-sites", help="add the call sites of done train/calib runs to registry/call_sites.json")
     p.add_argument("run_ids", nargs="+")
@@ -149,12 +156,12 @@ def main(argv=None) -> int:
             print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
                             workers=args.workers, batch=args.batch,
                             via_claude_code=args.via_claude_code, resume_from=args.resume_from,
-                            redo_reason=args.redo_reason))
+                            redo_reason=args.redo_reason, redo_affects_completed=args.redo_affects_completed))
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,
                          ids=args.ids, workers=args.workers, resume_from=args.resume_from,
-                         redo_reason=args.redo_reason))
+                         redo_reason=args.redo_reason, redo_affects_completed=args.redo_affects_completed))
         elif args.command == "call-sites":
             from bench.agent.registry import update_call_sites
             print(update_call_sites(args.run_ids))

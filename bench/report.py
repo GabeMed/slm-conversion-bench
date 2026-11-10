@@ -1015,6 +1015,12 @@ def attempts_by_configuration(registry: Dict[str, Any], in_force: Optional[str],
                 row.update({"n": scored["n"], "ex": scored["correct"] / scored["n"] if scored["n"] else None,
                             "partial": True, "eval": eval_run_id})
             rows.append(row)
+        by_id = {row["run_id"]: row for row in rows}
+        for final_row in [row for row in rows if row["status"] == "done"]:  # what a resumed final run copied
+            source = by_id.get(final_row["resumed_from"] or "")
+            while source is not None and "copied_into" not in source:
+                source["copied_into"] = final_row["run_id"]
+                source = by_id.get(source["resumed_from"] or "")
         out.append({"type": run_type, "arm": arm, "engine": engine, "prereg_hash": prereg_hash, "attempts": rows})
     return out
 
@@ -1184,16 +1190,19 @@ def render(data: Dict[str, Any]) -> str:
         parts.append("No test-split execution is committed.")
     if data.get("attempts"):
         parts += ["", "## Attempts per configuration", "",
-                  "Every attempt, in the order it started. The EX of an abandoned attempt is partial: on the questions "
-                  "it completed, never read for a verdict.", ""]
+                  "Every attempt, in the order it started. The EX of an abandoned attempt is partial and descriptive: "
+                  "on the n questions it completed (the model's failures included, as wrong; the questions it did not "
+                  "finish left out), never read for a verdict. An attempt the final run resumed overlaps it: the final "
+                  "run copied those questions, and its EX counts them again.", ""]
         for group in data["attempts"]:
             title = " ".join(str(x) for x in (group["type"], group["arm"], group["engine"]) if x is not None)
             parts += [f"**{title}** (pre-registration {(group['prereg_hash'] or '—')[:12]})", "",
-                      _table(["attempt", "status", "how it ended", "run again because", "n", "EX"],
+                      _table(["attempt", "status", "how it ended", "run again because", "n", "EX", "overlap"],
                              [[a["run_id"], a["status"], a["end_reason"] or "—",
                                a["redo_reason"] or (f"resumes {a['resumed_from']}" if a["resumed_from"] else "—"),
                                "—" if a["n"] is None else a["n"],
-                               _pct(a["ex"]) + (" (partial)" if a["partial"] else "") if a["ex"] is not None else "—"]
+                               _pct(a["ex"]) + (" (partial, descriptive)" if a["partial"] else "") if a["ex"] is not None else "—",
+                               f"copied into {a['copied_into']}" if a.get("copied_into") else "—"]
                               for a in group["attempts"]]), ""]
     if data["deviations"]:
         parts += ["", f"## Deviations from the pre-registration (`{DEVIATIONS}`)", "", data["deviations"].strip()]

@@ -586,3 +586,26 @@ def test_an_abandoned_test_attempt_is_scored_partially_on_the_predictions_it_rec
     (run_dir / "manifest.json").write_text(json.dumps(failed))
     with pytest.raises(DataError, match="do not hash to what its manifest recorded"):
         evaluate(run_id, partial=True)
+
+
+def test_a_partial_evaluation_scores_the_models_failures_as_wrong_and_leaves_out_what_did_not_finish(published):
+    """A question the model failed (a null prediction, its failed call a tool error) ended: it is scored,
+    as wrong. One that raised or met a harness error did not finish: it is left out, as a resume answers
+    it again."""
+    from bench.data import sha256_file
+    config, prereg_hash = published
+    run_id = test_run(config, prereg_hash, predictions={"9": None})
+    run_dir = paths.RUNS / run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    failed = {**manifest, "status": "failed", "predictions_sha256": sha256_file(run_dir / "predictions.json"),
+              "tool_errors": {"9": {"generate_candidate": "APIStatusError: Error code: 400"}}}
+    (run_dir / "manifest.json").write_text(json.dumps(failed))
+    out = evaluate(run_id, partial=True)
+    scored = json.loads((out / "manifest.json").read_text())
+    assert (scored["n"], scored["correct"]) == (1, 0)
+    result = json.loads((out / "results.jsonl").read_text())
+    assert (result["question_id"], result["correct"], result["pred_error"]) == ("9", False, "no prediction")
+    for unfinished in ({"failures": {"9": "RuntimeError: boom"}}, {"harness_errors": {"9": ["a dead pod"]}}):
+        (run_dir / "manifest.json").write_text(json.dumps({**failed, **unfinished}))
+        with pytest.raises(DataError, match="completed no question"):
+            evaluate(run_id, partial=True)

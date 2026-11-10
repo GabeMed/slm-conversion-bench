@@ -619,8 +619,9 @@ done
   where. Read why. If the run raised before its push (exit code not 0), publish what it committed with
   `git push origin main` (the next test run refuses to start while a registry commit is unpushed). Fix
   the cause **outside this checkout** (the code is frozen here: see below), then finish the configuration
-  that stopped by hand, one of two ways, push, and run the block again with `START` set to the
-  configuration after it. The configurations before it are done and are **not** run again.
+  that stopped by hand, push, and run the block again with `START` set to the configuration after it. An
+  attempt that did not end is **resumed**; it is run again from its first question only when resuming is
+  impossible or a defect affects questions it already completed. The configurations before it are done and are **not** run again.
   - **Resume** (an infrastructure failure: a network error, a dead pod, a Ctrl-C, a killed process): add
     `--resume-from <run_id>` to its command. Allowed only for the latest attempt of that configuration,
     under the same pre-registration and configuration, with the source and this session both on a clean
@@ -632,11 +633,16 @@ done
     it journaled as they ended (`answers*.jsonl`), with their C1 lines. Nothing recorded the hashes of
     those files, so they are computed first and recorded in the new intent and manifest
     (`unregistered_source_hashes`).
-  - **Run again from the first question** (a defect that makes the earlier attempt's answers unusable):
-    add `--redo-reason "<the defect>"` to its command. The reason goes into the intent, published before
-    the first question, and into the manifest; the earlier attempts stay in the registry and are listed
-    in the new manifest (`earlier_attempts`). Without a reason, a configuration with an earlier attempt
-    is refused.
+  - **Run again from the first question**, only when the latest attempt cannot be resumed (its outputs
+    do not match their hash, its run directory is gone, an intent that was never pushed: the refusal of
+    `--resume-from` says why), or a defect affects questions it completed: first add a dated line to
+    `prereg/DEVIATIONS.md` naming that attempt, the defect and its direction (SPEC D22), commit and push
+    it; then add `--redo-reason "<the defect>"` to its command, and `--redo-affects-completed` when the
+    attempt could be resumed but the defect reaches what it completed. A redo of a resumable attempt
+    without that flag is refused and points to `--resume-from`. The reason goes into the intent, published
+    before the first question, and into the manifest (`redo`: the attempt, whether the defect affects
+    completed questions, why it could not be resumed); the earlier attempts stay in the registry and are
+    listed in the new manifest (`earlier_attempts`).
 - **One completed run per configuration** (type, arm, engine, pre-registration, as the report keys
   it). A second *completed* run of one configuration would leave that arm's comparisons without a
   verdict, so `bench run` and `bench replay` refuse to open it, before its intent and before any call.
@@ -690,7 +696,9 @@ bench report --plan plan.yaml
   test only at the registered code: HEAD holds the registered commit's tree outside `prereg/`,
   `registry/` and `judgments/`, and the analysis code hashes to the registered one.
 - The report lists every attempt of each configuration: how it ended, the defect stated to run it again,
-  and n and EX. An attempt abandoned with predictions gets a partial EX, from its `bench eval --partial`,
+  and n and EX. An attempt abandoned with predictions gets a partial, descriptive EX (on the questions it
+  completed, the model's failures counted as wrong; what did not finish or met a harness error left
+  out), from its `bench eval --partial`,
   which the plan names under `attempts: {<attempt>: <its partial eval>}`; a plan that leaves one out is
   refused.
 - `plan.yaml` only names what the steps above printed; its keys are in the header of

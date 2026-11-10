@@ -222,6 +222,16 @@ def attempts_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg
     return sorted(found, key=lambda a: (a["started_at"] or "", a["run_id"]))
 
 
+DEVIATIONS = "prereg/DEVIATIONS.md"
+
+
+def deviation_names(run_id: str, ref: str) -> bool:
+    """Whether prereg/DEVIATIONS.md, as published at `ref`, has a line naming `run_id`: a test attempt
+    abandoned and run again from its first question is a deviation (SPEC D22), recorded before the redo."""
+    shown = _git("show", f"{ref}:{DEVIATIONS}")
+    return shown.returncode == 0 and any(run_id in line for line in shown.stdout.splitlines())
+
+
 # ---------------------------------------------------------------- executions on test
 
 INTENT_FIELDS = ("run_id", "type", "arm", "engine", "split", "source_run_id", "prereg_hash", "commit", "started_at")

@@ -64,6 +64,16 @@ def publish_prereg(root, config, **override):
     return prereg
 
 
+def deviation(root, run_id, defect="a defect"):
+    """The line a redo on test needs first (SPEC D22): prereg/DEVIATIONS.md, committed and pushed."""
+    path = root / "prereg" / "DEVIATIONS.md"
+    with open(path, "a") as fh:
+        fh.write(f"- 2026-11-10 · {run_id} run again from its first question: {defect}. Direction: none\n")
+    git(root, "add", "prereg/DEVIATIONS.md")
+    git(root, "commit", "-q", "-m", "a deviation")
+    git(root, "push", "-q", "origin", "main")
+
+
 def register(root, config_path, call_sites=None, commit=True):
     train = runner.run_agent(str(config_path), "B0", "train", ids=["1"])
     path = registry.update_call_sites([train.name])
@@ -163,9 +173,16 @@ def test_a_failed_push_of_the_intent_refuses_the_run_before_any_spend(repo, monk
     # published now, the refused attempt is an earlier attempt: running again from scratch states why
     with pytest.raises(barrier.TestSplitLocked, match="already attempted it"):
         runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    refused_id = intent.rsplit("/", 1)[1].rsplit(".", 2)[0]
+    # it never ran, so it cannot be resumed (no run directory): a redo, once DEVIATIONS.md names it
+    with pytest.raises(barrier.TestSplitLocked, match=f"DEVIATIONS.md, as published, has no line naming {refused_id}"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the intent could not be pushed")
+    deviation(root, refused_id, "its intent could not be pushed")
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the intent could not be pushed")
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["redo_reason"] == "the intent could not be pushed"
+    assert manifest["redo"]["of"] == refused_id and manifest["redo"]["affects_completed"] is False
+    assert "has no run directory here" in manifest["redo"]["not_resumable_because"]
     assert [a["run_id"] for a in manifest["earlier_attempts"]] == [intent.rsplit("/", 1)[1].rsplit(".", 2)[0]]
     assert manifest["earlier_attempts"][0]["status"] == "running"  # it never ran: its manifest is as it started
     assert intent in git(origin, "ls-tree", "-r", "--name-only", "main", "registry/test").split()
@@ -416,8 +433,7 @@ def test_a_second_completed_run_of_one_configuration_is_refused_before_its_inten
     assert json.loads((failed / "manifest.json").read_text())["status"] == "failed"
     git(root, "push", "-q", "origin", "main")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
-    done = runner.run_agent(str(config_path), "B0", "test", ids=["9"],  # after a failure: allowed, with a reason
-                            redo_reason="the network went away")
+    done = runner.run_agent(str(config_path), "B0", "test", resume_from=failed.name)  # after a failure: resumed
     assert json.loads((done / "manifest.json").read_text())["status"] == "done"
     git(root, "push", "-q", "origin", "main")
     before = git(root, "rev-parse", "HEAD").strip()
@@ -573,18 +589,28 @@ def test_a_test_resume_is_refused_when_the_local_manifest_is_not_the_published_o
     refused_resume(root, config_path, source.name, "differs from the one the registry published \\(workers\\)")
 
 
-def test_only_the_latest_attempt_is_resumed_and_a_redo_needs_a_reason(repo, monkeypatch):
+def test_a_resumable_attempt_is_resumed_and_redone_only_for_a_defect_in_what_it_completed(repo, monkeypatch):
+    """A redo is no alternative to a resume: an attempt that can be resumed is redone only when the defect
+    affects questions it completed, and only once DEVIATIONS.md names it. Only the latest is resumed."""
     root, config_path = repo
     register(root, config_path)
     first = failed_test_run(root, config_path, monkeypatch)
     with pytest.raises(barrier.TestSplitLocked, match=f"{first.name} already attempted it"):
         runner.run_agent(str(config_path), "B0", "test", ids=["9"])
-    second = failed_test_run(root, config_path, monkeypatch, redo_reason="  the endpoint\nwas misconfigured ")
+    with pytest.raises(barrier.TestSplitLocked, match=f"can be resumed. Resume it with --resume-from {first.name}"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the endpoint was misconfigured")
+    with pytest.raises(barrier.TestSplitLocked, match="has no line naming"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the endpoint was misconfigured",
+                         redo_affects_completed=True)
+    deviation(root, first.name, "the endpoint was misconfigured, which every completed question went through")
+    second = failed_test_run(root, config_path, monkeypatch, redo_reason="  the endpoint\nwas misconfigured ",
+                             redo_affects_completed=True)
     manifest = json.loads((second / "manifest.json").read_text())
     assert manifest["redo_reason"] == "the endpoint was misconfigured"  # one line
+    assert manifest["redo"] == {"of": first.name, "affects_completed": True, "not_resumable_because": None}
     assert [a["run_id"] for a in manifest["earlier_attempts"]] == [first.name]
     intent = json.loads(git(root, "show", f"origin/main:registry/test/{second.name}.intent.json"))
-    assert intent["redo_reason"] == "the endpoint was misconfigured"
+    assert intent["redo_reason"] == "the endpoint was misconfigured" and intent["redo"]["affects_completed"] is True
     refused_resume(root, config_path, first.name, f"not the latest attempt of its configuration \\({second.name} is\\)")
     run_dir = runner.run_agent(str(config_path), "B0", "test", resume_from=second.name)
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
@@ -604,6 +630,8 @@ def test_a_redo_reason_needs_an_earlier_attempt_on_test_and_excludes_a_resume(re
     source = failed_test_run(root, config_path, monkeypatch)
     with pytest.raises(DataError, match="choose one"):
         runner.run_agent(str(config_path), "B0", "test", resume_from=source.name, redo_reason="a defect")
+    with pytest.raises(DataError, match="qualifies --redo-reason"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_affects_completed=True)
     assert not (root / "registry" / "test" / "x").exists()
 
 
@@ -759,7 +787,11 @@ def test_a_replay_on_test_is_redone_only_with_a_reason_and_only_the_latest_is_re
     with pytest.raises(barrier.TestSplitLocked, match=f"{failed.name} already attempted it"):
         replay.replay(str(config_path), source, engine="production_llm")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
-    second = replay.replay(str(config_path), source, engine="production_llm", redo_reason="the endpoint was wrong")
+    with pytest.raises(barrier.TestSplitLocked, match=f"Resume it with --resume-from {failed.name}"):
+        replay.replay(str(config_path), source, engine="production_llm", redo_reason="the endpoint was wrong")
+    deviation(root, failed.name, "the endpoint was wrong for every invocation it completed")
+    second = replay.replay(str(config_path), source, engine="production_llm", redo_reason="the endpoint was wrong",
+                           redo_affects_completed=True)
     git(root, "push", "-q", "origin", "main")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
     assert json.loads((second / "manifest.json").read_text())["redo_reason"] == "the endpoint was wrong"
@@ -772,3 +804,18 @@ def test_a_replay_on_test_is_not_resumed_on_a_dirty_tree(failed_replay):
     root, config_path, source, failed = failed_replay
     (root / "notes.txt").write_text("not committed\n")
     refused_replay(root, config_path, source, failed.name, "not clean \\(\\?\\? notes.txt\\)")
+
+
+def test_an_attempt_that_cannot_be_resumed_is_redone_with_its_deviation_and_why(repo, monkeypatch):
+    """Outputs that no longer hash to their record make resuming impossible: a redo, with no claim about
+    completed questions, once DEVIATIONS.md names the attempt; the manifest says why it was not resumed."""
+    root, config_path = repo
+    register(root, config_path)
+    first = failed_test_run(root, config_path, monkeypatch)
+    (first / "calls.jsonl").write_text("")
+    refused_resume(root, config_path, first.name, "calls.jsonl does not hash")
+    deviation(root, first.name, "its calls.jsonl was lost")
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="its calls.jsonl was lost")
+    redo = json.loads((run_dir / "manifest.json").read_text())["redo"]
+    assert (redo["of"], redo["affects_completed"]) == (first.name, False)
+    assert "calls.jsonl does not hash" in redo["not_resumable_because"]

@@ -336,10 +336,17 @@ def _write(kind: str, source_run_id: str, run_manifest: Dict[str, Any], config: 
 def evaluate(source_run_id: str, partial: bool = False) -> Path:
     """The eval execution of a run's final SQL per question (predictions.json).
 
-    `partial` scores an abandoned test attempt (failed or interrupted) on the questions it completed (a
-    prediction, and neither a failure nor a harness error), never read for a verdict: the report lists it
-    beside the configuration's final run (SPEC 6.1). Its predictions must hash to what the attempt's
-    manifest recorded when it ended (`predictions_sha256`, which the registry published)."""
+    `partial` scores an abandoned test attempt (failed or interrupted) on the questions it completed,
+    never read for a verdict: the report lists it, as descriptive, beside the configuration's final run
+    (SPEC 6.1). Completed means the question ended with an entry in predictions.json, the model's
+    failures included: the agent swallows them (a failed call is a tool error, the question still ends)
+    and B2 records a failed call as a null prediction, so they are scored, as wrong when they are wrong
+    (a null prediction is "no prediction", never correct). Left out are the questions that did not finish:
+    those in flight when the run stopped (the runner leaves them out of predictions.json), those that
+    raised (`failures`: an exception the agent did not swallow, so not the model's) and those that met a
+    harness error (`harness_errors`), the same questions `bench run --resume-from` answers again. Its
+    predictions must hash to what the attempt's manifest recorded when it ended (`predictions_sha256`,
+    which the registry published)."""
     run_manifest, config, gold = _source(source_run_id, partial)
     path = paths.RUNS / source_run_id / "predictions.json"
     if not path.is_file():
@@ -351,8 +358,8 @@ def evaluate(source_run_id: str, partial: bool = False) -> Path:
         if recorded is None or data.sha256_file(path) != recorded:
             raise data.DataError(f"the predictions of {source_run_id} do not hash to what its manifest recorded when it "
                                  f"ended (predictions_sha256)")
-        failed = set(run_manifest.get("failures") or {}) | set(run_manifest.get("harness_errors") or {})
-        predictions = {q: sql for q, sql in predictions.items() if q not in failed}
+        unfinished = set(run_manifest.get("failures") or {}) | set(run_manifest.get("harness_errors") or {})
+        predictions = {q: sql for q, sql in predictions.items() if q not in unfinished}  # model failures stay
         if not predictions:
             raise data.DataError(f"{source_run_id} completed no question: nothing to score")
         extra = {"partial": True, "predictions_sha256": recorded, "of_questions": len(run_manifest["question_ids"])}

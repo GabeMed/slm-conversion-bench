@@ -561,17 +561,23 @@ def session_alive(run_dir: Path) -> Optional[bool]:
 
 def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str, split: str,
              fields: Dict[str, Any], key_envs: List[str], resume_source: Optional[Dict[str, Any]] = None,
-             redo_reason: Optional[str] = None) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
+             redo_reason: Optional[str] = None,
+             redo_affects_completed: bool = False) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
     """Create runs/<run_id>/ with its manifest and configuration snapshot, after every precondition.
     On the test split: the registered call sites are required, every key used is long enough to be
     redacted, the checkout is the registered code (`barrier.ensure_execution_allowed`), no completed run
-    of the same configuration is in the published registry, an earlier attempt of it is either resumed
-    (`resume_source`, by the rule of `resume.check_test_source`) or run again from scratch for a stated
-    defect (`redo_reason`), and the intent is committed and published first (a refusal there leaves no
-    run). Returns (run_dir, manifest, the call sites a test run may emit or None)."""
+    of the same configuration is in the published registry, an attempt that did not end is resumed
+    (`resume_source`, by the rule of `resume.check_test_source`), and the intent is committed and
+    published first (a refusal there leaves no run). It is run again from its first question
+    (`redo_reason`, the defect) only when its latest attempt cannot be resumed
+    (`resume.why_not_resumable`) or the defect affects questions it completed
+    (`redo_affects_completed`), and only once prereg/DEVIATIONS.md, as published, has a line naming
+    that attempt (SPEC D22). Returns (run_dir, manifest, the call sites a test run may emit or None)."""
     redo_reason = " ".join((redo_reason or "").split()) or None
     if redo_reason is not None and split != "test":
         raise data.DataError("--redo-reason is for the test split, where running a configuration again needs a reason")
+    if redo_affects_completed and redo_reason is None:
+        raise data.DataError("--redo-affects-completed qualifies --redo-reason: state the defect")
     if redo_reason is not None and resume_source is not None:
         raise data.DataError("--redo-reason runs a configuration again from its first question, --resume-from "
                              "continues an attempt: choose one")
@@ -614,11 +620,30 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
         elif redo_reason is not None and not attempts:
             raise barrier.TestSplitLocked(f"refusing --redo-reason: no earlier attempt of {what} is in the registry "
                                           f"under this pre-registration, so there is nothing to run again")
+        not_resumable = None
+        if redo_reason is not None:
+            from bench.agent import resume
+            latest = attempts[-1]["run_id"]
+            not_resumable = resume.why_not_resumable(latest, manifest["prereg_hash"], attempts,
+                                                     registry.published_manifest(latest, test["origin"]))
+            if not_resumable is None and not redo_affects_completed:
+                raise barrier.TestSplitLocked(
+                    f"refusing to run {what} again from its first question: its latest attempt {latest} can be resumed. "
+                    f"Resume it with --resume-from {latest}. A redo is only for a defect that affects questions it "
+                    f"completed (add --redo-affects-completed) or that makes resuming it impossible")
+            if not registry.deviation_names(latest, test["origin"]):
+                raise barrier.TestSplitLocked(
+                    f"refusing to run {what} again from its first question: prereg/DEVIATIONS.md, as published, has no "
+                    f"line naming {latest}. A redo on test is a deviation (SPEC D22): add a dated line with {latest}, the "
+                    f"defect and its direction, commit and push it, then run again")
         manifest["earlier_attempts"] = attempts
         manifest["redo_reason"] = redo_reason
+        if redo_reason is not None:
+            manifest["redo"] = {"of": attempts[-1]["run_id"], "affects_completed": redo_affects_completed,
+                                "not_resumable_because": scrub(not_resumable) if not_resumable else None}
         manifest["registry_intent"] = registry.commit_intent(
             manifest, config, resumed_from=None if resume_source is None else resume_source["run_id"],
-            redo_reason=redo_reason, earlier_attempts=[a["run_id"] for a in attempts],
+            redo_reason=redo_reason, redo=manifest.get("redo"), earlier_attempts=[a["run_id"] for a in attempts],
             unregistered_source_hashes=manifest.get("unregistered_source_hashes"))
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
@@ -657,7 +682,7 @@ def claude_code_version() -> str:
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
               batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None,
-              redo_reason: Optional[str] = None) -> Path:
+              redo_reason: Optional[str] = None, redo_affects_completed: bool = False) -> Path:
     """One agent run. With `resume_from`, a new run that copies what a failed, interrupted or killed run
     answered and answers only the questions left (`bench.agent.resume`). On test, `redo_reason` runs a
     configuration that has an earlier attempt again from its first question (`open_run`)."""
@@ -726,7 +751,8 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         complete = resume.complete_questions(source, answers)
         source_calls = resume.read_calls_of(source)  # before the run exists: an invalid source leaves none
     run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
-                                          split, fields, key_envs, resume_source=source, redo_reason=redo_reason)
+                                          split, fields, key_envs, resume_source=source, redo_reason=redo_reason,
+                                          redo_affects_completed=redo_affects_completed)
     outcome = new_outcome()
     remaining = selected
     if source is not None:

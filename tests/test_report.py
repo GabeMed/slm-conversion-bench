@@ -728,6 +728,7 @@ def test_every_attempt_of_a_configuration_is_listed_with_why_it_ended_and_its_pa
     assert first["end_reason"].startswith("harness error on question 7")
     assert (second["redo_reason"], second["n"], second["ex"]) == ("the endpoint was wrong", None, None)
     assert (final["run_id"], final["n"], final["ex"], final["partial"], final["resumed_from"]) == ("b0-3", 498, 0.6, False, "b0-2")
+    assert second["copied_into"] == "b0-3" and "copied_into" not in first  # b0-3 resumed b0-2, not b0-1
 
     (partial / "manifest.json").write_text(json.dumps({**eval_manifest, "predictions_sha256": "other"}))
     with pytest.raises(JudgmentError, match="scored other predictions than the ones the registry recorded"):
@@ -743,9 +744,11 @@ def test_every_attempt_of_a_configuration_is_listed_with_why_it_ended_and_its_pa
             "attempts": report.attempts_by_configuration(registry, "h", arms, {"b0-1": partial.name})}
     page = report.render(data)
     assert "## Attempts per configuration" in page and "**agent B0** (pre-registration h)" in page
-    assert "| b0-1 | not completed (failed) | harness error on question 7: the network went away | — | 118 | 50.0% (partial) |" in page
-    assert "| b0-2 | not completed (interrupted) | KeyboardInterrupt:  | the endpoint was wrong | — | — |" in page
-    assert "| b0-3 | done | — | resumes b0-2 | 498 | 60.0% |" in page
+    assert ("| b0-1 | not completed (failed) | harness error on question 7: the network went away | — | 118 | "
+            "50.0% (partial, descriptive) | — |") in page
+    assert "| b0-2 | not completed (interrupted) | KeyboardInterrupt:  | the endpoint was wrong | — | — | copied into b0-3 |" in page
+    assert "| b0-3 | done | — | resumes b0-2 | 498 | 60.0% | — |" in page
+    assert "partial and descriptive" in page and "its EX counts them again" in page
 
 
 def test_a_partial_evaluation_is_never_an_arms(tmp_path, monkeypatch):
@@ -1518,5 +1521,5 @@ def test_a_test_report_names_the_partial_evaluation_of_every_abandoned_attempt(p
     (b4_group,) = [g for g in data["attempts"] if g["arm"] == "B4" and g["type"] == "agent"]
     assert [(a["run_id"], a["n"], a["ex"], a["partial"]) for a in b4_group["attempts"]] == [
         ("agent-B4-abandoned", 2, 0.5, True), ("agent-B4-test", data["arms"]["B4"]["n"], data["arms"]["B4"]["ex"], False)]
-    assert "| agent-B4-abandoned | not completed (failed) | harness error on question 5003: a dead pod | — | 2 | 50.0% (partial) |" \
+    assert "| agent-B4-abandoned | not completed (failed) | harness error on question 5003: a dead pod | — | 2 | 50.0% (partial, descriptive) | — |" \
         in (out / "report.md").read_text()
