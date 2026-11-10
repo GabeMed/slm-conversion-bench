@@ -1,5 +1,6 @@
 """J7 · S6: the cheapest engine that passes per cluster, the production LLM otherwise, an agreement bar
 tied to the teacher's agreement with itself (T4), and an allocation fact the router accepts."""
+import json
 from fractions import Fraction
 
 import pytest
@@ -9,7 +10,7 @@ from bench.contracts import facts, router
 from bench.judge import j7
 from bench.judge.base import JudgmentError, read_result, reference, relative, write_result
 from bench.judge.j4 import noninferiority
-from fixtures.fake import repo, write_run
+from fixtures.fake import few_shot, repo, write_run
 from fixtures.world import GOLD_SITES, gold_correct, per_call_eval, replay, teacher, trained_on, unit
 
 SETTINGS = {"selection_delta_pp": 2.5, "seed": 1, "n_boot": 2000, "min_calls": 5, "concordance_min": 0.95,
@@ -185,7 +186,8 @@ def allocation_world(tmp_path, monkeypatch):
                                       "adapters": adapters.parent.name}}, b4)
     per_call_eval("eval-b4", "replay-b4", b4, lambda c: teacher_ok(c) and gold_correct("slm", 0.5)(c))
     cheap = replay(t, "replay-cheap", "cheap_alt", 0.9)
-    write_run("replay-cheap", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib"}, cheap)
+    write_run("replay-cheap", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib",
+                              **few_shot(config["arms"]["B1"]["few_shot"]["k"])}, cheap)
     per_call_eval("eval-cheap", "replay-cheap", cheap, teacher_ok)  # the teacher's EX exactly
     j8 = write_result("J8", {}, {"engine": "slm:qwen3-8b", "cost_per_request": {"20%": 0.0001, "50%": 0.00004, "100%": 0.00002}})
     # the pilot: S4's zero-shot replay of the chosen candidate, before any adapter
@@ -238,6 +240,35 @@ def test_run_refuses_mismatched_facts_and_missing_settings(tmp_path, monkeypatch
     with pytest.raises(JudgmentError, match="min_calls"):
         run_j7(world)
     assert not (paths.ROOT / "judgments" / "J7").exists()
+
+
+def test_missing_facts_and_results_are_refusals_not_tracebacks(tmp_path, monkeypatch):
+    world = config, centroids, choice, adapters, replays, j8, j6 = allocation_world(tmp_path, monkeypatch)
+    missing = str(adapters.parent.parent / ("0" * 64) / "adapters.json")
+    with pytest.raises(facts.FactError, match="no adapters fact there"):
+        run_j7((config, centroids, choice, missing, replays, j8, j6))
+    with pytest.raises(JudgmentError, match="no J8 result there"):
+        run_j7((config, centroids, choice, adapters, replays, str(j8.parent.parent / "none" / "result.json"), j6))
+
+
+def test_j7_refuses_a_cheap_alt_replay_without_b1s_few_shot(tmp_path, monkeypatch):
+    """The cheap_alt replay stands for B1's engine: one with another k, or with k examples drawn by an
+    earlier sampling rule (none recorded), is another B1, and J7 refuses it."""
+    world = config, centroids, choice, adapters, replays, j8, j6 = allocation_world(tmp_path, monkeypatch)
+    manifest_path = paths.RUNS / "replay-cheap" / "manifest.json"
+    found = json.loads(manifest_path.read_text())
+    assert config["arms"]["B1"]["few_shot"]["k"] == 3
+    for fields, reason in ((few_shot(0), "ran with few_shot_k 0, not 3"),
+                           (few_shot(3, sampling=None), "by another sampling rule"),
+                           ({"few_shot": None, "few_shot_k": None, "few_shot_sha256": None}, "few_shot_k None, not 3")):
+        manifest_path.write_text(json.dumps({**found, **fields}))
+        with pytest.raises(JudgmentError, match=reason):
+            run_j7(world)
+    assert not (paths.ROOT / "judgments" / "J7").exists()
+    config["arms"]["B1"]["few_shot"]["k"] = 0  # B1 chose k = 0: the k = 0 replay is its engine
+    manifest_path.write_text(json.dumps({**found, **few_shot(0)}))
+    path, _ = run_j7(world)
+    assert "arms.B1.few_shot.k" in read_result(path, "J7")["reads"]["config"]
 
 
 def test_j7_refuses_without_the_teachers_self_replay(tmp_path, monkeypatch):

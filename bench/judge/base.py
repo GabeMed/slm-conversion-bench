@@ -72,6 +72,26 @@ def require_done(run_id: str, **expected: Any) -> Dict[str, Any]:
     return found
 
 
+def require_few_shot(run_id: str, found: Dict[str, Any], k: int) -> None:
+    """Refuse an execution on `cheap_alt` whose few-shot prefix is not `k` examples drawn by today's
+    sampling rule (`bench.agent.few_shot.SAMPLING`, recorded as `few_shot.sampling`): an execution
+    made under an earlier rule is another B1. With k = 0 no example is drawn, so there is no rule to
+    record: the prefix must then be empty at every call site (each `few_shot_sha256` that of [])."""
+    from bench.agent.few_shot import SAMPLING
+    provenance = found.get("few_shot") or {}
+    if found.get("few_shot_k") != k or provenance.get("k") != k:
+        raise JudgmentError(f"{run_id} ran with few_shot_k {found.get('few_shot_k')!r}, not {k}")
+    if k == 0:
+        empty = hashlib.sha256(canonical([])).hexdigest()
+        digests = found.get("few_shot_sha256") or {}
+        if not digests or any(d != empty for d in digests.values()):
+            raise JudgmentError(f"{run_id} ran with few_shot_k 0 but a non-empty prefix (few_shot_sha256)")
+        return
+    if provenance.get("sampling") != SAMPLING:
+        raise JudgmentError(f"{run_id} drew its {k} few-shot examples by another sampling rule "
+                            f"({provenance.get('sampling')!r}), not today's ({SAMPLING!r})")
+
+
 def calls_of(run_id: str) -> List[dict]:
     """The C1 lines of an execution, validated: a judgment never reads an invalid log."""
     calls = read_calls(run_dir(run_id) / "calls.jsonl")
@@ -120,6 +140,8 @@ def read_result(path, judgment: str) -> Dict[str, Any]:
     path = Path(path)
     if not path.is_absolute():
         path = paths.ROOT / path
+    if not path.is_file():
+        raise JudgmentError(f"{path}: no {judgment} result there")
     raw = path.read_bytes()
     if path.parent.name != hashlib.sha256(raw).hexdigest():
         raise JudgmentError(f"{path}: content sha256 is not its directory name")
@@ -136,7 +158,10 @@ def result_reference(path) -> Dict[str, str]:
 
 def read_json_judgment(path) -> str:
     path = Path(path)
-    return json.loads((path if path.is_absolute() else paths.ROOT / path).read_bytes())["judgment"]
+    path = path if path.is_absolute() else paths.ROOT / path
+    if not path.is_file():
+        raise JudgmentError(f"{path}: no judgment result there")
+    return json.loads(path.read_bytes())["judgment"]
 
 
 def n_boot(config: Dict[str, Any]) -> int:

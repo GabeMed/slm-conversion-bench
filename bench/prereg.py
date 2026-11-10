@@ -78,6 +78,71 @@ def _check_committed(root: Path, chain: List[Path]) -> None:
             raise PreregError(f"{rel} is ignored by git: a configuration file must not be")
 
 
+def b1k_choice(root: Path, config: Dict[str, Any]) -> Path:
+    """The one choice of B1's k on the pilot (judgments/b1k, bench/judge/b1k.py) the configuration must
+    follow: stored by its sha256, by today's rule, on today's pilot questions, and the k that
+    arms.B1.few_shot.k says. Without it, or with two, k was not chosen by the rule."""
+    from bench import data
+    from bench.judge import b1k
+    found = sorted((root / "judgments" / b1k.JUDGMENT).glob("*/choice.json"))
+    if len(found) != 1:
+        raise PreregError(f"judgments/{b1k.JUDGMENT} holds {len(found)} choices of B1's k, not one: arms.B1.few_shot.k "
+                          f"is chosen on the pilot by bench judge b1k before the registration (remove a choice that is "
+                          f"not the pilot's)")
+    path = found[0]
+    rel = path.relative_to(root).as_posix()
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != path.parent.name:
+        raise PreregError(f"{rel} is not stored by its sha256: it was changed after bench judge b1k wrote it")
+    payload = json.loads(raw)
+    result = payload.get("result") or {}
+    if payload.get("judgment") != b1k.JUDGMENT or result.get("rule") != b1k.RULE:
+        raise PreregError(f"{rel} was not chosen by today's rule ({b1k.RULE})")
+    k = config["arms"]["B1"]["few_shot"]["k"]
+    if result.get("k") != k:
+        raise PreregError(f"arms.B1.few_shot.k is {k}, and the stored choice of it on the pilot ({rel}) is "
+                          f"{result.get('k')!r}: write the chosen k, or remove a choice that is not the pilot's")
+    try:
+        pilot = sorted(data.pilot_ids(config), key=int)
+    except (DataError, OSError) as e:
+        raise PreregError(f"the pilot questions cannot be read, so {rel} cannot be checked against them: {e}") from e
+    if result.get("pilot_ids") != pilot:
+        raise PreregError(f"{rel} was chosen on other pilot questions than bench.data.pilot_ids gives today")
+    return path
+
+
+def arm_fact_paths(root: Path, config: Dict[str, Any]) -> List[Path]:
+    """The facts the configuration names for the arms (`arms.<arm>.<fact>`, as the router reads them:
+    J6's choice, J5's centroids, S5's adapters, J7's allocation). Every one must be set: an arm whose fact
+    is null cannot run on test, and registering it would fix B4 or B5 as undecided."""
+    from bench.contracts.router import ARM_FACTS
+    arms = config.get("arms") or {}
+    missing = [f"arms.{arm}.{name}" for arm, names in sorted(ARM_FACTS.items())
+               for name in names if not (arms.get(arm) or {}).get(name)]
+    if missing:
+        raise PreregError(f"{', '.join(missing)} not set: every fact the arms follow is decided before the "
+                          f"registration (the adapters by S5, the allocation by J7)")
+    return [root / arms[arm][name] for arm, names in sorted(ARM_FACTS.items()) for name in names]
+
+
+def _check_facts_tracked(root: Path, facts: List[Path]) -> None:
+    """Every fact the configuration follows must be one the registration commit holds: present, inside the
+    repository, tracked and not ignored (a modified one is already refused by the clean-tree check). A
+    clone without it could not tell which decision was registered."""
+    for path in facts:
+        path = path.resolve()
+        if not path.is_relative_to(root):
+            raise PreregError(f"{path} is outside the repository: the commit cannot hold this fact")
+        rel = path.relative_to(root).as_posix()
+        if not path.is_file():
+            raise PreregError(f"{rel}, a fact the configuration names, does not exist")
+        if not _git_ok(root, "ls-files", "--error-unmatch", "--", rel):
+            raise PreregError(f"{rel}, a fact the configuration names, is not tracked by git: commit it, so the "
+                              f"registration holds the decision it follows")
+        if _git_ok(root, "check-ignore", "-q", "--no-index", "--", rel):
+            raise PreregError(f"{rel}, a fact the configuration names, is ignored by git: it must not be")
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -179,11 +244,8 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     if not (config.get("cost") or {}).get("slo_from"):
         raise PreregError("the configuration has no cost.slo_from: the pilot's B0 execution on calib, on which the "
                           "SLO is measured, is registered")
-    k = config["arms"]["B1"]["few_shot"]["k"]
-    chosen = {json.loads(path.read_bytes())["result"]["k"] for path in (root / "judgments" / "b1k").glob("*/choice.json")}
-    if chosen and chosen != {k}:
-        raise PreregError(f"arms.B1.few_shot.k is {k}, and the stored choice of it on the pilot (judgments/b1k) is "
-                          f"{sorted(chosen)}: write the chosen k, or remove a choice that is not the pilot's")
+    choice = b1k_choice(root, config)
+    _check_facts_tracked(root, [choice] + arm_fact_paths(root, config))
     inputs = barrier.REGISTERED
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in inputs.items()},

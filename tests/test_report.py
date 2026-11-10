@@ -587,6 +587,16 @@ def test_a_plan_adapters_fact_must_be_the_one_j7_allocated_on(tmp_path, monkeypa
         report._expected_facts(plan, {"j7": {"adapters": "other", "allocation_fact": {"sha256": "L"}}})
 
 
+@pytest.mark.parametrize("spec", [{"cost": "judgments/J3/x/result.json"}, {"eval": "eval-B0"}, None])
+def test_an_incomplete_plan_is_refused(tmp_path, monkeypatch, spec):
+    """An arm of the plan without its evaluation or its J3 result is refused before anything is read."""
+    from fixtures.fake import repo
+    _, config = repo(tmp_path, monkeypatch)
+    lacks = " and ".join(key for key in ("eval", "cost") if not (spec or {}).get(key))
+    with pytest.raises(JudgmentError, match=f"the plan's arms.B0 lacks {lacks}"):
+        report.gather({"split": "calib", "arms": {"B0": spec}}, config, None, None, None, [])
+
+
 def test_the_chart_legend_reads_the_configured_utilizations():
     data = {"arms": {"B4": {"ex": 0.8, "cost_per_correct": {"30%": 0.2, "90%": 0.1}}}, "utilizations": ["30%", "90%"]}
     assert "one point per utilization, 30% (right) to 90% (left)" in report.chart_svg(data)
@@ -734,7 +744,7 @@ def build_pipeline(tmp_path, monkeypatch):
     from bench.curate import run_curate, write_datasets
     from bench.embed import run_embed
     from bench.judge import j2, j3, j5, j6, j7, j8
-    from fixtures.fake import call, fake_embed, fake_tokens, write_run
+    from fixtures.fake import call, fake_embed, fake_tokens, few_shot, write_run
     from fixtures.world import gold_correct, per_call_eval, replay, teacher, trained_on
     from synthetic import make_repo
     from test_curate import teacher_config
@@ -814,7 +824,8 @@ def build_pipeline(tmp_path, monkeypatch):
                             "facts": {"choice": choice.parent.name, "centroids": centroids_sha, "adapters": adapters.parent.name}}, b4_calib)
     per_call_eval("eval-B4-calib", "replay-B4-calib", b4_calib, teacher_ok)
     cheap_calib = replay(calib, "replay-cheap-calib", "cheap_alt", 0.8)
-    run("replay-cheap-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib"}, cheap_calib)
+    run("replay-cheap-calib", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib",
+                               **few_shot(config["arms"]["B1"]["few_shot"]["k"])}, cheap_calib)
     per_call_eval("eval-cheap-calib", "replay-cheap-calib", cheap_calib, lambda c: teacher_ok(c) and unit("cheap", c["question_id"]) < 0.8)
     # the teacher against itself on the pilot questions (T4): the agreement bar's cap
     routine_sites = ["agent_ir", "extract_keywords", "filter_column", "select_tables"]

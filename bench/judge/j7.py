@@ -17,7 +17,8 @@ Per cluster of the centroids, **the cheapest engine that passes on calib**, else
 - a cluster whose calls mix both must pass both; a cluster with no calib call, or without enough
   of them, stays with `production_llm` (SPEC S6).
 
-The engines are `cheap_alt` (a replay of the teacher's calib inputs on it) and `slm`, the cluster's
+The engines are `cheap_alt` (a replay of the teacher's calib inputs on it, with B1's few-shot: the
+`arms.B1.few_shot.k` examples drawn by today's sampling rule, else refused) and `slm`, the cluster's
 adapter (a replay routed as B4, so each call went to the adapter of the cluster the router assigned
 it). **The cluster of a calib call is the router's own assignment**, as the B4 replay recorded it in
 C1, never recomputed: it is the one B5 will make. The cheap_alt replay is grouped by the same
@@ -36,14 +37,15 @@ from bench.contracts.concordance import GOLD_CALL_SITES
 from bench.contracts.facts import read_fact, write_fact
 from bench.judge import j2, j3
 from bench.judge.base import (Identity, JudgmentError, calls_of, canonical, invocations, n_boot, read_result, reference,
-                              require_done, result_reference, write_result)
+                              require_done, require_few_shot, result_reference, write_result)
 
 JUDGMENT = "J7"
 # the keys of config.yaml this judgment reads (design §6.2: `reads` names them, for `bench verify`).
 # seeds.calib_split, stats.pilot_mix and stats.pilot_size are what bench.data.pilot_ids reads: they follow that accessor
-CONFIG_KEYS = ["allocation.min_calls", "cost.utilizations", "data.bird_dev_questions", "prices", "seeds.bootstrap",
-               "seeds.calib_split", "stats.n_boot", "stats.pilot_mix", "stats.pilot_size", "thresholds.concordance_min",
-               "thresholds.concordance_slack_pp", "thresholds.selection_delta_pp"]
+# arms.B1.few_shot.k is the few-shot B1 runs with: the cheap_alt replay must have run with it (require_few_shot)
+CONFIG_KEYS = ["allocation.min_calls", "arms.B1.few_shot.k", "cost.utilizations", "data.bird_dev_questions", "prices",
+               "seeds.bootstrap", "seeds.calib_split", "stats.n_boot", "stats.pilot_mix", "stats.pilot_size",
+               "thresholds.concordance_min", "thresholds.concordance_slack_pp", "thresholds.selection_delta_pp"]
 ENGINES = ("cheap_alt", "slm")
 NonInferiority = Callable[..., Dict[str, Any]]
 
@@ -236,6 +238,8 @@ def run(centroids_path: str, adapters_path: str, replays: Dict[str, tuple], teac
             raise JudgmentError(f"{replay_run} is on {found.get('split')!r}: S6 allocates on calib only")
         if engine == "cheap_alt" and found.get("engine") != "cheap_alt":
             raise JudgmentError(f"{replay_run} did not run on cheap_alt")
+        if engine == "cheap_alt":  # B1's engine: B1's few-shot (k and today's sampling rule), or it is another B1
+            require_few_shot(replay_run, found, config["arms"]["B1"]["few_shot"]["k"])
         missing = set(invocations(teacher)) - set(cluster_of)
         if missing:
             raise JudgmentError(f"the B4 replay did not route {len(missing)} teacher invocations, e.g. {sorted(missing)[:2]}")

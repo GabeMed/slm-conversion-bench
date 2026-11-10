@@ -13,7 +13,7 @@ from bench import cli, data, paths, verify
 from bench.contracts import facts
 from bench.judge import j2, j3, j5, j6, j7, j8
 from bench.judge.base import read_result, relative, write_result
-from fixtures.fake import call, repo, usage, write_run
+from fixtures.fake import call, few_shot, repo, usage, write_run
 from fixtures.world import GOLD_SITES, gold_correct, per_call_eval, replay, teacher, trained_on
 
 QUESTIONS = [str(q) for q in range(1000, 1200)]
@@ -83,7 +83,8 @@ def world(tmp_path, monkeypatch):
                                       "adapters": adapters.parent.name}}, b4)
     per_call_eval("eval-b4", "replay-b4", b4, lambda c: teacher_ok(c) and gold_correct("slm", 0.5)(c))
     cheap = replay(t, "replay-cheap", "cheap_alt", 0.9)
-    write_run("replay-cheap", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib"}, cheap)
+    write_run("replay-cheap", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "cheap_alt", "split": "calib",
+                              **few_shot(config["arms"]["B1"]["few_shot"]["k"])}, cheap)
     per_call_eval("eval-cheap", "replay-cheap", cheap, teacher_ok)
     routine = sorted({c["call_site"] for c in t} - set(GOLD_SITES))  # the teacher against itself, on the pilot (T4)
     write_run("replay-self", {"type": "replay", "source_run_id": "agent-B0-calib", "engine": "production_llm",
@@ -244,7 +245,7 @@ def test_a_result_that_does_not_say_what_it_read_cannot_be_verified(world, capsy
     assert len(divergences) == 1 and "its reads do not name what J8 needs to be recomputed" in divergences[0]
     missing = f"judgments/J8/{'0' * 64}/result.json"
     _, divergences = verify.verify(world["config"], {"j8": missing})
-    assert len(divergences) == 1 and divergences[0].startswith(f"{missing}: ") and "No such file" in divergences[0]
+    assert len(divergences) == 1 and divergences[0].startswith(f"{missing}: ") and "no judgment result there" in divergences[0]
     gone = write_result("J2", {"run": {"run_id": "nowhere", "manifest_sha256": "0" * 64}, "config": []}, {"mode": "run"})
     _, divergences = verify.verify(world["config"], {"format": {"B0": relative(gone)}})
     assert divergences == [f"{relative(gone)}: cannot be recomputed: no execution nowhere (runs/nowhere/manifest.json is missing)"]

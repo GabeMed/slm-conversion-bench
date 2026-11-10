@@ -92,6 +92,15 @@ def test_slm_calls_cost_the_load_test_per_request_at_each_utilization():
     assert fraction["cost_at_production_price"] == pytest.approx((1.0 * 2.0 + 0.1 * 8.0) / (2.8 + 2.2))
 
 
+def test_a_missing_j8_is_a_refusal_not_a_traceback(tmp_path, monkeypatch):
+    _, config = repo(tmp_path, monkeypatch, {"prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}}})
+    calls = [call("agent-B4", "1", "select_tables", parsed={}, role="slm", engine="slm:qwen3-8b+lora:c0",
+                  model="qwen3-8b-c0", use=usage(1000, 0, 10))]
+    write_run("agent-B4", {"type": "agent", "arm": "B4", "split": "test", "question_ids": ["1"]}, calls)
+    with pytest.raises(JudgmentError, match="judgments/J8/none/result.json: no J8 result there"):
+        j3.run("agent-B4", None, "judgments/J8/none/result.json", config)
+
+
 def test_run_reads_the_execution_its_eval_and_j8(tmp_path, monkeypatch):
     _, config = repo(tmp_path, monkeypatch, {"prices": PRICES, "roles": {"production_llm": {"model": "teacher-model"}}})
     calls = [call("agent-B4", "1", "select_tables", parsed={}, role="slm", engine="slm:qwen3-8b+lora:c0",

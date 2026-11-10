@@ -311,6 +311,11 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
     else:
         registry = test_registry()
     specs = plan.get("arms") or {}
+    for arm, spec in specs.items():  # an incomplete plan is refused, never read half
+        missing = [key for key in ("eval", "cost") if not (isinstance(spec, dict) and spec.get(key))]
+        if missing:
+            raise JudgmentError(f"the plan's arms.{arm} lacks {' and '.join(missing)}: each arm needs its end-to-end "
+                                f"evaluation (eval) and its J3 result (cost)")
     rows = per_arm({arm: spec["eval"] for arm, spec in specs.items()}, split, ex_table)
     pilot_plan = plan.get("pilot") or {}
     sources: Dict[str, Any] = {"arms": {}, "pilot": {arm: reference(e) for arm, e in pilot_plan.items()}}
