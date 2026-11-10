@@ -35,6 +35,19 @@ def _tool_call_name(text: str) -> str:
     return match.group(0) if match else text
 
 
+def _next_tool_name(response: str, tools) -> str:
+    """PATCH 16 (see `Agent.get_next_tool_name`): the first tool among `tools` that a <tool_call> block of
+    `response` names, each block read by `_tool_call_name`."""
+    blocks = response.split("<tool_call>")
+    names = [_tool_call_name(block) for block in blocks[1:]]
+    if not names:
+        return blocks[1]  # no <tool_call>: IndexError, as published
+    for name in names:
+        if name in tools:
+            return name
+    raise ValueError(f"Tool {names[0]} not found")
+
+
 class Agent:
     """
     Abstract base class for agents.
@@ -106,16 +119,15 @@ class Agent:
         """
         Get the next tool to call based on the response.
 
-        PATCH 16 (slm-conversion-bench): a lenient reading of the same tag. The text after the first
+        PATCH 16 (slm-conversion-bench): a lenient reading of the same tag. The text after each
         <tool_call> ends at the first </tool_call>, </think>, next <tool_call> or the end of the text;
-        the tool is the string `name` (or `tool`) of a JSON object there, else its leading identifier
-        (a bare name, possibly followed by arguments). No <tool_call> raises IndexError, as published;
-        a name outside the agent's tools raises ValueError, as published.
+        the tool it names is the string `name` (or `tool`) of a JSON object there, else its leading
+        identifier (a bare name, possibly followed by arguments). The tool is the first one so named that
+        is among the agent's tools, so a tag written inside a sentence before the call is skipped. No
+        <tool_call> raises IndexError, as published; no block naming one of the agent's tools raises
+        ValueError (naming the first block's), as published.
         """
-        tool_name = _tool_call_name(response.split("<tool_call>")[1])
-        if tool_name not in self.tools:
-            raise ValueError(f"Tool {tool_name} not found")
-        return tool_name
+        return _next_tool_name(response, self.tools)
     
     def call_agent(self, system_state: SystemState, iteration: int = 0) -> SystemState:
         """

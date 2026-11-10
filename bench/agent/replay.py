@@ -39,7 +39,8 @@ from typing import Any, Callable, Dict, List, Optional
 from bench import barrier, data, paths
 from bench.agent import hooks
 from bench.agent.runner import (_in_workers, _merge_workers, _prepare_chess, _write_manifest, check_engines,
-                                few_shot_for, finish, open_run, used_key_envs, worker_parts)
+                                clear_send_modes, few_shot_for, finish, open_run, used_key_envs,
+                                worker_parts)
 from bench.contracts.calls import AGENT_CALL_SITES, CALL_SITES, read_calls, validate_calls
 from bench.contracts.config import config_sha256, engine_spec, load_config
 from bench.provenance import scrub
@@ -136,6 +137,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
            redo_affects_completed: bool = False) -> Path:
     config = load_config(config_path)
     hooks.configure(config)
+    clear_send_modes()  # a replay has no --batch / --via-claude-code: neither reaches its engine from the shell
     if (engine is None) == (arm is None):
         raise data.DataError("a replay needs --engine or --arm, one of the two")
     if workers < 1:
@@ -172,8 +174,10 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
         engines = possible_engines(arm, config)
         facts = {name: sha for name, (_, sha) in arm_facts(arm, config).items()}
     check_engines(config, engines, embeddings=False)  # nothing is retrieved: the prompts are the source's
+    from bench.agent.served import check_served
+    served = check_served(config, engines, split)
     # (building CHESS's agents below, to read their answers, touches no embedding: patch 10 builds them at first use)
-    few_shot, recorded = few_shot_for(config, engines)
+    few_shot, recorded = few_shot_for(config, engines, split)
     _prepare_chess(config, paths.bird_root(config))
     reader = readers(config)
     for record in records:  # every record readable before anything runs
@@ -184,7 +188,8 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
               "source_calls_sha256": hashlib.sha256(calls_path.read_bytes()).hexdigest(),
               "engine": engine, "arm": arm, "call_sites": sorted(call_sites) if call_sites else None,
               "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded,
-              "workers": workers}  # as in an agent run, not the configuration's identity
+              "workers": workers,  # as in an agent run, not the configuration's identity
+              "served": served}  # what serves its SLM engines (bench.agent.served), or null: none
     if failed is not None:
         fields["unregistered_source_hashes"] = resume.unregistered_source_hashes(failed)  # before anything is read
         expected = {key: fields[key] for key in resume.REPLAY_IDENTITY if key != "split"}

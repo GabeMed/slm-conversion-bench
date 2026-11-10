@@ -212,3 +212,33 @@ Changes after Stage 0 that can change a result or its interpretation.
   against the original by an independent review and by script), dates are written in ISO form and numbers with
   English separators. The Portuguese originals remain in the history (Stage 0 ae60d1b; 3a28b19 before the
   translation), so `git diff STAGE0 -- SPEC.md` shows the whole file as changed. Direction: none
+- 2026-11-10 · analysis code changed after Stage 0 (bench/report.py, bench/evaluate.py, bench/judge/j4.py): the
+  report prints "—" as the planned power of a comparison whose pilot d is 0 and of repair when it is inconclusive by
+  design (the stored planned_power, J4's power, is unchanged); the S2 row states the training rows per cluster from
+  train/datasets/manifest.json and the routed sites' rule, with curate's figures as labelled context; a table prints
+  every J4 comparison already in report.json; the K4 heading names the report's split; J4's refusal on unpaired
+  questions names the pair (message only); `bench eval --partial` also scores a test attempt killed outright (still
+  `running`, its session lock free) on the questions its journal holds, under the same scoring rules, checked against
+  the hashes a resume recorded, and the report asks for it like any abandoned attempt's. No stored result or verdict
+  changes (bench verify 0 divergences). Direction: none
+- 2026-11-10 · the load test's AIPerf client ran co-located on the serving pod instead of in a CPU pod of its own.
+  This happened after Stage 0 and before any load test ran, because no CPU pod was available in the serving pod's
+  data center. AIPerf ran in the serving pod's container (A100 80GB PCIe, listed with 16 vCPUs as config.yaml's
+  price note records; the cgroup's quota read from cpu.max is about 30.1 vCPUs, 3013888/100000, and the 75%
+  criterion uses it), in the same training environment from the volume, pinned with `taskset` to 4 cores that vLLM
+  is not pinned to. It reached vLLM on the loopback, not through the SSH tunnel a CPU pod uses. Measured in the
+  smoke test at concurrency 4 and 128: AIPerf used about 0.8 core, vLLM about 0.4 to 0.5 core, and the whole
+  container about 1.25 cores. The loopback adds about 0 ms per request, against about 1 ms through the data
+  center's SSH tunnel. All six sweeps (the base, the four adapters, and B4 as deployed) use the same client:
+  `bench loadtest` refuses a sweep whose client kind differs from a done load test of the same candidate under the
+  same configuration. Each level's manifest records the client (its pod, pinned cores, nproc, and the cgroup's
+  cpuset and CPU quota), the loopback's calibration, and a CPU sample of AIPerf, of vLLM and of the container over
+  the level (`cpu_sample`). Direction: negligible. If anything, it slightly favours the SLM, because its measured
+  latencies leave out the network a separate client would add (about 1 ms). The per-level CPU samples show whether
+  the client and the server competed for CPU. config.yaml is unchanged; the client is `bench loadtest --on runpod
+  --client colocated` (opt-in; the default stays the CPU pod). Each level must pass a no-contention check
+  (runpod_apps/colocated.py), or the load test exits 3: the cgroup did not throttle (cpu.stat's nr_throttled and
+  throttled_usec unchanged), the container used under 75% of its allotted vCPUs (the cgroup's quota), AIPerf's own
+  CPU time used under 90% of its 4 pinned cores (the cores' host-wide busy share from /proc/stat, which includes
+  other tenants, is recorded apart as data), and no vLLM thread's affinity included a pinned core (vLLM's threads
+  are kept off them before the sweep); a quantity that is not measured fails the level.
