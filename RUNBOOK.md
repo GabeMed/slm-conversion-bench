@@ -684,6 +684,11 @@ done
   does not start. When it ends it **commits** its manifest, and the `git push` after it publishes
   that.
 - The last replay is the per-call-site evaluation.
+- **Exploratory readings, after the loop and without a verdict** (SPEC 6.1): B0's test calls replayed with the base
+  SLM and with the cheap alternative, each once, under the registered configuration, then `bench eval <replay>
+  --per-call`: `bench replay <B0 test> --engine slm:<candidate> --workers 8` (the serving pod) and
+  `bench replay <B0 test> --engine cheap_alt --workers 2`. They are registered like any execution and feed only the
+  per-call-site table beside B4's replay.
 - A defect that needs a new registration: `bench prereg --replace --reason "<the defect>"`. It
   becomes a line of `prereg/DEVIATIONS.md`, which the report prints.
 
