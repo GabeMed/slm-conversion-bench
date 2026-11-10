@@ -1,358 +1,358 @@
 # SPEC — slm-conversion-bench
 
-**Execução empírica de "Small Language Models are the Future of Agentic AI"**
+**Empirical execution of "Small Language Models are the Future of Agentic AI"**
 (Belcak et al., NVIDIA Research, arXiv 2506.02153)
 
-## Como ler este documento
+## How to read this document
 
-O paper é um _position paper_: afirma que SLMs são o futuro da IA agêntica, sustenta a posição com argumentos e propõe um algoritmo de conversão LLM→SLM, mas não contém nenhum experimento. Os "estudos de caso" do apêndice são estimativas.
+The paper is a _position paper_: it claims that SLMs are the future of agentic AI, supports the position with arguments and proposes an LLM→SLM conversion algorithm, but contains no experiment. The "case studies" in the appendix are estimates.
 
-Esta prova de conceito executa o algoritmo do paper de ponta a ponta numa tarefa agêntica real e transforma cada argumento em uma quantidade medida, com um único objetivo: **descobrir se melhora, quanto melhora e qual passo do algoritmo entrega o ganho**.
+This proof of concept runs the paper's algorithm end to end on a real agentic task and turns each argument into a measured quantity, with a single goal: **find out whether it improves, by how much, and which step of the algorithm delivers the gain**.
 
-Cada seção deste documento espelha uma seção do paper. Os rótulos **V** (visões), **A** (argumentos), **AV** (visões alternativas), **CA** (contra-argumentos), **B** (barreiras), **S** (passos do algoritmo) e **WD** (definições) são os do paper. Os rótulos **D** são decisões nossas, listadas na Seção 9.
+Each section of this document mirrors a section of the paper. The labels **V** (views), **A** (arguments), **AV** (alternative views), **CA** (counter-arguments), **B** (barriers), **S** (algorithm steps) and **WD** (definitions) are the paper's. The **D** labels are our decisions, listed in Section 9.
 
-Regra de nível: esta spec não nomeia modelos, provedores nem bibliotecas. Esses vão em arquivos de configuração e em decisões de implementação, tomadas nas sessões de desenvolvimento. Aqui, "o LLM de produção", "o professor" e "os SLMs" são papéis.
+Level rule: this spec names no models, providers or libraries. Those go in configuration files and in implementation decisions, made in the development sessions. Here, "the production LLM", "the teacher" and "the SLMs" are roles.
 
-Para cada item do paper, o documento responde três perguntas: **o que o paper diz**, **o que executamos** e **o que isso reproduz**. Quando um item não é testável nesta PoC, isso é dito explicitamente.
+For each item of the paper, the document answers three questions: **what the paper says**, **what we execute** and **what that reproduces**. When an item is not testable in this PoC, that is stated explicitly.
 
 ---
 
-## 1. Posição (Seção 2 do paper)
+## 1. Position (Section 2 of the paper)
 
-### Definições
+### Definitions
 
-**Paper.** WD1: um SLM é um modelo que cabe num dispositivo eletrônico de consumo e faz inferência com latência prática para servir as requisições agênticas de um usuário. WD2: um LLM é um modelo que não é SLM. Em 2025, o paper considera SLM a maioria dos modelos abaixo de 10 bilhões de parâmetros.
+**Paper.** WD1: an SLM is a model that fits on a consumer electronic device and performs inference with latency practical for serving one user's agentic requests. WD2: an LLM is a model that is not an SLM. In 2025, the paper considers most models below 10 billion parameters to be SLMs.
 
-**Executamos.** Adotamos WD1 e WD2. Os SLMs candidatos são organizados em três faixas de tamanho (até 1B, de 1B a 4B, de 7B a 9B), e a pergunta implícita em toda medição é "até onde dá para descer". Uma rodada de inferência em máquina de consumo é opcional, para honrar WD1 literalmente (D17).
+**We execute.** We adopt WD1 and WD2. The candidate SLMs are organized in three size bands (up to 1B, 1B to 4B, 7B to 9B), and the question implicit in every measurement is "how far down can one go". An inference run on a consumer machine is optional, to honor WD1 literally (D17).
 
-### As três visões
+### The three views
 
-O paper afirma que os SLMs são (V1) suficientemente poderosos, (V2) inerentemente mais adequados e (V3) necessariamente mais econômicos para a maioria das invocações em sistemas agênticos. Ele apresenta a posição como uma consequência necessária dessas três visões, e chega a chamá-la de um "ought" moral. Esta PoC não testa o valor; testa as premissas empíricas.
+The paper claims that SLMs are (V1) sufficiently powerful, (V2) inherently more suitable and (V3) necessarily more economical for most invocations in agentic systems. It presents the position as a necessary consequence of these three views, and goes as far as calling it a moral "ought". This PoC does not test the value; it tests the empirical premises.
 
-| Visão                        | O que o paper afirma                                     | A medida que a fecha                                                                                                            |
+| View                         | What the paper claims                                    | The measure that settles it                                                                                                     |
 | ---------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **V1** Suficiência           | SLMs dão conta dos "errands" de linguagem dos agentes    | Qualidade do SLM contra o LLM de produção no benchmark, zero-shot e após especialização, por categoria de dificuldade           |
-| **V2** Adequação operacional | SLMs são mais adequados a sistemas agênticos do que LLMs | Não é medida direta: é a soma de A3 (tempo de adaptação), A5 (aderência a formato) e A6 (sistema misto)                         |
-| **V3** Economia              | SLMs são mais econômicos pela virtude do tamanho         | Custo por mil chamadas com throughput medido, mais utilização e custo fixo (os pontos que o paper admite deixar de fora em AV2) |
+| **V1** Sufficiency           | SLMs handle agents' language "errands"                   | SLM quality against the production LLM on the benchmark, zero-shot and after specialization, by difficulty category           |
+| **V2** Operational suitability | SLMs are more suitable to agentic systems than LLMs    | Not a direct measure: it is the sum of A3 (adaptation time), A5 (format adherence) and A6 (mixed system)                        |
+| **V3** Economy               | SLMs are more economical by virtue of size               | Cost per thousand calls with measured throughput, plus utilization and fixed cost (the points the paper admits leaving out in AV2) |
 
 ---
 
-## 2. Argumentos (Seção 3 do paper)
+## 2. Arguments (Section 3 of the paper)
 
-### A1 — SLMs já são suficientemente poderosos
+### A1 — SLMs are already sufficiently powerful
 
-**Paper.** Cita modelos de 1 a 9 bilhões de parâmetros que igualam modelos muito maiores em raciocínio de senso comum, tool calling, geração de código e instruction following. Toda a evidência vem de benchmarks de terceiros; nenhuma vem de dentro de um pipeline agêntico. O paper nomeia os benchmarks que considera relevantes para a interface modelo→ferramenta e código→modelo.
+**Paper.** Cites models of 1 to 9 billion parameters that match much larger models in commonsense reasoning, tool calling, code generation and instruction following. All the evidence comes from third-party benchmarks; none comes from inside an agentic pipeline. The paper names the benchmarks it considers relevant to the model→tool and code→model interface.
 
-**Executamos.** A tarefa da PoC é a que o próprio A1 coloca no centro: **tool calling**, medida no benchmark de function calling que o paper cita (BFCL). Como as categorias de turno único desse benchmark estão perto da saturação, a diferença entre SLM e LLM é medida nas categorias vivas e de múltiplos turnos, onde ela ainda aparece (D9). O primeiro dado é o zero-shot de candidatos das três faixas de tamanho, sob o mesmo prompt de produção usado pelo LLM.
+**We execute.** The PoC's task is the one A1 itself puts at the center: **tool calling**, measured on the function-calling benchmark the paper cites (BFCL). Since that benchmark's single-turn categories are close to saturation, the difference between SLM and LLM is measured in the live and multi-turn categories, where it still shows (D9). The first data point is the zero-shot of candidates from the three size bands, under the same production prompt used by the LLM.
 
-**Reproduz.** Verifica se as afirmações do A1 sobrevivem no benchmark que o paper escolheu, no nível de dificuldade em que ainda há o que medir.
+**Reproduces.** Checks whether A1's claims survive on the benchmark the paper chose, at the difficulty level where there is still something to measure.
 
-**Fora.** Raciocínio de senso comum e geração de código não voltada a ferramentas: o paper os usa como indicadores, não como tarefas de agente.
+**Out.** Commonsense reasoning and code generation not aimed at tools: the paper uses them as indicators, not as agent tasks.
 
-### A2 — SLMs são mais econômicos
+### A2 — SLMs are more economical
 
-**Paper.** Quatro sub-argumentos: (i) inferência 10–30× mais barata que a de um LLM, citando terceiros; (ii) fine-tune em horas de GPU; (iii) implantação em dispositivos de borda; (iv) uso mais eficiente dos parâmetros, porque LLMs ativam só uma fração deles por entrada.
+**Paper.** Four sub-arguments: (i) inference 10–30× cheaper than an LLM's, citing third parties; (ii) fine-tuning in GPU-hours; (iii) deployment on edge devices; (iv) more efficient use of parameters, because LLMs activate only a fraction of them per input.
 
-**Executamos.** Medimos (i) e (ii): custo de inferência a partir do throughput medido numa GPU de referência, e tempo e custo de cada especialização. O item (iii) é opcional (D17).
+**We execute.** We measure (i) and (ii): inference cost from the throughput measured on a reference GPU, and the time and cost of each specialization. Item (iii) is optional (D17).
 
-**Reproduz.** Substitui o "10–30×" citado por um número da tarefa, e diz explicitamente que parte do A2 fica sem teste.
+**Reproduces.** Replaces the cited "10–30×" with a number from the task, and states explicitly which part of A2 goes untested.
 
-**Fora.** O item (iv). Exige instrumentação interna dos modelos e não é consequência do pipeline.
+**Out.** Item (iv). It requires internal instrumentation of the models and is not a consequence of the pipeline.
 
-### A3 — SLMs são mais flexíveis
+### A3 — SLMs are more flexible
 
-**Paper.** Por serem baratos de treinar e adaptar, permitem múltiplos especialistas por rotina e adaptação rápida a novas exigências, "overnight rather than weeks". Cita a democratização como consequência.
+**Paper.** Being cheap to train and adapt, they allow multiple experts per routine and fast adaptation to new requirements, "overnight rather than weeks". Cites democratization as a consequence.
 
-**Executamos.** Registramos o tempo e o custo de cada especialista treinado, e o esforço necessário para trocar de tarefa (o que muda quando só a especificação da tarefa muda).
+**We execute.** We record the time and cost of each trained expert, and the effort needed to switch tasks (what changes when only the task specification changes).
 
-**Reproduz.** Mede o "overnight".
+**Reproduces.** Measures the "overnight".
 
-**Fora.** A democratização não é testável numa PoC.
+**Out.** Democratization is not testable in a PoC.
 
-### A4 — Agentes expõem só uma fatia estreita do modelo
+### A4 — Agents expose only a narrow slice of the model
 
-**Paper.** Um agente é um LLM generalista amarrado por prompts e gerenciamento de contexto a uma função estreita; um SLM ajustado para esses prompts bastaria. O paper remete a objeção natural (o generalista entende melhor o mundo) para a AV1.
+**Paper.** An agent is a generalist LLM bound by prompts and context management to a narrow function; an SLM tuned for those prompts would suffice. The paper defers the natural objection (the generalist understands the world better) to AV1.
 
-**Executamos.** É a premissa do workload: um prompt de produção realista, fixo e versionado antes de qualquer resultado, o mesmo para o LLM e para os SLMs. O S3 mede a estreiteza, contando quantos tipos distintos de chamada existem de fato nos logs.
+**We execute.** It is the workload's premise: a realistic production prompt, fixed and versioned before any result, the same for the LLM and for the SLMs. S3 measures the narrowness, counting how many distinct call types actually exist in the logs.
 
-**Reproduz.** O A4 é verdadeiro se uma especialização estreita fecha o gap. Essa é exatamente a comparação SLM especializado contra LLM sob o mesmo prompt.
+**Reproduces.** A4 is true if a narrow specialization closes the gap. That is exactly the comparison of specialized SLM against LLM under the same prompt.
 
-### A5 — Interações agênticas exigem alinhamento de formato
+### A5 — Agentic interactions require format alignment
 
-**Paper.** O agente precisa de um único formato de tool call e de saída; o LLM que alterna formatos comete erros ocasionais de formato; um SLM treinado num único formato é preferível.
+**Paper.** The agent needs a single tool-call and output format; the LLM that alternates formats makes occasional format errors; an SLM trained on a single format is preferable.
 
-**Executamos.** Taxa de chamadas inválidas contra o schema da ferramenta em todos os braços: LLM de produção, SLM zero-shot, SLM especializado; cada um com e sem decoding restrito ao schema.
+**We execute.** Rate of calls invalid against the tool schema in all arms: production LLM, zero-shot SLM, specialized SLM; each with and without decoding constrained to the schema.
 
-**Reproduz.** Separa o ganho de formato que vem do treino do que vem de truque de decoding. É o único ponto em que o paper aposta que o SLM supera o LLM.
+**Reproduces.** Separates the format gain that comes from training from the one that comes from a decoding trick. It is the only point where the paper bets the SLM beats the LLM.
 
-### A6 — Sistemas agênticos são naturalmente heterogêneos
+### A6 — Agentic systems are naturally heterogeneous
 
-**Paper.** Um modelo pode ser ferramenta de outro; a arquitetura natural tem um LLM na raiz (conversa e orquestração) e SLMs nas chamadas subordinadas; modelos de tamanhos diferentes para complexidades diferentes.
+**Paper.** One model can be another's tool; the natural architecture has an LLM at the root (conversation and orchestration) and SLMs in the subordinate calls; models of different sizes for different complexities.
 
-**Executamos.** É onde os papéis da PoC são definidos:
+**We execute.** This is where the PoC's roles are defined:
 
-- **O LLM de produção**: o modelo que o cliente usa hoje. É o teto de qualidade e a referência de custo. Só avalia; nenhuma saída sua vira alvo de treino.
-- **O professor**: o modelo cujas chamadas são registradas e viram dados de especialização. Precisa de licença que permita esse uso.
-- **Os SLMs**: os candidatos das três faixas.
+- **The production LLM**: the model the client uses today. It is the quality ceiling and the cost reference. It only evaluates; none of its outputs becomes a training target.
+- **The teacher**: the model whose calls are logged and become specialization data. It needs a license that allows that use.
+- **The SLMs**: the candidates from the three bands.
 
-O sistema misto do A6 é o SLM atendendo por padrão e o LLM de produção recebendo as chamadas em que o SLM falha. Varremos a taxa de fallback de 0% a 100% e traçamos a fronteira de Pareto qualidade×custo.
+A6's mixed system is the SLM serving by default and the production LLM receiving the calls on which the SLM fails. We sweep the fallback rate from 0% to 100% and trace the quality×cost Pareto frontier.
 
-**Reproduz.** Testa a recomendação arquitetural central do paper: o sistema misto domina os dois sistemas puros?
+**Reproduces.** Tests the paper's central architectural recommendation: does the mixed system dominate both pure systems?
 
-**Nota.** A diferença de qualidade entre o professor e o LLM de produção é reportada como **custo de conformidade**: o preço, em qualidade, de usar como fonte de dados um modelo cuja licença permite treinar.
+**Note.** The quality difference between the teacher and the production LLM is reported as **compliance cost**: the price, in quality, of using as data source a model whose license allows training.
 
-### A7 — Interações agênticas são fonte de dados
+### A7 — Agentic interactions are a data source
 
-**Paper.** Um "listener" na interface de chamada gera dados de instrução especializados; os dados podem ser pós-filtrados pelo sucesso geral do workflow; produzir SLMs especialistas é um passo natural da implantação, não um esforço auxiliar.
+**Paper.** A "listener" at the call interface generates specialized instruction data; the data can be post-filtered by the overall success of the workflow; producing expert SLMs is a natural step of deployment, not an auxiliary effort.
 
-**Executamos.** Os logs do S1, a ablação "logs reais contra dados sintéticos" (S1) e o filtro do S2.
+**We execute.** The S1 logs, the "real logs against synthetic data" ablation (S1) and the S2 filter.
 
-**Reproduz.** É a pergunta do fosso de dados: se dados sintéticos gerados só a partir da descrição da tarefa empatam com logs reais, o cliente não precisa entregar logs.
-
----
-
-## 3. Visões alternativas (Seção 4 do paper)
-
-### AV1 — O generalista sempre vence na mesma tarefa
-
-**Paper.** Sustentada por CA1 (as leis de escala: modelos maiores vencem em qualquer tarefa de linguagem) e CA2 (o "hub semântico": LLMs abstraem e integram significado de um modo que modelos pequenos não conseguem). O paper responde com A8 (as leis de escala assumem arquitetura constante; SLMs se beneficiam de arquiteturas próprias), A9 (a flexibilidade do SLM permite ajustá-lo até a confiabilidade desejada), A10 (compute em inferência é barato para SLMs) e A11 (agentes decompõem problemas em sub-tarefas simples demais para o hub importar).
-
-**Executamos.**
-
-- **A9** é a curva de aprendizado do S5: a especialização chega ao nível do LLM de produção, e com quantos exemplos?
-- **A11** é o gap por categoria de dificuldade do benchmark. Se a diferença entre SLM e LLM se concentra nas categorias de múltiplos turnos, o argumento do hub tem força; se é uniforme, não tem.
-- **A10** é um braço opcional (D15): o SLM com raciocínio ou auto-consistência em inferência, medido também em latência e custo, porque é aí que o A10 cobra seu preço.
-
-**Reproduz.** O paper rebate a AV1 com argumentos; nós a rebatemos, ou confirmamos, com o gap medido.
-
-**Fora.** **A8** exige comparar SLMs de arquiteturas diferentes em tamanho parecido; é um experimento à parte. Um ponto de dado barato é possível se a lista de candidatos incluir um modelo de arquitetura híbrida (D16).
-
-### AV2 — A centralização torna o LLM mais barato
-
-**Paper.** Sustentada por CA3 (é difícil manter um endpoint especialista bem utilizado e balanceado) e CA4 (custo de infraestrutura e de talento para operá-la, omitido dos cálculos). O paper reconhece a AV2 como válida e diz que "o júri ainda está fora", apontando A12 (avanços em escalonamento de inferência) e A13 (custo de infra em queda).
-
-**Executamos.** O modelo de custo da Seção 7 responde CA3 e CA4 diretamente: custo recalculado a 20%, 50% e 100% de utilização; custo fixo de engenharia e de re-treino incluído no payback; payback em três volumes de referência.
-
-**Reproduz.** É o ponto mais fraco do paper, por confissão dele. A PoC produz os primeiros números ali.
-
-**Fora.** A12 e A13 são tendências de mercado, não testáveis aqui. Nosso custo usa infraestrutura alugada, o que equivale a assumir custo de setup zero; isso fica registrado.
-
-### AV3 — Mundos igualmente possíveis
-
-**Paper.** Os dois mundos são possíveis, mas a inércia e o investimento já feito favorecem o mundo LLM. O paper reconhece a possibilidade.
-
-**Executamos.** Não é testável. O registro de esforço (Seção 7) é o único dado produzido sobre o custo de trocar de mundo.
+**Reproduces.** It is the data-moat question: if synthetic data generated only from the task description ties with real logs, the client does not need to hand over logs.
 
 ---
 
-## 4. Barreiras (Seção 5 do paper)
+## 3. Alternative views (Section 4 of the paper)
 
-**B1 — Investimento em infraestrutura centralizada.** Não testável.
+### AV1 — The generalist always wins on the same task
 
-**B2 — SLMs são projetados e avaliados com benchmarks generalistas.** O paper diz que, olhando só a utilidade agêntica, SLMs superam modelos maiores. Executamos: a ablação do S4, seleção por scores públicos de benchmark contra seleção pelos próprios logs. Reproduz: testa se o ranking generalista prevê o desempenho na tarefa.
+**Paper.** Supported by CA1 (the scaling laws: larger models win on any language task) and CA2 (the "semantic hub": LLMs abstract and integrate meaning in a way small models cannot). The paper answers with A8 (the scaling laws assume constant architecture; SLMs benefit from their own architectures), A9 (the SLM's flexibility allows tuning it up to the desired reliability), A10 (inference-time compute is cheap for SLMs) and A11 (agents decompose problems into sub-tasks too simple for the hub to matter).
 
-**B3 — Falta de atenção pública.** Não testável. A publicação dos resultados é a resposta que o paper pede.
+**We execute.**
 
----
+- **A9** is the S5 learning curve: does specialization reach the production LLM's level, and with how many examples?
+- **A11** is the gap by the benchmark's difficulty category. If the difference between SLM and LLM concentrates in the multi-turn categories, the hub argument has force; if it is uniform, it does not.
+- **A10** is an optional arm (D15): the SLM with reasoning or self-consistency at inference, measured also in latency and cost, because that is where A10 charges its price.
 
-## 5. Algoritmo de conversão (Seção 6 do paper)
+**Reproduces.** The paper rebuts AV1 with arguments; we rebut it, or confirm it, with the measured gap.
 
-O algoritmo do paper pressupõe duas coisas que ele não diz: que existe um agente em produção gerando chamadas, e que existe um jeito de avaliar e decidir. O paper não define avaliação, critério de aceite nem o "router" que aparece pela primeira vez no S6. A Seção 7 deste documento cobre o que falta.
+**Out.** **A8** requires comparing SLMs of different architectures at similar size; it is a separate experiment. A cheap data point is possible if the candidate list includes a hybrid-architecture model (D16).
 
-**O agente de produção.** É um workload: um conjunto de chamadas de tool calling, com prompt de produção fixo, que o professor responde. Os inputs vêm de um dataset aberto de function calling, distinto do benchmark, cujos rótulos não são usados (D13). O benchmark fica intocado como conjunto de teste, para que os números do SLM e do LLM sejam comparáveis aos publicados.
+### AV2 — Centralization makes the LLM cheaper
 
-**Desenho da ablação.** O pipeline completo é o braço principal. Para cada passo há um braço que o substitui pelo que um time faria sem o paper, mantendo tudo o mais igual; a diferença entre os dois é a contribuição do passo. A forma é "tira um de cada vez", e não cumulativa, porque os passos interagem (o S5 depende do S1). Cada braço reporta a diferença de qualidade, a diferença de custo e o esforço para executar o passo.
+**Paper.** Supported by CA3 (it is hard to keep a specialist endpoint well utilized and balanced) and CA4 (infrastructure and talent cost to operate it, omitted from the calculations). The paper acknowledges AV2 as valid and says that "the jury is still out", pointing to A12 (advances in inference scheduling) and A13 (falling infra cost).
 
-### S1 — Coleta de logs
+**We execute.** The cost model of Section 7 answers CA3 and CA4 directly: cost recomputed at 20%, 50% and 100% utilization; fixed engineering and retraining cost included in the payback; payback at three reference volumes.
 
-**Paper.** Instrumentar todas as chamadas não-HCI do agente, capturando prompt de entrada, resposta, conteúdo das tool calls e, opcionalmente, latência; pipeline criptografado, com controle de acesso e anonimização.
+**Reproduces.** It is the paper's weakest point, by its own admission. The PoC produces the first numbers there.
 
-**Executamos.** Um logger em volta das chamadas do professor sobre os inputs de treino do workload. Cada registro guarda entrada estruturada, saída, latência, tokens e a identificação e versão do modelo, num esquema neutro entre provedores (D7). O raciocínio do professor, quando exposto, fica fora do log (D5): é o que o paper descreve e é o que um cliente com modelo fechado teria.
+**Out.** A12 and A13 are market trends, not testable here. Our cost uses rented infrastructure, which amounts to assuming zero setup cost; this is recorded.
 
-**Ablação.** Logs reais contra dados sintéticos gerados só a partir da descrição da tarefa.
+### AV3 — Equally possible worlds
 
-**Reproduz.** A7.
+**Paper.** Both worlds are possible, but inertia and the investment already made favor the LLM world. The paper acknowledges the possibility.
 
-### S2 — Curadoria e filtragem
-
-**Paper.** Acumular 10k–100k exemplos ("regra de bolso" para fine-tune de modelos pequenos); remover PII, PHI e dados sensíveis da aplicação; parafrasear entradas específicas para ofuscar entidades.
-
-**Executamos.** O mascaramento de dados sensíveis é executado como passo real, mesmo com efeito quase nulo em dados de benchmark; o efeito é registrado. Filtro por chamada válida contra o schema (o único sinal de "sucesso" disponível em produção; usar o gabarito seria trapaça). Deduplicação. Split de treino e validação por cenário. A curva de dados do S5 (500 / 2k / 5k / tudo) testa o piso de 10k.
-
-**Ablação.** Logs crus contra logs curados.
-
-**Reproduz.** Diz se a curadoria importa e se o piso de dados do paper é real.
-
-### S3 — Clusterização de tarefas
-
-**Paper.** Clustering não supervisionado sobre prompts e ações do agente para identificar padrões recorrentes, que definem as tarefas candidatas à especialização.
-
-**Executamos.** Embedding dos prompts inteiros (o que um cliente teria), número de clusters escolhido automaticamente (o cliente não sabe quantas tarefas tem), e validação por pureza contra as categorias do benchmark, que ficam gravadas nos logs mas escondidas do passo. Dois pipelines rodam: o "puro", que usa os clusters descobertos, e o "oráculo", que usa as categorias reais.
-
-**Ablação.** Um único SLM treinado em todos os logs misturados, sem clusterização; e a diferença puro–oráculo.
-
-**Reproduz.** Primeiro teste de se o clustering recupera a estrutura de tarefas e de quanto os erros dele custam lá na frente.
-
-### S4 — Seleção de SLMs
-
-**Paper.** Para cada tarefa, escolher candidatos por capacidades inerentes, desempenho em benchmarks relevantes, licença e footprint de implantação.
-
-**Executamos.** Candidatos nas três faixas de tamanho, com critérios de licença, contexto e footprint (D12). Três braços de seleção: (a) o modelo mais popular da faixa, sem avaliação; (b) seleção por scores públicos de benchmark, que é o que o paper prescreve; (c) seleção pela avaliação nos próprios logs. Um candidato por faixa avança para o S5, para revelar a curva tamanho×qualidade após a especialização.
-
-**Ablação.** (a) contra (b) contra (c).
-
-**Reproduz.** Mede se o seletor muda o resultado, e testa a B2.
-
-### S5 — Especialização
-
-**Paper.** Preparar um dataset por tarefa a partir dos dados curados e fazer fine-tune do SLM; adaptação eficiente de parâmetros para reduzir custo; fine-tune completo se os recursos permitirem; destilação do LLM quando útil.
-
-**Executamos.** Adaptação eficiente de parâmetros por cluster no SLM selecionado, com curva de dados (500 / 2k / 5k / tudo) e um braço de formato (com e sem decoding restrito). Destilação por logits só se professor e aluno compartilharem o mesmo tokenizador (D10). A ablação roda no melhor SLM e num único tamanho de dados; a curva completa fica só no braço principal.
-
-**Ablação.** O SLM selecionado zero-shot contra o mesmo SLM especializado.
-
-**Reproduz.** É onde V1 e A9 se decidem. Provavelmente é o passo de maior ganho; a PoC existe para confirmar ou negar isso.
-
-### S6 — Iteração e refinamento
-
-**Paper.** Retreinar periodicamente os SLMs e o modelo roteador com novos dados, voltando ao S2 ou ao S4 conforme o caso.
-
-**Executamos.** Definimos o que o paper só nomeia. O **router** é o fallback: o SLM atende; se a chamada sai inválida contra o schema, o turno vai para o LLM de produção. A taxa de fallback é varrida de 0% a 100%. A **iteração** é simulada: uma categoria do benchmark fica de fora do treino como "distribuição nova"; medimos a queda, depois entram 200 e 500 logs dela e medimos a recuperação.
-
-**Ablação.** SLM sozinho contra SLM com fallback.
-
-**Reproduz.** O loop que o paper apenas nomeia, e o sistema misto do A6.
+**We execute.** Not testable. The effort log (Section 7) is the only data produced on the cost of switching worlds.
 
 ---
 
-## 6. Estudos de caso (Apêndice B do paper)
+## 4. Barriers (Section 5 of the paper)
 
-**Paper.** Estima, sem experimento, que 60% das chamadas do MetaGPT, 40% do Open Operator e 70% do Cradle poderiam ser atendidas por SLMs especializados. O padrão é o mesmo nos três: o SLM serve para código rotineiro, respostas em template, parsing e roteamento de comandos e fluxos repetitivos; o LLM fica com raciocínio arquitetural, planejamento adaptativo e resolução de erros não estruturados.
+**B1 — Investment in centralized infrastructure.** Not testable.
 
-**Executamos.** O análogo medido dessas estimativas: a **fração substituível**, definida como a maior fração de chamadas atendida pelo SLM, sem fallback, tal que a qualidade do sistema misto iguala a do LLM de produção dentro do intervalo de confiança. Sai da varredura de fallback do S6.
+**B2 — SLMs are designed and evaluated with generalist benchmarks.** The paper says that, looking only at agentic utility, SLMs beat larger models. We execute: the S4 ablation, selection by public benchmark scores against selection by the logs themselves. Reproduces: tests whether the generalist ranking predicts performance on the task.
 
-**Reproduz.** O número-manchete da PoC, comparável às estimativas do apêndice.
-
----
-
-## 7. Protocolo de medição
-
-Esta é a única seção sem par no paper, porque o paper não tem avaliação. Tudo aqui é fixado **antes** de qualquer resultado. O que se fixa é como medir; o tamanho do efeito não é fixado (D3): não há limiares de "bom o bastante", e todo resultado é reportado como curva ou fronteira.
-
-**Verdade de referência.** O gabarito do benchmark, como ele o define (comparação estrutural ou execução). A fidelidade ao professor é reportada separadamente: imitar o professor não é acertar.
-
-**Métricas, para cada braço e cada categoria de dificuldade:**
-
-- acurácia, como o benchmark a define;
-- taxa de chamadas inválidas contra o schema;
-- custo por mil chamadas;
-- latência p50 e p95.
-
-**Splits e contaminação.** Os logs de treino vêm de inputs distintos do benchmark. O benchmark não entra no treino em nenhum braço. As categorias vivas do benchmark, criadas para resistir a contaminação, são tratadas com esse cuidado.
-
-**Ruído.** Cada configuração roda com repetições suficientes para um intervalo de confiança; diferenças dentro do intervalo são reportadas como empate.
-
-**Modelo de custo.**
-
-- Modelo via API: preço público por token.
-- Modelo local: custo-hora da GPU de referência dividido pelo throughput medido.
-- Utilização: custo recalculado a 20%, 50% e 100% (CA3).
-- Custo fixo: horas de engenharia e re-treinos periódicos entram no payback (CA4).
-- Payback em três volumes de referência: pequeno, médio e grande (D18).
-
-**Registro de esforço, por passo do algoritmo.** Horas humanas; horas de GPU; gasto com API; o que foi feito automaticamente e o que exigiu julgamento humano; o que precisaria mudar para uma segunda tarefa. Esse registro separa produto (o que roda sozinho quando se troca de tarefa) de serviço (o que exige gente a cada vez).
-
-**Entregáveis.**
-
-1. O gráfico principal: acurácia no benchmark contra custo por mil chamadas, com o LLM de produção, o SLM zero-shot, o SLM especializado e a curva do sistema misto.
-2. A tabela de ablação: contribuição e esforço de cada passo S1–S6.
-3. A fração substituível medida (Seção 6).
-4. O registro de esforço.
-5. O relatório, com a análise dos erros do SLM.
-
-**Os três resultados possíveis, todos válidos.**
-
-- O SLM iguala o LLM a uma fração do custo: V1–V3 confirmadas para tool calling.
-- O gap fecha só com especialização e resiste nas categorias de múltiplos turnos: a posição vale na forma estreita que o paper defende (A6, A11).
-- O SLM não chega: a posição não se sustenta nesta tarefa, e o motivo fica documentado.
+**B3 — Lack of public attention.** Not testable. Publishing the results is the answer the paper asks for.
 
 ---
 
-## 8. Fora de escopo
+## 5. Conversion algorithm (Section 6 of the paper)
 
-Continuam sendo opinião do paper, sem teste nesta PoC:
+The paper's algorithm presupposes two things it does not state: that there is an agent in production generating calls, and that there is a way to evaluate and decide. The paper does not define evaluation, acceptance criterion or the "router" that first appears in S6. Section 7 of this document covers what is missing.
 
-| Item                                 | Razão                                                                                                           |
+**The production agent.** It is a workload: a set of tool-calling calls, with a fixed production prompt, that the teacher answers. The inputs come from an open function-calling dataset, distinct from the benchmark, whose labels are not used (D13). The benchmark stays untouched as the test set, so that the SLM and LLM numbers are comparable to the published ones.
+
+**Ablation design.** The complete pipeline is the main arm. For each step there is an arm that replaces it with what a team would do without the paper, keeping everything else equal; the difference between the two is the step's contribution. The form is "remove one at a time", not cumulative, because the steps interact (S5 depends on S1). Each arm reports the quality difference, the cost difference and the effort to execute the step.
+
+### S1 — Log collection
+
+**Paper.** Instrument all of the agent's non-HCI calls, capturing input prompt, response, tool-call content and, optionally, latency; encrypted pipeline, with access control and anonymization.
+
+**We execute.** A logger around the teacher's calls on the workload's training inputs. Each record keeps structured input, output, latency, tokens and the model's identification and version, in a provider-neutral schema (D7). The teacher's reasoning, when exposed, stays out of the log (D5): it is what the paper describes and it is what a client with a closed model would have.
+
+**Ablation.** Real logs against synthetic data generated only from the task description.
+
+**Reproduces.** A7.
+
+### S2 — Curation and filtering
+
+**Paper.** Accumulate 10k–100k examples ("rule of thumb" for fine-tuning small models); remove PII, PHI and sensitive application data; paraphrase specific inputs to obfuscate entities.
+
+**We execute.** Masking of sensitive data is executed as a real step, even with near-zero effect on benchmark data; the effect is recorded. Filter by call valid against the schema (the only "success" signal available in production; using the gold answers would be cheating). Deduplication. Training and validation split by scenario. The S5 data curve (500 / 2k / 5k / all) tests the 10k floor.
+
+**Ablation.** Raw logs against curated logs.
+
+**Reproduces.** Says whether curation matters and whether the paper's data floor is real.
+
+### S3 — Task clustering
+
+**Paper.** Unsupervised clustering over the agent's prompts and actions to identify recurring patterns, which define the candidate tasks for specialization.
+
+**We execute.** Embedding of the whole prompts (what a client would have), number of clusters chosen automatically (the client does not know how many tasks it has), and validation by purity against the benchmark's categories, which are recorded in the logs but hidden from the step. Two pipelines run: the "pure" one, which uses the discovered clusters, and the "oracle" one, which uses the real categories.
+
+**Ablation.** A single SLM trained on all the logs mixed, without clustering; and the pure–oracle difference.
+
+**Reproduces.** First test of whether clustering recovers the task structure and of how much its errors cost further down the line.
+
+### S4 — SLM selection
+
+**Paper.** For each task, choose candidates by inherent capabilities, performance on relevant benchmarks, license and deployment footprint.
+
+**We execute.** Candidates in the three size bands, with license, context and footprint criteria (D12). Three selection arms: (a) the most popular model of the band, without evaluation; (b) selection by public benchmark scores, which is what the paper prescribes; (c) selection by evaluation on the logs themselves. One candidate per band advances to S5, to reveal the size×quality curve after specialization.
+
+**Ablation.** (a) against (b) against (c).
+
+**Reproduces.** Measures whether the selector changes the result, and tests B2.
+
+### S5 — Specialization
+
+**Paper.** Prepare a dataset per task from the curated data and fine-tune the SLM; parameter-efficient adaptation to reduce cost; full fine-tuning if resources allow; distillation from the LLM when useful.
+
+**We execute.** Parameter-efficient adaptation per cluster on the selected SLM, with a data curve (500 / 2k / 5k / all) and a format arm (with and without constrained decoding). Logit distillation only if teacher and student share the same tokenizer (D10). The ablation runs on the best SLM and at a single data size; the complete curve stays only in the main arm.
+
+**Ablation.** The selected SLM zero-shot against the same SLM specialized.
+
+**Reproduces.** It is where V1 and A9 are decided. It is probably the step with the largest gain; the PoC exists to confirm or deny that.
+
+### S6 — Iteration and refinement
+
+**Paper.** Periodically retrain the SLMs and the router model with new data, going back to S2 or S4 as the case may be.
+
+**We execute.** We define what the paper only names. The **router** is the fallback: the SLM serves; if the call comes out invalid against the schema, the turn goes to the production LLM. The fallback rate is swept from 0% to 100%. **Iteration** is simulated: one benchmark category is left out of training as "new distribution"; we measure the drop, then 200 and 500 logs of it enter and we measure the recovery.
+
+**Ablation.** SLM alone against SLM with fallback.
+
+**Reproduces.** The loop the paper only names, and A6's mixed system.
+
+---
+
+## 6. Case studies (Appendix B of the paper)
+
+**Paper.** Estimates, without experiment, that 60% of MetaGPT's calls, 40% of Open Operator's and 70% of Cradle's could be served by specialized SLMs. The pattern is the same in all three: the SLM serves for routine code, templated responses, parsing and routing of commands and repetitive flows; the LLM keeps architectural reasoning, adaptive planning and unstructured error resolution.
+
+**We execute.** The measured analogue of these estimates: the **replaceable fraction**, defined as the largest fraction of calls served by the SLM, without fallback, such that the mixed system's quality matches the production LLM's within the confidence interval. It comes out of the S6 fallback sweep.
+
+**Reproduces.** The PoC's headline number, comparable to the appendix's estimates.
+
+---
+
+## 7. Measurement protocol
+
+This is the only section with no counterpart in the paper, because the paper has no evaluation. Everything here is fixed **before** any result. What is fixed is how to measure; the effect size is not fixed (D3): there are no "good enough" thresholds, and every result is reported as a curve or frontier.
+
+**Reference truth.** The benchmark's gold answers, as it defines them (structural comparison or execution). Fidelity to the teacher is reported separately: imitating the teacher is not being right.
+
+**Metrics, for each arm and each difficulty category:**
+
+- accuracy, as the benchmark defines it;
+- rate of calls invalid against the schema;
+- cost per thousand calls;
+- p50 and p95 latency.
+
+**Splits and contamination.** The training logs come from inputs distinct from the benchmark. The benchmark does not enter training in any arm. The benchmark's live categories, created to resist contamination, are treated with that care.
+
+**Noise.** Each configuration runs with enough repetitions for a confidence interval; differences within the interval are reported as a tie.
+
+**Cost model.**
+
+- Model via API: public price per token.
+- Local model: hourly cost of the reference GPU divided by the measured throughput.
+- Utilization: cost recomputed at 20%, 50% and 100% (CA3).
+- Fixed cost: engineering hours and periodic retrainings enter the payback (CA4).
+- Payback at three reference volumes: small, medium and large (D18).
+
+**Effort log, per algorithm step.** Human hours; GPU hours; API spend; what was done automatically and what required human judgment; what would need to change for a second task. This log separates product (what runs on its own when the task is switched) from service (what requires people each time).
+
+**Deliverables.**
+
+1. The main chart: benchmark accuracy against cost per thousand calls, with the production LLM, the zero-shot SLM, the specialized SLM and the mixed system's curve.
+2. The ablation table: contribution and effort of each step S1–S6.
+3. The measured replaceable fraction (Section 6).
+4. The effort log.
+5. The report, with the analysis of the SLM's errors.
+
+**The three possible results, all valid.**
+
+- The SLM matches the LLM at a fraction of the cost: V1–V3 confirmed for tool calling.
+- The gap closes only with specialization and persists in the multi-turn categories: the position holds in the narrow form the paper defends (A6, A11).
+- The SLM does not get there: the position does not hold on this task, and the reason is documented.
+
+---
+
+## 8. Out of scope
+
+These remain the paper's opinion, untested in this PoC:
+
+| Item                                 | Reason                                                                                                          |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| A2 (iv), uso eficiente de parâmetros | Exige instrumentação interna dos modelos                                                                        |
-| A3, democratização                   | Não testável numa PoC                                                                                           |
-| A8, arquitetura por tamanho          | Experimento à parte; só um ponto de dado opcional (D16)                                                         |
-| A10, compute em inferência           | Opcional (D15), pelo custo em latência                                                                          |
-| A12, A13                             | Tendências de mercado                                                                                           |
-| AV3                                  | Não testável; o registro de esforço é o único dado                                                              |
-| B1, B3                               | Não testáveis                                                                                                   |
-| Edge como padrão                     | Opcional (D17)                                                                                                  |
-| Modelos de visão-linguagem           | O paper os menciona apenas como extensão                                                                        |
-| Afirmações ambientais                | Sem instrumentação para medir                                                                                   |
-| Domínio, língua e contexto longo     | A tarefa é tool calling em inglês; um "segundo cliente" em outro domínio é trabalho futuro, com o mesmo harness |
-| Produção                             | É um benchmark, não um sistema em escala de cliente                                                             |
+| A2 (iv), efficient use of parameters | Requires internal instrumentation of the models                                                                 |
+| A3, democratization                  | Not testable in a PoC                                                                                           |
+| A8, architecture by size             | Separate experiment; only an optional data point (D16)                                                          |
+| A10, inference-time compute          | Optional (D15), because of the cost in latency                                                                  |
+| A12, A13                             | Market trends                                                                                                   |
+| AV3                                  | Not testable; the effort log is the only data                                                                   |
+| B1, B3                               | Not testable                                                                                                    |
+| Edge as default                      | Optional (D17)                                                                                                  |
+| Vision-language models               | The paper mentions them only as an extension                                                                    |
+| Environmental claims                 | No instrumentation to measure them                                                                              |
+| Domain, language and long context    | The task is tool calling in English; a "second client" in another domain is future work, with the same harness  |
+| Production                           | It is a benchmark, not a system at client scale                                                                 |
 
 ---
 
-## 9. Regras e registro de decisões
+## 9. Rules and decision log
 
-### Regras
+### Rules
 
-- Só dados públicos. Nenhum dado ou material de terceiros entra no projeto.
-- O benchmark de teste não entra no treino em nenhum braço.
-- Saídas do LLM de produção nunca viram alvo de treino. O professor é sempre um modelo cuja licença ou termos permitem esse uso.
-- O projeto é público, nasce antes de qualquer contrato e é de autoria única. Os textos finais (relatório, memo) são escritos pelo autor; as sessões de desenvolvimento entregam estrutura, código e revisão.
-- Esta spec não nomeia modelos, provedores nem bibliotecas; esses vão em configuração.
+- Public data only. No third-party data or material enters the project.
+- The test benchmark does not enter training in any arm.
+- Outputs of the production LLM never become a training target. The teacher is always a model whose license or terms allow that use.
+- The project is public, is born before any contract and has a single author. The final texts (report, memo) are written by the author; the development sessions deliver structure, code and review.
+- This spec names no models, providers or libraries; those go in configuration.
 
-### Decisões fixadas
+### Fixed decisions
 
-| #   | Decisão                                                                                            |
+| #   | Decision                                                                                           |
 | --- | -------------------------------------------------------------------------------------------------- |
-| D1  | Tarefa única: tool calling, medida no BFCL                                                         |
-| D2  | Um workload, um benchmark; sem suíte multi-tarefa                                                  |
-| D3  | Sem limiares; protocolo fixado antes, tamanho do efeito não                                        |
-| D4  | Três papéis abstratos (LLM de produção, professor, SLMs), escolhidos em configuração               |
-| D5  | Raciocínio do professor fora dos logs                                                              |
-| D6  | LLM de produção fechado e só avaliação; professor com licença que permite treino                   |
-| D7  | Esquema de log neutro entre provedores, com versão do modelo em cada registro                      |
-| D8  | Ablação "tira um de cada vez" sobre o pipeline completo; no melhor SLM, num único tamanho de dados |
-| D9  | Dificuldade medida nas categorias vivas e de múltiplos turnos do benchmark                         |
+| D1  | Single task: tool calling, measured on BFCL                                                        |
+| D2  | One workload, one benchmark; no multi-task suite                                                   |
+| D3  | No thresholds; protocol fixed beforehand, effect size not                                          |
+| D4  | Three abstract roles (production LLM, teacher, SLMs), chosen in configuration                      |
+| D5  | Teacher's reasoning out of the logs                                                                |
+| D6  | Production LLM closed and evaluation only; teacher with a license that allows training             |
+| D7  | Provider-neutral log schema, with the model version in each record                                 |
+| D8  | "Remove one at a time" ablation over the complete pipeline; on the best SLM, at a single data size |
+| D9  | Difficulty measured in the benchmark's live and multi-turn categories                              |
 
-### Decisões abertas
+### Open decisions
 
-| #   | Decisão                                          | O que decide                                                                                |
+| #   | Decision                                         | What decides it                                                                             |
 | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| D10 | O professor concreto                             | Licença, posição no leaderboard do benchmark, tokenizador compartilhado com algum candidato |
-| D11 | O LLM de produção concreto                       | O que clientes usam de fato                                                                 |
-| D12 | A lista de candidatos SLM                        | Licença, contexto, footprint, três faixas; reconferir versões no dia                        |
-| D13 | O dataset de inputs para os logs                 | Licença e distância do benchmark                                                            |
-| D14 | A GPU de referência                              | Representar inferência realista, não a mais cara                                            |
-| D15 | Incluir o braço A10                              | Tempo disponível                                                                            |
-| D16 | Incluir um candidato de arquitetura híbrida (A8) | Disponibilidade na faixa                                                                    |
-| D17 | Rodada em máquina de consumo (WD1, A2 iii)       | Tempo disponível                                                                            |
-| D18 | Os três volumes de referência do payback         | Cenários plausíveis de cliente                                                              |
+| D10 | The concrete teacher                             | License, position on the benchmark's leaderboard, tokenizer shared with some candidate      |
+| D11 | The concrete production LLM                      | What clients actually use                                                                   |
+| D12 | The list of SLM candidates                       | License, context, footprint, three bands; recheck versions on the day                       |
+| D13 | The input dataset for the logs                   | License and distance from the benchmark                                                     |
+| D14 | The reference GPU                                | Represent realistic inference, not the most expensive                                       |
+| D15 | Include the A10 arm                              | Time available                                                                              |
+| D16 | Include a hybrid-architecture candidate (A8)     | Availability in the band                                                                    |
+| D17 | Run on a consumer machine (WD1, A2 iii)          | Time available                                                                              |
+| D18 | The three reference volumes of the payback       | Plausible client scenarios                                                                  |
 
-### Cronograma
+### Schedule
 
-Três fases em cerca de duas semanas:
+Three phases in about two weeks:
 
-1. **Workload, logs, curadoria e zero-shot** — S1, S2 e a primeira leitura de A1 com três candidatos.
-2. **Clusterização, seleção e especialização** — S3, S4, S5 com todos os candidatos, curvas e medição de custo e latência.
-3. **Router, ablação e relatório** — S6, os braços de ablação, o modelo de custo completo, o registro de esforço e o relatório.
+1. **Workload, logs, curation and zero-shot** — S1, S2 and the first reading of A1 with three candidates.
+2. **Clustering, selection and specialization** — S3, S4, S5 with all candidates, curves and measurement of cost and latency.
+3. **Router, ablation and report** — S6, the ablation arms, the complete cost model, the effort log and the report.
 
-### Glossário dos rótulos do paper
+### Glossary of the paper's labels
 
-- **WD1, WD2** — definições de SLM e LLM (Seção 2.1)
-- **V1–V3** — as três visões (Seção 2.2)
-- **A1–A7** — argumentos de sustentação (Seção 3)
-- **AV1–AV3** — visões alternativas (Seção 4)
-- **CA1–CA4** — contra-argumentos que sustentam as visões alternativas (Seção 4)
-- **A8–A13** — réplicas do paper às visões alternativas (Seção 4)
-- **B1–B3** — barreiras à adoção (Seção 5)
-- **S1–S6** — passos do algoritmo de conversão (Seção 6)
-- **D1–D18** — decisões deste projeto (esta seção)
+- **WD1, WD2** — definitions of SLM and LLM (Section 2.1)
+- **V1–V3** — the three views (Section 2.2)
+- **A1–A7** — supporting arguments (Section 3)
+- **AV1–AV3** — alternative views (Section 4)
+- **CA1–CA4** — counter-arguments that support the alternative views (Section 4)
+- **A8–A13** — the paper's replies to the alternative views (Section 4)
+- **B1–B3** — barriers to adoption (Section 5)
+- **S1–S6** — steps of the conversion algorithm (Section 6)
+- **D1–D18** — decisions of this project (this section)

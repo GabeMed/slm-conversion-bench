@@ -27,7 +27,7 @@ runs that algorithm end to end on a real open-source agent, [CHESS](https://gith
 - whether that still holds against **the cheapest alternative that needs no training**;
 - at what **cost per correct answer**.
 
-The protocol is [`SPEC.md`](SPEC.md) (in Portuguese), fixed before any result.
+The protocol is [`SPEC.md`](SPEC.md), fixed before any result.
 
 ## Status
 
