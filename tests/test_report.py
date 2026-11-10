@@ -1,7 +1,9 @@
 """R · the report: the SPEC §5 map rules, the test registry, and the whole pipeline end to end on a
 fake execution (S2 → S3 → S4 → S6, the costs, the per-call evaluation, the report)."""
+import copy
 import hashlib
 import json
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -727,10 +729,8 @@ def b1k_choice(k, pilot=PILOT):
     return relative(path)
 
 
-@pytest.fixture
-def pipeline(tmp_path, monkeypatch):
-    pytest.importorskip("sklearn")
-    pytest.importorskip("datasketch")
+def build_pipeline(tmp_path, monkeypatch):
+    """The fake execution, S1 to the registry, in `tmp_path` (with its bare origin beside it)."""
     from bench.curate import run_curate, write_datasets
     from bench.embed import run_embed
     from bench.judge import j2, j3, j5, j6, j7, j8
@@ -909,6 +909,35 @@ def pipeline(tmp_path, monkeypatch):
     publish(tmp_path)
     return {"config": config, "plan": plan_path, "allocation": allocated, "datasets": datasets, "j5": j5_path,
             "j6": j6_path, "root": tmp_path, "prereg_hash": prereg_hash}
+
+
+@pytest.fixture(scope="module")
+def built_pipeline(tmp_path_factory):
+    """The fake execution, built once for this module (it takes seconds); each test gets a copy (`pipeline`)."""
+    pytest.importorskip("sklearn")
+    pytest.importorskip("datasketch")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        return build_pipeline(tmp_path_factory.mktemp("pipeline"), monkeypatch)
+
+
+@pytest.fixture
+def pipeline(built_pipeline, tmp_path, monkeypatch):
+    """A copy of the built fake execution for one test, which it may change: the repository and its bare
+    origin copied, the origin remote and the paths pointing at the copy, the stand-in embedder in place."""
+    from fixtures.fake import fake_embed
+
+    built = built_pipeline["root"]
+    root, origin = tmp_path / built.name, tmp_path / f"{built.name}-origin.git"
+    shutil.copytree(built, root, symlinks=True)
+    shutil.copytree(built.parent / origin.name, origin, symlinks=True)
+    subprocess.run(["git", "-C", str(root), "remote", "set-url", "origin", str(origin)], check=True, capture_output=True)
+    for name, value in {"ROOT": root, "DATA": root / "data", "RAW": root / "data" / "raw",  # as make_repo sets them
+                        "SPLITS": root / "data" / "splits.json", "RUNS": root / "runs",
+                        "DATA_MANIFEST": root / "data" / "MANIFEST.json"}.items():
+        monkeypatch.setattr(paths, name, value)
+    monkeypatch.setattr(clusters, "embed", fake_embed)
+    moved = {key: root / Path(built_pipeline[key]).relative_to(built) for key in ("plan", "datasets", "j5", "j6")}
+    return {**copy.deepcopy(built_pipeline), **moved, "root": root}
 
 
 def test_a_test_report_is_read_only_under_the_registration_in_force(pipeline):

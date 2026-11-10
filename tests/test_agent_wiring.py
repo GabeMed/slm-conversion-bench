@@ -184,8 +184,11 @@ def test_embedding_failures_fail_the_run(monkeypatch, repo):
     def unreachable(self, texts):
         raise ConnectionError("embeddings endpoint unreachable")
     monkeypatch.setattr(DeterministicFakeEmbedding, "embed_documents", unreachable)
+    sleeps = []
+    monkeypatch.setattr(hooks, "_sleep", sleeps.append)  # the transport retries back off without waiting
     _, manifest, _ = run(monkeypatch, repo, ids=("1",))
     assert manifest["status"] == "failed" and "ConnectionError" in json.dumps(manifest["harness_errors"])
+    assert sleeps  # retried first, as a transport failure is
 
 
 def test_a_database_changed_during_the_run_fails_it(monkeypatch, repo):
