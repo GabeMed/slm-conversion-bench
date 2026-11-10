@@ -45,3 +45,19 @@ Changes after Stage 0 that can change a result or its interpretation.
   k = 3 (config.yaml: arms.B1.few_shot.k). The change strengthens B1, the untrained comparator arm, which makes
   the SLM's cost and quality verdicts against it harder, not easier. The cheap_alt replay of the calibration that J7 reads
   (RUNBOOK step 11) uses the same corrected k = 3; B1 with k = 0 is not run on test (the pilot is its record)
+- 2026-11-10 · the training file of the CHESS agent's own call sites (agent_ir, agent_ss, agent_cg; J5's cluster
+  c3) is no longer the deduplicated curated examples but a sample that keeps the teacher's frequency of (step,
+  answer): step = the invocation key (ir:0..3, ss:0..3, cg:0..2), answer = the tool the agent called or DONE; from
+  K1's final attempts that parsed (9,164 of 9,167), with no exact or near deduplication, the same 415 rows c3 had,
+  quotas proportional to the teacher's cells by largest remainder, and in each cell the invocations first by the
+  cap's seeded rank (seeds.curation_sample), masked by curation.mask (bench/curate.py, `bench datasets`; recorded
+  under `agent_sites` in train/datasets/manifest.json; c0, c1 and c2 come out byte-identical). The agent's prompt
+  does not depend on the question, so exact dedup kept one row per distinct (prompt, completion) and trained on
+  the rare answers: DONE was 0.7% of c3's rows against 27.3% of the teacher's calls, prose answers 96.6% against
+  4.6% (the rule: DONE 27.2%, prose 2.9%; 26 distinct rows). The rule only selects rows: curate's examples, the
+  embed execution, J5's clusters and centroids and the other clusters' files are unchanged, and every c3 row
+  repeats a (prompt, completion) J5 put in c3. The change touches only the trained arms (B4, B5) and tends to
+  favour them (the previous file trained on the teacher's rare answers), which is why it is declared. Decided
+  after the base model's calibration replay and the B3 pilot had been read (agent call sites included), before any
+  adapter was evaluated; the only c3 training so far was a speed measurement on the previous file, outside the
+  registry and never evaluated
