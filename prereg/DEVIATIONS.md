@@ -296,6 +296,82 @@ Changes after Stage 0 that can change a result or its interpretation.
   gold; an 87.6% always-"No" floor at the column filter; 1,534 questions on the 11 databases). Together they bound
   the reading in both directions: a loss outside the claim's antecedent does not refute it, and agreement at the
   column filter does not support it without an end-to-end measure
+- 2026-11-10 · corrections to the record: facts the lines above, SPEC.md, README.md or RUNBOOK.md stated wrongly or
+  left out, checked against data/, runs/ and judgments/ before the pre-registration; no rule, number of a verdict
+  rule, arm or stored result changes, and the lines above stay as written. (1) Test question 875 repeats training
+  question 863: the same database (formula_1), question text and gold SQL; the test's evidence adds "the season page
+  refers to url;". It is the only test question whose (database, normalized question) is in train or calib. The
+  splits are disjoint by id, not by question (SPEC section 2 said "disjoint"). Found after the calibration was read,
+  before any test execution; the question is kept, and it can favour B4 and B5 by at most 1 of 498, so a reading
+  without it (n = 497), descriptive, is computed from the stored predictions after the test by a script outside the
+  registered code. No check is added to build_splits: bench/data.py is frozen, and the check would have to except
+  this pair. (2) RUNBOOK said nothing on the test split runs before step 12, and the preflight that the test gold is
+  read only under the pre-registration: `bench data` executed the 498 test golds to check them (data/MANIFEST.json
+  gold_check: 0 errors; gold_observed: test 701 timed out at 60 s). No test question has been sent to any engine.
+  (3) The model-rejection line says that up to 2026-11-10 11 HTTP 400s occurred, all "credit balance": those 11 are
+  K1's (2 in agent-B0-train-20261109T154605.717503Z, 1 in …175944.226765Z, 8 in …214505.204680Z), but 1,515 more
+  occurred in one K1 session, agent-B0-train-20261109T165244.661833Z (16:52 to 16:53 UTC, resumed from
+  …154605.717503Z): "This API key is not scoped to a workspace", on 505 questions, 0 tokens. The Stage 0 rule scored
+  them as the model's failures and the session ended `done`; it was set aside (runs/_invalid/) and K1 resumed from
+  …154605.717503Z again (…174620.271242Z). Those 400s are what led to the rule's change at 17:33 UTC. The commit
+  that line cites, 49556b3, is only on the branch rejection-maxtokens; the same change is 66bc2f6 on main. (4) Patch
+  16 was decided after the first zero-shot replay of Qwen3-8B on the calibration
+  (replay-slm_qwen3-8b-calib-20261110T010530.112210Z, ended 02:05 UTC), where the first agent_cg step was rejected
+  in 200 of 200 questions, and committed at 02:48 UTC (52db5b8); that replay is superseded by
+  replay-slm_qwen3-8b-calib-20261110T025007.659032Z, the one J6 reads. The patch only turns rejected tool calls into
+  accepted ones, so it favours the arms whose models are not Claude: B1 and B3 to B5. (5) Five executions that
+  results read were resumed, not three. The other two: B4's calibration execution
+  (agent-B4-calib-20261110T191453.312858Z, commit c4f1f5e, dirty) from agent-B4-calib-20261110T184240.738329Z
+  (failed on an embeddings connection error, same commit and config), 30 calls on 8 questions discarded (10,851
+  input tokens), 158 of 200 questions copied; the cheap alternative's calibration replay
+  (replay-cheap_alt-calib-20261110T160847.505204Z, commit 684aafc, dirty) from
+  replay-cheap_alt-calib-20261110T053739.550540Z (failed on OpenRouter's 429 after 6 transport failures, commit
+  261c645, dirty, the same config_sha256: resumed across commits), 316 calls on 72 invocations of 7 questions
+  discarded (0 tokens), 3,849 invocations copied. Abandoned, not resumed: agent-B4-calib-20261110T181924.801402Z
+  (killed; its manifest is still `running`), agent-B3-calib-20261110T045930.946656Z (failed: no space left on
+  device), replay-cheap_alt-calib-20261110T052727.314290Z (failed after 32 s: OpenRouter's 402, credits). Load-test
+  runs discarded, never read by a judgment: a first smoke attempt (loadtest-slm_qwen3-8b-c4-20261110T195654.145907Z,
+  failed: /reset_prefix_cache 404, dev mode not reaching vLLM); smoke 1 (…-c4-20261110T200247.838864Z,
+  …-c128-20261110T200746.110013Z, without the no-contention check); smoke 2 (…-c4-20261110T205813.735321Z,
+  …-c128-20261110T210210.417858Z: the serving pod still ran the earlier code, so no check was recorded, although
+  their manifests record commit 74153a5, the local checkout's); smoke 3 (…-c4-20261110T210727.837933Z,
+  …-c128-20261110T211130.559301Z, discarded by design); and a first start of the base sweep stopped after about 40 s
+  with no level complete (the same stale pod code). K1's line counts only the last link (8 calls, 0 tokens): along
+  its chain (…153903.955967Z, …154605.717503Z, …174620.271242Z, …174959.210865Z, …175944.226765Z, …214505.204680Z)
+  4,450 calls were discarded, with 15,261,766 input tokens (14,218,430 of them cache reads) and 410,060 output
+  tokens, all billed. (6) "Recompute to the same bytes" (J3, J5, J6, b1k) holds in the analysis environment
+  (.venv-analysis, rechecked on 2026-11-10); in the agent environment J6's Granite score and 13 of J5's silhouettes
+  move in the last digits, while J6's choice and J5's centroids stay byte-identical. (7) "The training stack
+  differs" (first line), as the adapters' manifests record it: Tinker trains with no LoRA dropout
+  (train.lora.dropout is 0.05), in its service's numerics, not train.precision (bf16; vLLM serves the adapters at
+  the checkpoint's bf16), on its own copy of Qwen3-8B, not pinned to a revision (served on the pinned b968826d),
+  with LoRA matrices initialised by Tinker under train.seed, Tinker's Adam (β 0.9 and 0.999, ε 1e-8, gradient clip
+  1.0, no weight decay) instead of TRL's optimizer, and rows shuffled each epoch by
+  random.Random("<train.seed>:<epoch>") instead of TRL's sampler; lora_alpha cannot be set and is checked after
+  training (32). (8) P-4: c2 passed (preflight-20261110T071622.456902Z, 8 prompts: the served adapter matched
+  HF-PEFT on 8 of 8 and reproduced its 6 decisive changes); c2 again in vLLM's dev mode after the serving vLLM was
+  restarted with it at 20:01 UTC (preflight-20261110T201157.206832Z, 32 prompts: the served adapter matched HF-PEFT
+  on 32 of 32 and reproduced all 14 decisive changes; the served base matched HF on 32 of 32); c0 undecided twice
+  (preflight-20261110T164651.184511Z, 8 prompts, and preflight-20261110T172854.456880Z, 32 prompts: the served
+  adapter matched HF-PEFT and changed the base's output on every prompt, but every change was a near-tie, which
+  cannot tell an applied adapter from an ignored one); c1 and c3 not checked. (9) SPEC section 8 gains limits of the
+  measurement found on the calibration, as text with no verdict: B3 calls select_tables before filter_column in 200
+  of 200 calibration questions (B0 and B4 the reverse), so B4 − B3 mixes training with pipeline order; the SLM is
+  served and trained with thinking off (config.yaml, enable_thinking: false) while the teacher and gpt-oss reason,
+  which neither SPEC nor this file said; no seed is sent and vLLM is not deterministic, and two B3 executions of the
+  same 50 pilot questions (agent-B3-calib-20261110T051808.826362Z and the same questions in …165817.693955Z) gave 15
+  and 18 right, the same final SQL on 22, while each arm runs once on test; the calibration is not stratified by
+  database (european_football_2 is 5 of 200 calibration questions, 51 of 498 test ones); per-call EX in generation
+  scores the engine's first candidate, without its own repair; format validity at the SQL call sites is 100% by
+  construction (CHESS's parsers take any text as SQL); BIRD's tuple equality makes extra columns wrong: on the
+  calibration B3 loses 8 of 200 questions that way, B4 2 and B0 1 (counted by executing each wrong prediction and
+  its gold at the fixed date and testing whether the gold's rows are an ordered projection of the prediction's
+  columns). SPEC 6.1 declares projection-tolerant EX on test as an exploratory reading without a verdict, and the
+  per-call-site table of the exploratory replays (#48) is computed after the test by a script outside the registered
+  code, not printed by `bench report`. README's "no paid run yet" and "fixed before any result" are corrected: paid
+  runs on train and calib exist, and the protocol is fixed before any test result. Direction: (1) and (4) favour the
+  trained or non-Claude arms, and are declared for that reason; the rest corrects the record and changes no measured
+  value
 - 2026-11-10 · J8's analysis rules fixed before any load-test sweep was read (informed only by the two discarded
   smoke levels of sweep-slm_qwen3-8b-20261110T200213.069576Z, c4 and c128; PR #59). (1) Each level is read in
   its steady state from AIPerf's per-request records (`profile_export.jsonl`): the window runs from the first
