@@ -196,9 +196,31 @@ def _begin(call_site: str, invocation_key: str, messages: List[Dict[str, str]]):
         n = run.occurrences.get((call_site, invocation_key), 0) + 1
         run.occurrences[(call_site, invocation_key)] = n
     key = invocation_key if n == 1 else f"{invocation_key}@{n}"
-    chosen = Route(run.engine, None) if run.engine else route(run.arm, call_site, messages, _config)
+    if run.engine:
+        chosen = Route(run.engine, None)
+    else:
+        t0 = time.perf_counter()
+        chosen = route(run.arm, call_site, messages, _config)
+        if chosen.cluster is not None:  # the router embedded the prompt (B4, B5): its time, outside latency_ms
+            _record_route(run, call_site, key, chosen, int((time.perf_counter() - t0) * 1000))
     temperature = float(_config["call_sites"][call_site]["temperature"])
     return key, chosen, temperature, chat_model(chosen.engine, temperature)
+
+
+def routes_path(calls_path: Path) -> Path:
+    """Where the router's time per invocation goes, beside C1: calls<part>.jsonl -> routes<part>.jsonl."""
+    return calls_path.with_name("routes" + calls_path.name[len("calls"):])
+
+
+def _record_route(run: "_RunState", call_site: str, invocation_key: str, chosen: Route, route_ms: int) -> None:
+    """One line per routed invocation (not per attempt: a retry is not routed again). `route_ms` is the whole
+    of route(): reading the facts, waiting for the embedding model (one per process, under a lock, so the
+    parallel calls of one CHESS step queue for it) and embedding the prompt. C1's `latency_ms` starts after it."""
+    line = json.dumps({"run_id": run.run_id, "question_id": run.question_id, "call_site": call_site,
+                       "invocation_key": invocation_key, "cluster": chosen.cluster, "engine": chosen.engine,
+                       "route_ms": route_ms})
+    with run.lock, open(routes_path(run.calls_path), "a") as fh:
+        fh.write(line + "\n")
 
 
 def _prefixed(call_site: str, invocation_key: str, engine: str, lc_messages: List[Any]) -> List[Any]:

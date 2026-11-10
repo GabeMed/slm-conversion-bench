@@ -285,10 +285,11 @@ def by_column_filter(texts, embedding):
 def test_b3_runs_every_call_on_the_chosen_base(monkeypatch, repo):
     choice, _ = facts(paths.ROOT)
     set_config(repo, B3={"choice": rel(choice)})
-    _, manifest, calls = run(monkeypatch, repo, "B3", ("1",))
+    run_dir, manifest, calls = run(monkeypatch, repo, "B3", ("1",))
     assert manifest["status"] == "done" and manifest["facts"] == {"choice": choice.parent.name}
     assert {(c["engine"], c["model"], c["model_role"], c["endpoint"], c["cluster"]) for c in calls} == {
         ("slm:qwen3-8b", "qwen3-8b", "slm", "vllm", None)}
+    assert not (run_dir / "routes.jsonl").exists()  # nothing embedded: no router time to record
 
 
 def test_b4_serves_each_call_with_the_adapter_of_its_cluster(monkeypatch, repo):
@@ -296,12 +297,17 @@ def test_b4_serves_each_call_with_the_adapter_of_its_cluster(monkeypatch, repo):
     adapters = adapters_for(choice, centroids, ("c0", "c1"))
     set_config(repo, B4={"choice": rel(choice), "centroids": rel(centroids), "adapters": rel(adapters)})
     monkeypatch.setattr(clusters, "embed", by_column_filter)
-    _, manifest, calls = run(monkeypatch, repo, "B4", ("1",))
+    run_dir, manifest, calls = run(monkeypatch, repo, "B4", ("1",))
     assert manifest["status"] == "done" and set(manifest["facts"]) == {"choice", "centroids", "adapters"}
     for call in calls:
         cluster = "c0" if call["call_site"] == "filter_column" else "c1"
         assert (call["cluster"], call["engine"], call["model"]) == (
             cluster, f"slm:qwen3-8b+lora:qwen3-8b-{cluster}", f"qwen3-8b-{cluster}")
+    # the router's time, one line per routed invocation (C1's latency_ms starts after it)
+    routes = [json.loads(line) for line in (run_dir / "routes.jsonl").read_text().splitlines()]
+    invocations = {(c["question_id"], c["call_site"], c["invocation_key"], c["cluster"], c["engine"]) for c in calls}
+    assert {(r["question_id"], r["call_site"], r["invocation_key"], r["cluster"], r["engine"]) for r in routes} == invocations
+    assert len(routes) == len(invocations) and all(isinstance(r["route_ms"], int) and r["route_ms"] >= 0 for r in routes)
 
 
 def test_b4_assigns_with_the_pinned_sentence_transformer(monkeypatch, repo, tiny_sentence_transformer):

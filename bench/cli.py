@@ -97,7 +97,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")
-    p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed")
+    p.add_argument("--source", required=True, help="the run whose calls.jsonl is replayed: for an SLM engine, its own "
+                                                   "arm's execution on calib (B3 for the base, B4 for an adapter)")
+    p.add_argument("--as-deployed", action="store_true",
+                   help="B4 as deployed: --engine slm:<candidate>, --source B4 on calib, every call to the adapter "
+                        "the router chose, all adapters on one server")
     p.add_argument("--on", required=True, choices=("local", "modal", "runpod"),
                    help="where the AIPerf client runs (modal, runpod: beside the server, in the same cloud)")
     p.add_argument("--concurrency", type=int, nargs="+", help="levels (default: loadtest.concurrency)")

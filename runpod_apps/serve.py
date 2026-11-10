@@ -172,7 +172,11 @@ def up(provider: rp.Provider, candidate: str, hours: Optional[float] = None,
         raise RunPodError(f"pod(s) {', '.join(p['id'] for p in unrecorded)} already serve {candidate} but this machine "
                           f"did not record them: bench serve --on runpod down --all, then up")
     gpu = rs.gpu_id(settings, config["serving"]["gpu"])
-    env = {"VLLM_API_KEY": rs.secret_ref(settings["secrets"]["vllm_api_key"]), **_hf_token_env(settings)}
+    # VLLM_SERVER_DEV_MODE: vLLM's POST /reset_prefix_cache, which the load test calls to start a level cold
+    # (loadtest.cold_prefix_cache). It registers vLLM's other dev routes too, unauthenticated; the pod publishes
+    # SSH only, so they are reached through the tunnel alone, as the API is
+    env = {"VLLM_API_KEY": rs.secret_ref(settings["secrets"]["vllm_api_key"]), "VLLM_SERVER_DEV_MODE": "1",
+           **_hf_token_env(settings)}
     body = rp.pod_body(settings, provider.volume(), "serve", settings["images"]["serve"],
                        rp.deadline(settings, "serve", hours), rs.public_key(settings), candidate=candidate,
                        gpu=gpu, env=env)

@@ -497,19 +497,32 @@ At the end of the day, check the console's Pods page, and the network volume if 
 ### 10. The load test and the SLM's cost
 
 ```sh
-bench loadtest --engine slm:<candidate> --source <B0 calib> --on modal
-bench loadtest --engine slm:<candidate>+lora:<served name> --source <B0 calib> --on modal
+bench loadtest --engine slm:<candidate> --source <B3 calib> --on runpod
+bench loadtest --engine slm:<candidate>+lora:<served name> --source <B4 calib> --on runpod   # once per adapter
+bench loadtest --engine slm:<candidate> --as-deployed --source <B4 calib> --on runpod
 bench judge j8 --loadtest <run> --loadtest <run> --slo-from <B0 calib>
 ```
 
-- On RunPod (the section after step 9): `--on runpod` instead of `--on modal`, with the candidate up.
-- The first load test is the base (B3's engine); the second runs once per adapter.
+- The sources are the arms' own end-to-end executions on calib, never B0's: the base replays every call of
+  B3 on calib; each adapter the calls B4 on calib sent it (one cluster's, `traffic` in the manifest);
+  `--as-deployed` replays all of B4's calls on one server, each line to the adapter the router chose
+  (engine `slm:<candidate>+as-deployed`). The load test refuses another arm's run, or one on another split.
+  Run B3 and B4 on calib first.
+- One server serves the base and every adapter (`up` after the last `bench train`), so the sweeps run back
+  to back on it.
+- The payload order is `seeds.loadtest_shuffle`'s. A source too small for every level (a small cluster) is
+  refused, or reduced (`loadtest.short_source`), and with `loadtest.cold_prefix_cache` each level of such a
+  sweep starts from an empty prefix cache: vLLM's `POST /reset_prefix_cache`, which `bench serve --on runpod`
+  enables (`VLLM_SERVER_DEV_MODE=1`). A server started before that setting has no route: `down`, then `up`.
+- On Modal (`--on modal`) the server has no dev routes: a cold sweep stops there.
 - Each `bench loadtest` writes one run per concurrency level. J8 takes every run of every engine,
   each as a `--loadtest`.
 - J3 prices an arm only with engines J8 measured, and J8 refuses any `--slo-from` other than
   `cost.slo_from`.
 - J8 stops if one engine has no load level within the SLO. That is a result: the SLM does not meet
   the latency of the API it replaces.
+- B4 and B5 write `routes.jsonl` beside `calls.jsonl`: the router's time per invocation (`route_ms`), which
+  C1's `latency_ms` leaves out.
 
 ### 11. S6: the allocation
 

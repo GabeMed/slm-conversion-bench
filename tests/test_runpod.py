@@ -522,6 +522,8 @@ def test_up_serves_the_modal_plan_on_a_gpu_pod_behind_ssh(runpod_repo):
     assert body["image"] == "vllm/vllm-openai:v0.30.0" and body["cloud"] == "SECURE"
     assert body["dataCenterIds"] == ["CA-MTL-1"] and body["ports"] == ["22/tcp"]  # vLLM's port is not published
     assert body["env"]["VLLM_API_KEY"] == "{{ RUNPOD_SECRET_slm-bench-vllm-api-key }}"  # RunPod substitutes it
+    # vLLM's POST /reset_prefix_cache (a cold level of the load test), reached through the tunnel only (above)
+    assert body["env"]["VLLM_SERVER_DEV_MODE"] == "1"
     assert body["env"]["PUBLIC_KEY"] == "ssh-ed25519 AAAAoperator me@laptop"
     assert body["env"]["BENCH_DEADLINE_S"] == str(12 * 3600)
     assert body["entrypoint"] == ["bash", "-c"] and body["cmd"] == [rp.BOOTSTRAP]
@@ -660,6 +662,13 @@ def aiperf_job(world, monkeypatch):
     return run
 
 
+def small_sweep(world):
+    """A sweep the 12 calls of the source hold without replaying one: 2 warm-up calls, 5 per level."""
+    saved = yaml.safe_load(world.config_path.read_text())
+    saved["loadtest"].update(warmup_request_count=2, request_count=5)
+    world.config_path.write_text(yaml.safe_dump(saved))
+
+
 def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(runpod_repo, monkeypatch):
     from bench import loadtest
     from bench.judge import j8
@@ -672,12 +681,17 @@ def test_the_load_test_runs_beside_the_server_and_j8_prices_it_at_runpods_price(
     world.jobs["aiperf"] = aiperf_job(world, monkeypatch)
     monkeypatch.delenv("T_SLM_KEY")  # the client's key is the pod's secret: none is read here
     engine = f"slm:{TINY_NAME}+lora:{served('c0')}"
-    run_dirs = loadtest.loadtest(str(world.config_path), engine, _source_run(calls=SOURCE), "runpod", concurrency=[1, 4])
+    small_sweep(world)
+    # the adapter's traffic: the calls B4 sent it on calib, cluster c0's
+    source = write_run("agent-B4-calib-src", {"type": "agent", "arm": "B4", "split": "calib"},
+                       [dict(c, run_id="agent-B4-calib-src", engine=engine) for c in SOURCE]).name
+    run_dirs = loadtest.loadtest(str(world.config_path), engine, source, "runpod", concurrency=[1, 4])
     manifests = [json.loads((d / "manifest.json").read_text()) for d in run_dirs]
     for m, level in zip(manifests, (1, 4)):
         assert (m["type"], m["status"], m["where"], m["engine"], m["concurrency"]) == ("loadtest", "done", "runpod", engine, level)
         assert m["gpu"] == "A100-80GB" and m["gpu"] in world.config["modal"]["gpu_prices"]["usd_per_s"]
-        assert m["prefix_cache"] is True and m["sweep_id"] == manifests[0]["sweep_id"] and m["source_run_id"]
+        assert m["prefix_cache"] is True and m["sweep_id"] == manifests[0]["sweep_id"] and m["source_run_id"] == source
+        assert m["traffic"] == "c0" and m["prefix_cache_reset"] is None
         assert m["observed"]["gpus"] == ["NVIDIA A100 80GB PCIe"] and m["observed"]["prompt_cache_read_pct"] == 61.0
         assert m["secrets_redacted_in"] == ["aiperf.log"]
         assert m["server_versions"] == {"vllm": "0.30.0", "torch": "2.13.0", "transformers": "5.18.0", "flashinfer-python": "0.9.1"}  # the serving image's, as it recorded them
@@ -718,9 +732,12 @@ def test_the_load_test_needs_the_server_up(runpod_repo):
     from bench import loadtest
 
     world = runpod_repo
+    small_sweep(world)
     rserve.setup(world.provider())
+    base = [dict(c, cluster=None, engine=f"slm:{TINY_NAME}") for c in SOURCE]
     with pytest.raises(RunPodError, match="no pod serves"):
-        loadtest.loadtest(str(world.config_path), f"slm:{TINY_NAME}", _source_run(calls=SOURCE), "runpod", concurrency=[1])
+        loadtest.loadtest(str(world.config_path), f"slm:{TINY_NAME}",
+                          _source_run("agent-B3-calib-src", calls=base, arm="B3"), "runpod", concurrency=[1])
     assert not world.fake.pods
 
 
