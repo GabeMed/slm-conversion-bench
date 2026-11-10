@@ -93,7 +93,9 @@ def test_the_intent_is_committed_before_anything_runs_and_the_manifest_after(rep
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
     intent, manifest_rel = f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"
-    assert seen_while_running == [[intent]]  # a run that dies from here on leaves an intent with no manifest
+    assert seen_while_running == [[intent, manifest_rel]]  # a run that dies from here on leaves its manifest `running`
+    started = json.loads(git(root, "show", f"HEAD~1:{manifest_rel}"))
+    assert (started["status"], started["run_id"], started["finished_at"]) == ("running", run_dir.name, None)
     assert sorted(git(root, "ls-files", "registry/test").split()) == [intent, manifest_rel]
     assert git(root, "diff", "--name-only", before, "HEAD").split() == [intent, manifest_rel]  # nothing else, ever
     manifest = json.loads((run_dir / "manifest.json").read_text())
@@ -122,7 +124,7 @@ def test_the_intent_is_on_origin_before_the_first_question(repo, monkeypatch):
             return super().invoke(messages)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: Watching())
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
-    assert on_origin == [[f"registry/test/{run_dir.name}.intent.json"]]
+    assert on_origin == [[f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]]
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
 
 
@@ -139,8 +141,8 @@ def refused_before_spending(root, config_path, monkeypatch, match):
         runner.run_agent(str(config_path), "B0", "test", ids=["9"])
     assert calls == []  # not one model call
     assert not any(p.name.startswith("agent-B0-test") for p in paths.RUNS.iterdir())  # and no run
-    (intent,) = git(root, "ls-files", "registry/test").split()
-    assert intent.endswith(".intent.json")
+    intent, started = git(root, "ls-files", "registry/test").split()
+    assert intent.endswith(".intent.json") and started == intent.replace(".intent.json", ".manifest.json")
     return intent
 
 
@@ -165,7 +167,7 @@ def test_a_failed_push_of_the_intent_refuses_the_run_before_any_spend(repo, monk
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["status"] == "done" and manifest["redo_reason"] == "the intent could not be pushed"
     assert [a["run_id"] for a in manifest["earlier_attempts"]] == [intent.rsplit("/", 1)[1].rsplit(".", 2)[0]]
-    assert manifest["earlier_attempts"][0]["status"] is None  # an intent with no manifest
+    assert manifest["earlier_attempts"][0]["status"] == "running"  # it never ran: its manifest is as it started
     assert intent in git(origin, "ls-tree", "-r", "--name-only", "main", "registry/test").split()
 
 
@@ -178,7 +180,7 @@ def test_a_push_that_succeeds_is_still_confirmed_by_what_a_fetch_finds(repo, mon
     git(root.parent, "clone", "-q", "--bare", str(root.parent / "origin.git"), str(elsewhere))
     git(root, "config", "remote.origin.pushurl", str(elsewhere))
     refused_before_spending(root, config_path, monkeypatch, "origin/main does not contain it after the push")
-    assert len(git(elsewhere, "ls-tree", "-r", "--name-only", "main", "registry/test").split()) == 1  # it was pushed
+    assert len(git(elsewhere, "ls-tree", "-r", "--name-only", "main", "registry/test").split()) == 2  # it was pushed
 
 
 def test_a_single_call_execution_on_test_is_registered_too(repo):
@@ -641,3 +643,132 @@ def test_a_test_execution_is_refused_on_code_changed_after_the_registration(repo
     with pytest.raises(barrier.TestSplitLocked, match="differs from the registered commit .* bench/agent/code.py"):
         runner.run_agent(str(config_path), "B0", "test", ids=["9"])
     assert not (root / "registry" / "test").exists()
+
+
+class Killed(BaseException):
+    """Stands for SIGKILL: nothing after it runs in the process."""
+
+
+def test_a_test_session_killed_outright_is_resumed_with_its_outputs_hashed_first(repo, monkeypatch):
+    import os
+    root, config_path = repo
+    register(root, config_path)
+    real_write_json = runner._write_json
+
+    def write_json(path, value):
+        if path.name == "predictions.json":
+            os.close(runner._SESSION_LOCKS.pop(path.parent))  # the dying process's lock goes with it
+            raise Killed()
+        real_write_json(path, value)
+    monkeypatch.setattr(runner, "_write_json", write_json)
+    with pytest.raises(Killed):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    monkeypatch.setattr(runner, "_write_json", real_write_json)
+    (source,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
+    published = json.loads(git(root, "show", f"origin/main:registry/test/{source.name}.manifest.json"))
+    assert published["status"] == "running"  # all the registry knows of a killed session
+    hashes = {p.name: sha(p) for p in sorted(source.glob("*.jsonl"))}
+    assert set(hashes) == {"answers.jsonl", "calls.jsonl"}
+
+    with pytest.raises(barrier.TestSplitLocked, match="already attempted it"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])  # a redo still needs its reason
+    run_dir = runner.run_agent(str(config_path), "B0", "test", resume_from=source.name)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "done" and manifest["resumed_question_ids"] == ["9"]
+    assert manifest["unregistered_source_hashes"] == hashes
+    intent = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.intent.json"))
+    assert intent["unregistered_source_hashes"] == hashes and intent["resumed_from"] == source.name
+    assert [(a["run_id"], a["status"]) for a in manifest["earlier_attempts"]] == [(source.name, "running")]
+
+
+# ---------------------------------------------------------------- a replay on test, end to end
+
+@pytest.fixture
+def failed_replay(repo, monkeypatch):
+    """A done B0 run on test, and a replay of it on test that failed on the harness (the network),
+    both published as the RUNBOOK's loop publishes them."""
+    from bench.agent import replay
+    root, config_path = repo
+    register(root, config_path)
+    source = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
+    failed = replay.replay(str(config_path), source.name, engine="production_llm")
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    manifest = json.loads((failed / "manifest.json").read_text())
+    assert manifest["status"] == "failed" and manifest["harness_errors"] and manifest["calls_sha256"]
+    return root, config_path, source.name, failed
+
+
+def refused_replay(root, config_path, source, failed, match, **kwargs):
+    from bench.agent import replay
+    before, runs_before = git(root, "rev-parse", "HEAD").strip(), set(paths.RUNS.iterdir())
+    with pytest.raises(barrier.TestSplitLocked, match=match):
+        replay.replay(str(config_path), source, engine="production_llm", resume_from=failed, **kwargs)
+    assert git(root, "rev-parse", "HEAD").strip() == before and set(paths.RUNS.iterdir()) == runs_before
+
+
+def test_a_failed_replay_on_test_is_resumed_under_the_fixed_rule(failed_replay):
+    from bench.agent import replay
+    root, config_path, source, failed = failed_replay
+    run_dir = replay.replay(str(config_path), source, engine="production_llm", resume_from=failed.name)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "done" and manifest["resumed_from"]["run_id"] == failed.name
+    assert manifest["resumed_from"]["calls_sha256"] == json.loads((failed / "manifest.json").read_text())["calls_sha256"]
+    assert [(a["run_id"], a["status"]) for a in manifest["earlier_attempts"]] == [(failed.name, "failed")]
+    intent = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.intent.json"))
+    assert intent["resumed_from"] == failed.name and intent["type"] == "replay"
+
+
+def test_a_replay_on_test_is_not_resumed_when_its_calls_changed(failed_replay):
+    root, config_path, source, failed = failed_replay
+    with open(failed / "calls.jsonl", "a") as fh:
+        fh.write("\n")
+    refused_replay(root, config_path, source, failed.name, "calls.jsonl does not hash")
+
+
+def test_a_replay_on_test_is_not_resumed_when_its_local_manifest_is_not_the_published_one(failed_replay):
+    root, config_path, source, failed = failed_replay
+    path = failed / "manifest.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "workers": 2}))
+    refused_replay(root, config_path, source, failed.name, "differs from the one the registry published \\(workers\\)")
+
+
+@pytest.mark.parametrize("field, value, match", [
+    ("prereg_hash", "0" * 64, "under pre-registration 0000"),
+    ("dirty", True, "not clean"),
+    ("commit", "0" * 40, "not at the registered code"),
+])
+def test_a_replay_on_test_is_not_resumed_from_a_source_outside_the_rule(failed_replay, field, value, match):
+    """Its record, local and published alike, says it ran under another registration, on a dirty tree, or at
+    other code."""
+    root, config_path, source, failed = failed_replay
+    rel = f"registry/test/{failed.name}.manifest.json"
+    edited = {**json.loads((failed / "manifest.json").read_text()), field: value}
+    for path in (failed / "manifest.json", root / rel):
+        path.write_text(json.dumps(edited, indent=2) + "\n")
+    git(root, "commit", "-q", "-am", "a record edited for the test")
+    git(root, "push", "-q", "origin", "main")
+    refused_replay(root, config_path, source, failed.name, match)
+
+
+def test_a_replay_on_test_is_redone_only_with_a_reason_and_only_the_latest_is_resumed(failed_replay, monkeypatch):
+    from bench.agent import replay
+    root, config_path, source, failed = failed_replay
+    with pytest.raises(barrier.TestSplitLocked, match=f"{failed.name} already attempted it"):
+        replay.replay(str(config_path), source, engine="production_llm")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
+    second = replay.replay(str(config_path), source, engine="production_llm", redo_reason="the endpoint was wrong")
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    assert json.loads((second / "manifest.json").read_text())["redo_reason"] == "the endpoint was wrong"
+    refused_replay(root, config_path, source, failed.name, f"not the latest attempt of its configuration \\({second.name} is\\)")
+    done = replay.replay(str(config_path), source, engine="production_llm", resume_from=second.name)
+    assert json.loads((done / "manifest.json").read_text())["status"] == "done"
+
+
+def test_a_replay_on_test_is_not_resumed_on_a_dirty_tree(failed_replay):
+    root, config_path, source, failed = failed_replay
+    (root / "notes.txt").write_text("not committed\n")
+    refused_replay(root, config_path, source, failed.name, "not clean \\(\\?\\? notes.txt\\)")

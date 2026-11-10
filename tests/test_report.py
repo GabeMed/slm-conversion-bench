@@ -692,6 +692,70 @@ def test_the_report_opens_the_map_with_its_scope_and_prints_the_deviations():
     assert "## Deviations" not in report.render({**data, "deviations": None})
 
 
+def test_every_attempt_of_a_configuration_is_listed_with_why_it_ended_and_its_partial_ex(tmp_path, monkeypatch):
+    """SPEC 6.1: the report lists every attempt of a configuration, how it ended, the defect stated to run
+    it again (or the attempt it resumed), and its n and EX: the final run's, and a partial EX for an
+    attempt abandoned with predictions, from the `bench eval --partial` the plan names."""
+    monkeypatch.setattr(paths, "RUNS", tmp_path)
+
+    def run(run_id, status, started, **more):
+        return {"run_id": run_id, "type": "agent", "arm": "B0", "engine": None, "status": status, "prereg_hash": "h",
+                "started_at": started, "commit": "c" * 40, "end_reason": None, "redo_reason": None, "resumed_from": None,
+                "n_predictions": None, "predictions_sha256": None, **more}
+    registry = {"available": True, "runs": [
+        run("b0-3", "done", "2026-10-01T12:00", resumed_from="b0-2", n_predictions=498, predictions_sha256="p3"),
+        run("b0-1", "failed", "2026-10-01T09:00", end_reason="harness error on question 7: the network went away",
+            n_predictions=120, predictions_sha256="p1"),
+        run("b0-2", "interrupted", "2026-10-01T10:00", end_reason="KeyboardInterrupt: ", redo_reason="the endpoint was wrong",
+            n_predictions=0, predictions_sha256="p2"),
+        run("b0-old", "failed", "2026-09-30T09:00", prereg_hash="g", n_predictions=40, predictions_sha256="p0")]}
+    partial = tmp_path / "eval-partial-b0-1"
+    partial.mkdir()
+    eval_manifest = {"run_id": partial.name, "partial": True, "source_run_id": "b0-1", "predictions_sha256": "p1",
+                     "n": 118, "correct": 59}
+    (partial / "manifest.json").write_text(json.dumps(eval_manifest))
+    arms = {"B0": {"run_id": "b0-3", "n": 498, "ex": 0.6}}
+
+    with pytest.raises(JudgmentError, match="b0-1 left 120 predictions: name its `bench eval --partial`"):
+        report.attempts_by_configuration(registry, "h", arms, {})
+    with pytest.raises(JudgmentError, match="does not hold"):
+        report.attempts_by_configuration(registry, "h", arms, {"b0-1": partial.name, "nobody": partial.name})
+    (groups_old, group) = report.attempts_by_configuration(registry, "h", arms, {"b0-1": partial.name})
+    assert [a["run_id"] for a in groups_old["attempts"]] == ["b0-old"]  # under an earlier registration
+    assert groups_old["attempts"][0]["status"] == "superseded by re-registration" and groups_old["attempts"][0]["ex"] is None
+    first, second, final = group["attempts"]
+    assert (first["run_id"], first["n"], first["ex"], first["partial"]) == ("b0-1", 118, 0.5, True)
+    assert first["end_reason"].startswith("harness error on question 7")
+    assert (second["redo_reason"], second["n"], second["ex"]) == ("the endpoint was wrong", None, None)
+    assert (final["run_id"], final["n"], final["ex"], final["partial"], final["resumed_from"]) == ("b0-3", 498, 0.6, False, "b0-2")
+
+    (partial / "manifest.json").write_text(json.dumps({**eval_manifest, "predictions_sha256": "other"}))
+    with pytest.raises(JudgmentError, match="scored other predictions than the ones the registry recorded"):
+        report.attempts_by_configuration(registry, "h", arms, {"b0-1": partial.name})
+    (partial / "manifest.json").write_text(json.dumps({**eval_manifest, "partial": False}))
+    with pytest.raises(JudgmentError, match="is not a partial evaluation of b0-1"):
+        report.attempts_by_configuration(registry, "h", arms, {"b0-1": partial.name})
+
+    (partial / "manifest.json").write_text(json.dumps(eval_manifest))
+    data = {"split": "test", "scope": report.SCOPE, "arms": {}, "map": [], "steps": [], "per_call_uncovered": [],
+            "gold_tests": {}, "prereg_in_force": "h", "deviations": None,
+            "judgments": {"j6": None, "per_call": None, "j7": None}, "registry": registry,
+            "attempts": report.attempts_by_configuration(registry, "h", arms, {"b0-1": partial.name})}
+    page = report.render(data)
+    assert "## Attempts per configuration" in page and "**agent B0** (pre-registration h)" in page
+    assert "| b0-1 | not completed (failed) | harness error on question 7: the network went away | — | 118 | 50.0% (partial) |" in page
+    assert "| b0-2 | not completed (interrupted) | KeyboardInterrupt:  | the endpoint was wrong | — | — |" in page
+    assert "| b0-3 | done | — | resumes b0-2 | 498 | 60.0% |" in page
+
+
+def test_a_partial_evaluation_is_never_an_arms(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "RUNS", tmp_path)
+    (tmp_path / "eval-partial-x").mkdir()
+    (tmp_path / "eval-partial-x" / "manifest.json").write_text(json.dumps({"partial": True, "source_run_id": "x"}))
+    with pytest.raises(JudgmentError, match="never an arm's evaluation"):
+        report.per_arm({"B0": "eval-partial-x"}, "test", lambda dirs: [])
+
+
 # ---------------------------------------------------------------- end to end
 
 TEST_IDS = [str(q) for q in range(5000, 5400)]
@@ -732,7 +796,9 @@ def register_analysis_code(root, config):
     (root / "prereg").mkdir()
     manifest = json.dumps({"spec_sha256": sha("SPEC.md"), "config_sha256": config_sha256(config),
                            "splits_sha256": sha("data/splits.json"), "data_manifest_sha256": sha("data/MANIFEST.json"),
-                           "commit": "c", "analysis_code": analysis_code(root)}, sort_keys=True).encode() + b"\n"
+                           "commit": subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                                                    capture_output=True, text=True).stdout.strip(),
+                           "analysis_code": analysis_code(root)}, sort_keys=True).encode() + b"\n"
     (root / "prereg" / "manifest.json").write_bytes(manifest)
     prereg_hash = hashlib.sha256(manifest).hexdigest()
     (root / "prereg" / "HASH").write_text(prereg_hash + "\n")
@@ -1422,3 +1488,35 @@ def test_the_report_refuses_a_j2_without_its_call_sites_and_a_j7_on_other_prices
         pipeline["plan"].write_text(yaml.safe_dump(changed))
         with pytest.raises(JudgmentError, match=message):
             report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+
+
+def test_a_test_report_names_the_partial_evaluation_of_every_abandoned_attempt(pipeline):
+    """An attempt abandoned under the registration in force with predictions is listed with its partial EX,
+    so the plan names its `bench eval --partial`; left out, the report is refused rather than hiding it."""
+    root = pipeline["root"]
+    b4 = json.loads((root / "registry" / "test" / "agent-B4-test.manifest.json").read_text())
+    identity = {k: b4[k] for k in ("type", "arm", "engine", "commit", "prereg_hash")}
+    (root / "registry" / "test" / "agent-B4-abandoned.intent.json").write_text(json.dumps(
+        {**identity, "run_id": "agent-B4-abandoned", "split": "test", "started_at": "2026-10-01T08:00:00+00:00"}))
+    (root / "registry" / "test" / "agent-B4-abandoned.manifest.json").write_text(json.dumps(
+        {**identity, "status": "failed", "end_reason": "harness error on question 5003: a dead pod",
+         "n_predictions": 2, "predictions_sha256": "f" * 64}))
+    subprocess.run(["git", "-C", str(root), "add", "registry"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "an abandoned B4 attempt"], check=True, capture_output=True)
+    publish(root)
+    with pytest.raises(JudgmentError, match="agent-B4-abandoned left 2 predictions"):
+        report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+    scored = paths.RUNS / "eval-partial-agent-B4-abandoned"
+    scored.mkdir(parents=True)
+    (scored / "manifest.json").write_text(json.dumps({"run_id": scored.name, "type": "eval", "partial": True,
+                                                      "source_run_id": "agent-B4-abandoned", "predictions_sha256": "f" * 64,
+                                                      "n": 2, "correct": 1}))
+    plan = yaml.safe_load(pipeline["plan"].read_text())
+    pipeline["plan"].write_text(yaml.safe_dump({**plan, "attempts": {"agent-B4-abandoned": scored.name}}))
+    out = report.run(str(pipeline["plan"]), pipeline["config"], ex_table, ex_summary, noninferiority, pilot_ids=PILOT)
+    data = json.loads((out / "report.json").read_text())
+    (b4_group,) = [g for g in data["attempts"] if g["arm"] == "B4" and g["type"] == "agent"]
+    assert [(a["run_id"], a["n"], a["ex"], a["partial"]) for a in b4_group["attempts"]] == [
+        ("agent-B4-abandoned", 2, 0.5, True), ("agent-B4-test", data["arms"]["B4"]["n"], data["arms"]["B4"]["ex"], False)]
+    assert "| agent-B4-abandoned | not completed (failed) | harness error on question 5003: a dead pod | — | 2 | 50.0% (partial) |" \
+        in (out / "report.md").read_text()

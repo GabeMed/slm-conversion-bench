@@ -26,6 +26,13 @@ are not copied: they are counted (calls, usage) under `resumed_from.discarded`, 
 stays visible. CHESS's own outputs of the complete questions are copied under
 chess/resumed/<source run_id>/ (inspection only: nothing downstream reads chess/).
 
+A source killed outright (SIGKILL, a lost machine) never closed its manifest: it still says `running`.
+It is resumed once its session's lock is free (`runner.hold_session`): its completed questions are those
+its session journaled as they ended (answers*.jsonl, `runner.journal_writer`), with their C1 lines from
+calls.jsonl and each worker's calls.w<k>.jsonl (a last line cut off by the kill is dropped). No manifest
+recorded the sha256 of those outputs, so they are computed before anything is read or copied and
+recorded in the new manifest, and on test in its intent, as `unregistered_source_hashes`.
+
 The new run's manifest has the usual fields, `started_at`/`finished_at` being this session's (as its
 run_id), plus `resumed_from` (the source's run_id, commit, dirty, config_sha256, status, times,
 workers), `resumed_question_ids`, and `sessions`: every working session that produced the run's
@@ -44,6 +51,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from bench import data, paths
 
 RESUMABLE = ("failed", "interrupted")
+KILLED = "running"  # a manifest still `running` whose session no longer holds its lock: killed outright
+# What a killed source's manifest, as the registry published it when it started, must share with the
+# local one (the local one gained the resume's own fields since, if it was itself resumed).
+STARTED_IDENTITY = ("run_id", "type", "arm", "engine", "split", "status", "prereg_hash", "commit", "dirty",
+                    "config_sha256", "started_at", "question_ids")
 USAGE_FIELDS = ("input", "cached_input", "output", "reasoning", "cache_write")
 
 
@@ -60,7 +72,9 @@ def check_test_source(source: Dict[str, Any], prereg_hash: str, attempts: List[D
                                       f"again from its first question with --redo-reason instead")
     if published is None:
         refuse("the published registry holds no manifest of it")
-    differ = sorted(key for key in set(published) | set(source) if published.get(key) != source.get(key))
+    killed = source.get("status") == KILLED
+    keys = STARTED_IDENTITY if killed else set(published) | set(source)
+    differ = sorted(key for key in keys if published.get(key) != source.get(key))
     if differ:
         refuse(f"its manifest differs from the one the registry published ({', '.join(differ[:5])})")
     if source.get("prereg_hash") != prereg_hash:
@@ -73,6 +87,8 @@ def check_test_source(source: Dict[str, Any], prereg_hash: str, attempts: List[D
         refuse(f"it ran at commit {source.get('commit')!r}, not at the registered code")
     if not attempts or attempts[-1]["run_id"] != run_id:
         refuse(f"it is not the latest attempt of its configuration ({attempts[-1]['run_id'] if attempts else 'none'} is)")
+    if killed:  # no hash was recorded when it ended: they are recorded now, before anything runs
+        return
     run_dir = paths.RUNS / run_id
     for key, name in (("predictions_sha256", "predictions.json"), ("calls_sha256", "calls.jsonl")):
         now = data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
@@ -88,10 +104,73 @@ def load_source(source_run_id: str, split: str) -> Dict[str, Any]:
     source = json.loads(path.read_text())
     if source.get("type") != "agent":
         raise data.DataError(f"{source_run_id} is a {source.get('type')!r} run: only an agent run is resumed")
-    if source.get("status") not in RESUMABLE:
-        raise data.DataError(f"{source_run_id} is {source.get('status')!r}: only a failed or interrupted run is "
-                             f"resumed")
+    check_resumable(source, "run")
     return source
+
+
+def check_resumable(source: Dict[str, Any], what: str) -> None:
+    """Failed, interrupted, or killed: still `running`, with its session's lock free (the process that
+    held it is gone). A session that still holds it, or left none, is refused."""
+    run_id, status = source["run_id"], source.get("status")
+    if status == KILLED:
+        from bench.agent.runner import session_alive
+        alive = session_alive(paths.RUNS / run_id)
+        if alive:
+            raise data.DataError(f"{run_id} is still running (its session holds its lock): it is not resumed")
+        if alive is None:
+            raise data.DataError(f"{run_id} is 'running' and left no session lock, so nobody can tell its session "
+                                 f"is gone: it is not resumed")
+        return
+    if status not in RESUMABLE:
+        raise data.DataError(f"{run_id} is {status!r}: only a failed, interrupted or killed {what} is resumed")
+
+
+def _whole_lines(path: Path) -> List[str]:
+    """The lines of a file a killed session was appending to: a last line cut off mid-write (no newline,
+    or not JSON) is dropped; any other line that is not JSON is refused."""
+    text = path.read_text()
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    whole = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except ValueError:
+            if i == len(lines) - 1:
+                break  # cut off by the kill
+            raise data.DataError(f"{path.name} of a killed session has a broken line {i + 1}") from None
+        whole.append(line)
+    return whole
+
+
+def _killed_files(run_dir: Path) -> List[Path]:
+    """What a killed session wrote that a resume reads: its C1 lines (calls.jsonl and each worker's) and
+    its answered questions (answers*.jsonl), and predictions.json if it had come that far."""
+    def worker(path: Path) -> Tuple[int, str]:
+        found = re.search(r"\.w(\d+)\.jsonl$", path.name)
+        return (int(found.group(1)) + 1 if found else 0, path.name)
+    names = [p for pattern in ("calls*.jsonl", "answers*.jsonl", "predictions.json") for p in run_dir.glob(pattern)]
+    return sorted(names, key=lambda p: (p.name.split(".")[0], *worker(p)))
+
+
+def unregistered_source_hashes(source: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """For a killed source, the sha256 of every output its session left, by file name, computed before
+    the resume reads or copies anything: no manifest recorded them when it ended, so the new manifest (and
+    on test the intent, published before the first question) records them, as hashes no earlier record
+    vouches for. None for a source that ended."""
+    if source.get("status") != KILLED:
+        return None
+    return {path.name: data.sha256_file(path) for path in _killed_files(paths.RUNS / source["run_id"])}
+
+
+def _killed_session_end(source: Dict[str, Any]) -> Optional[str]:
+    """When a killed session last wrote an output: the end of its working time, as well as anyone can know it."""
+    from datetime import datetime, timezone
+    times = [path.stat().st_mtime for path in _killed_files(paths.RUNS / source["run_id"])]
+    return datetime.fromtimestamp(max(times), timezone.utc).isoformat() if times else source.get("started_at")
 
 
 def check_same(source: Dict[str, Any], expected: Dict[str, Any]) -> None:
@@ -106,11 +185,30 @@ def check_same(source: Dict[str, Any], expected: Dict[str, Any]) -> None:
         raise data.DataError(f"the configuration snapshot of {source['run_id']} does not match its manifest")
 
 
-def complete_questions(source: Dict[str, Any]) -> List[str]:
-    """The source's questions that ended normally, in the run's order."""
-    predictions = json.loads((paths.RUNS / source["run_id"] / "predictions.json").read_text())
+def source_answers(source: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The source's questions that ended normally, {question_id: {"prediction", "tool_errors"}}: for a
+    source that ended, from predictions.json less the questions that failed; for a killed one, from the
+    questions its session journaled as they ended (answers*.jsonl)."""
+    run_dir = paths.RUNS / source["run_id"]
+    if source.get("status") == KILLED:
+        answers = {}
+        for path in sorted(run_dir.glob("answers*.jsonl")):
+            for line in _whole_lines(path):
+                entry = json.loads(line)
+                answers[str(entry["question_id"])] = {"prediction": entry["prediction"],
+                                                      "tool_errors": entry.get("tool_errors") or None}
+        return answers
+    predictions = json.loads((run_dir / "predictions.json").read_text())
     failed = set(source.get("failures") or {}) | set(source.get("harness_errors") or {})
-    return [q for q in source["question_ids"] if q in predictions and q not in failed]
+    tool_errors = source.get("tool_errors") or {}
+    return {q: {"prediction": predictions[q], "tool_errors": tool_errors.get(q)}
+            for q in source["question_ids"] if q in predictions and q not in failed}
+
+
+def complete_questions(source: Dict[str, Any], answers: Optional[Dict[str, Dict[str, Any]]] = None) -> List[str]:
+    """The source's questions that ended normally, in the run's order."""
+    answers = source_answers(source) if answers is None else answers
+    return [q for q in source["question_ids"] if q in answers]
 
 
 def _usage_totals(calls: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -126,7 +224,12 @@ def _usage_totals(calls: List[Dict[str, Any]]) -> Dict[str, int]:
 def read_calls_of(source: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]]]:
     """The source's C1 lines, as written and parsed, refused unless valid."""
     from bench.contracts.calls import validate_calls
-    lines = [line for line in (paths.RUNS / source["run_id"] / "calls.jsonl").read_text().splitlines() if line.strip()]
+    run_dir = paths.RUNS / source["run_id"]
+    if source.get("status") == KILLED:  # its lines, and its workers' that no merge reached
+        lines = [line for path in _killed_files(run_dir) if path.name.startswith("calls")
+                 for line in _whole_lines(path)]
+    else:
+        lines = [line for line in (run_dir / "calls.jsonl").read_text().splitlines() if line.strip()]
     try:
         calls = [json.loads(line) for line in lines]
     except ValueError as e:
@@ -138,7 +241,8 @@ def read_calls_of(source: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any
 
 
 def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict[str, Any]]], run_dir: Path,
-                complete: List[str], outcome: Dict[str, Dict]) -> Dict[str, Any]:
+                complete: List[str], outcome: Dict[str, Dict],
+                answers: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Copy the complete questions' C1 lines, predictions, tool errors and CHESS outputs into the new
     run (before it answers anything: its own lines are appended after). Returns what the source spent
     on the questions that are not complete (`discarded`)."""
@@ -148,12 +252,13 @@ def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict
     copied = [line for line, call in zip(lines, calls) if call["question_id"] in keep]
     (run_dir / "calls.jsonl").write_text("".join(line + "\n" for line in copied))
 
-    predictions = json.loads((source_dir / "predictions.json").read_text())
-    tool_errors = source.get("tool_errors") or {}
-    for q in complete:
-        outcome["predictions"][q] = predictions[q]
-        if q in tool_errors:
-            outcome["tool_errors"][q] = tool_errors[q]
+    answers = source_answers(source) if answers is None else answers
+    with open(run_dir / "answers.jsonl", "a") as journal:  # copied answers survive this session being killed too
+        for q in complete:
+            outcome["predictions"][q] = answers[q]["prediction"]
+            if answers[q]["tool_errors"]:
+                outcome["tool_errors"][q] = answers[q]["tool_errors"]
+            journal.write(json.dumps({"question_id": q, **answers[q]}, ensure_ascii=False) + "\n")
 
     chess = source_dir / "chess"
     if chess.is_dir():
@@ -176,7 +281,10 @@ def _resumed_from(source: Dict[str, Any], **what: Any) -> Dict[str, Any]:
 
 def _sessions(source: Dict[str, Any]) -> List[Dict[str, Any]]:
     previous = source.get("sessions") or [{key: source.get(key) for key in ("started_at", "finished_at", "commit", "workers")}]
-    return [dict(session) for session in previous]
+    sessions = [dict(session) for session in previous]
+    if source.get("status") == KILLED:  # its last session never closed: it ended with its last output
+        sessions[-1].update({"finished_at": _killed_session_end(source), "killed": True})
+    return sessions
 
 
 def manifest_fields(source: Dict[str, Any], complete: List[str], discarded: Dict[str, Any]) -> Dict[str, Any]:
@@ -239,8 +347,7 @@ def load_replay_source(failed_run_id: str, split: str) -> Dict[str, Any]:
     source = json.loads(path.read_text())
     if source.get("type") != "replay":
         raise data.DataError(f"{failed_run_id} is a {source.get('type')!r} run: `bench replay --resume-from` resumes a replay")
-    if source.get("status") not in RESUMABLE:
-        raise data.DataError(f"{failed_run_id} is {source.get('status')!r}: only a failed or interrupted replay is resumed")
+    check_resumable(source, "replay")
     if source["status"] == "failed" and not source.get("harness_errors"):
         raise data.DataError(f"{failed_run_id} failed without a harness error (c1_errors {source.get('c1_errors')}, "
                              f"problems {source.get('problems')}): only an infrastructure failure is resumed")

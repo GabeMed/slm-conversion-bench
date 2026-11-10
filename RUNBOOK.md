@@ -621,11 +621,17 @@ done
   the cause **outside this checkout** (the code is frozen here: see below), then finish the configuration
   that stopped by hand, one of two ways, push, and run the block again with `START` set to the
   configuration after it. The configurations before it are done and are **not** run again.
-  - **Resume** (an infrastructure failure: a network error, a dead pod, a Ctrl-C): add
+  - **Resume** (an infrastructure failure: a network error, a dead pod, a Ctrl-C, a killed process): add
     `--resume-from <run_id>` to its command. Allowed only for the latest attempt of that configuration,
     under the same pre-registration and configuration, with the source and this session both on a clean
     tree at the registered code, and with the source's `predictions.json` and `calls.jsonl` still
     hashing to what its manifest recorded when it ended. Anything else is refused before the intent.
+    A session killed outright (SIGKILL, a lost machine) never closed its manifest: it stays `running`,
+    in `runs/` and in the registry (each test execution commits its manifest as it starts, with its
+    intent). It is resumable once its process is gone (its `session.lock` is free): from the questions
+    it journaled as they ended (`answers*.jsonl`), with their C1 lines. Nothing recorded the hashes of
+    those files, so they are computed first and recorded in the new intent and manifest
+    (`unregistered_source_hashes`).
   - **Run again from the first question** (a defect that makes the earlier attempt's answers unusable):
     add `--redo-reason "<the defect>"` to its command. The reason goes into the intent, published before
     the first question, and into the manifest; the earlier attempts stay in the registry and are listed
@@ -636,15 +642,18 @@ done
   verdict, so `bench run` and `bench replay` refuse to open it, before its intent and before any call.
   Rerunning the block from `B0` by mistake therefore stops at once at B0, with the run id that already
   completed it.
-- **Only the registered code runs on test.** Every test execution refuses a working tree that `git
-  status --porcelain` shows anything in (an untracked `judgments/` file included; what `.gitignore`
-  ignores, such as `runs/`, does not count), a HEAD that differs from the commit `prereg/manifest.json`
-  records outside `prereg/` and `registry/`, and execution code (`bench/agent`, `vendor/chess`, the
-  serving plan, `bench/curate.py`) whose hashes differ from the registered ones. A fix to the code after
-  the registration is therefore a new registration (`bench prereg --replace`).
-- Every execution's manifest records, when it ends, `end_reason` (why it did not end `done`, or null)
-  and `predictions_sha256` and `calls_sha256` (what it had produced): an interrupted test execution is
-  in the registry with both.
+- **Only the registered code runs on test.** Every test execution refuses a working tree that `git -c
+  core.excludesFile=/dev/null status --porcelain` shows anything in (an untracked `judgments/` file
+  included; what the repository's `.gitignore` ignores, such as `runs/`, does not count; your own global
+  excludes file does not count either way), a `.git/info/exclude` with any entry (empty it before the
+  test: `git rev-parse --git-path info/exclude` finds it), a HEAD that differs from the commit
+  `prereg/manifest.json` records outside `prereg/` and `registry/`, and execution code (every file of
+  `bench/` outside the analysis code, `vendor/chess`, `modal_apps`, `runpod_apps`, `env/`,
+  `pyproject.toml`) whose hashes differ from the registered ones. A fix to the code after the
+  registration is therefore a new registration (`bench prereg --replace`).
+- Every execution's manifest records, when it ends, `end_reason` (why it did not end `done`, or null),
+  `predictions_sha256`, `n_predictions` and `calls_sha256` (what it had produced): an interrupted test
+  execution is in the registry with all of them.
 - Each run pushes its intent to `origin/main` before its first question; a run that cannot push
   does not start. When it ends it **commits** its manifest, and the `git push` after it publishes
   that.
@@ -658,6 +667,7 @@ In `.venv-agent` (the SQLite every eval has used):
 
 ```sh
 bench eval <each test run>
+bench eval <each abandoned test attempt that left predictions> --partial
 bench eval <B0 test> --per-call
 bench eval <the B4 test replay> --per-call
 ```
@@ -676,6 +686,13 @@ bench report --plan plan.yaml
 ```
 
 - The first `judge j3` runs once per arm; `--j8` only for the arms with SLM calls (B3, B4, B5).
+- `bench eval` and `bench report` need no clean tree (the judgments write `judgments/`), but they read the
+  test only at the registered code: HEAD holds the registered commit's tree outside `prereg/`,
+  `registry/` and `judgments/`, and the analysis code hashes to the registered one.
+- The report lists every attempt of each configuration: how it ended, the defect stated to run it again,
+  and n and EX. An attempt abandoned with predictions gets a partial EX, from its `bench eval --partial`,
+  which the plan names under `attempts: {<attempt>: <its partial eval>}`; a plan that leaves one out is
+  refused.
 - `plan.yaml` only names what the steps above printed; its keys are in the header of
   `bench/report.py`. A test plan with B1 names the `b1k` choice of step 7.
 - `bench verify` must report 0 divergences.

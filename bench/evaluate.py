@@ -262,7 +262,10 @@ def check_golds(questions: Dict[str, List[dict]], db_path: Callable[[str], Path]
                          "timeouts": timeouts, "empty": empty}}
 
 
-def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, dict]]:
+PARTIAL = ("failed", "interrupted")  # an abandoned test attempt, scored on what it answered (`--partial`)
+
+
+def _source(source_run_id: str, partial: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, dict]]:
     """The run to score, its configuration snapshot and the gold of its split, after every check
     both kinds of eval share: the snapshot is the one the run hashed, the barrier opens for that
     snapshot, a test run ran under the registration in force, the run is `done`, and a test run
@@ -278,7 +281,11 @@ def _source(source_run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[st
         if run_manifest.get("prereg_hash") != in_force:
             raise data.DataError(f"run {source_run_id} ran under pre-registration {run_manifest.get('prereg_hash')}, "
                                  f"not the one in force ({in_force}): it is reported, never scored")
-    if run_manifest["status"] != "done":
+    if partial:
+        if split != "test" or run_manifest["status"] not in PARTIAL:
+            raise data.DataError(f"--partial scores an abandoned test attempt (failed or interrupted), for the report's "
+                                 f"list of attempts; {source_run_id} is {run_manifest['status']!r} on {split}")
+    elif run_manifest["status"] != "done":
         raise data.DataError(f"run {source_run_id} is {run_manifest['status']!r}, not 'done': "
                              f"an incomplete or failed run is never scored")
     if split == "test":  # the run is scored by the analysis code that was registered, not by today's
@@ -326,15 +333,34 @@ def _write(kind: str, source_run_id: str, run_manifest: Dict[str, Any], config: 
     return out
 
 
-def evaluate(source_run_id: str) -> Path:
-    """The eval execution of a run's final SQL per question (predictions.json)."""
-    run_manifest, config, gold = _source(source_run_id)
-    predictions: Dict[str, Optional[str]] = json.loads((paths.RUNS / source_run_id / "predictions.json").read_text())
-    if set(predictions) != set(run_manifest["question_ids"]):
+def evaluate(source_run_id: str, partial: bool = False) -> Path:
+    """The eval execution of a run's final SQL per question (predictions.json).
+
+    `partial` scores an abandoned test attempt (failed or interrupted) on the questions it completed (a
+    prediction, and neither a failure nor a harness error), never read for a verdict: the report lists it
+    beside the configuration's final run (SPEC 6.1). Its predictions must hash to what the attempt's
+    manifest recorded when it ended (`predictions_sha256`, which the registry published)."""
+    run_manifest, config, gold = _source(source_run_id, partial)
+    path = paths.RUNS / source_run_id / "predictions.json"
+    if not path.is_file():
+        raise data.DataError(f"{source_run_id} left no predictions.json: nothing to score")
+    predictions: Dict[str, Optional[str]] = json.loads(path.read_text())
+    extra: Dict[str, Any] = {}
+    if partial:
+        recorded = run_manifest.get("predictions_sha256")
+        if recorded is None or data.sha256_file(path) != recorded:
+            raise data.DataError(f"the predictions of {source_run_id} do not hash to what its manifest recorded when it "
+                                 f"ended (predictions_sha256)")
+        failed = set(run_manifest.get("failures") or {}) | set(run_manifest.get("harness_errors") or {})
+        predictions = {q: sql for q, sql in predictions.items() if q not in failed}
+        if not predictions:
+            raise data.DataError(f"{source_run_id} completed no question: nothing to score")
+        extra = {"partial": True, "predictions_sha256": recorded, "of_questions": len(run_manifest["question_ids"])}
+    elif set(predictions) != set(run_manifest["question_ids"]):
         raise data.DataError(f"the predictions of {source_run_id} are not exactly its question ids")
     databases = _check_paired(list(predictions), gold, config, run_manifest["split"])
-    return _write("eval", source_run_id, run_manifest, config, databases, lambda day: score(
-        predictions, gold, lambda db_id: paths.sqlite_path(config, db_id), config["eval"]["timeout_s"], day))
+    return _write("eval-partial" if partial else "eval", source_run_id, run_manifest, config, databases, lambda day: score(
+        predictions, gold, lambda db_id: paths.sqlite_path(config, db_id), config["eval"]["timeout_s"], day), **extra)
 
 
 # The call sites whose output is a SQL query, and where their parser puts it (CHESS parsers.py).

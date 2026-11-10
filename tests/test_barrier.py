@@ -206,12 +206,32 @@ def coded(repo):
     return repo, registered
 
 
-def test_the_execution_code_is_the_agent_chess_the_serving_plan_and_the_curation(coded):
-    from bench.barrier import EXECUTION_CODE
+def test_the_execution_code_is_everything_but_the_analysis_code_by_exclusion(coded):
+    """Every file of bench/ outside the analysis code (a new one included), CHESS, the apps and the
+    environments: nothing is left out by a list."""
+    from bench.barrier import execution_code
     repo, registered = coded
     assert sorted(registered["execution_code"]) == ["bench/agent/runner.py", "vendor/chess/agent.py"]
     assert registered["execution_code"]["vendor/chess/agent.py"] == sha(repo / "vendor" / "chess" / "agent.py")
-    assert {"bench/agent", "vendor/chess", "bench/curate.py", "modal_apps/common.py", "runpod_apps"} <= set(EXECUTION_CODE)
+    for rel in ("bench/new_module.py", "bench/train.py", "bench/cli.py", "modal_apps/train.py", "runpod_apps/serve.py",
+                "env/agent/requirements.lock", "pyproject.toml", "uv.lock",
+                "bench/judge/j9.py", "bench/contracts/router.py", "bench/report.py", "SPEC.md", "scripts/x.py"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n")
+    git(repo, "add", "-A")
+    assert sorted(execution_code(repo)) == sorted([
+        "bench/agent/runner.py", "vendor/chess/agent.py", "bench/new_module.py", "bench/train.py", "bench/cli.py",
+        "modal_apps/train.py", "runpod_apps/serve.py", "env/agent/requirements.lock", "pyproject.toml", "uv.lock"])
+
+
+def test_the_real_execution_code_covers_bench_outside_the_analysis_code():
+    from bench.barrier import execution_code
+    code = execution_code(paths.ROOT)
+    assert {"bench/train.py", "bench/cli.py", "bench/barrier.py", "bench/provenance.py", "bench/prereg.py",
+            "bench/agent/runner.py", "pyproject.toml", "env/agent/requirements.lock"} <= set(code)
+    assert any(rel.startswith("vendor/chess/") for rel in code) and any(rel.startswith("runpod_apps/") for rel in code)
+    assert not any(rel.startswith(("bench/judge/", "bench/contracts/")) or rel in ("bench/evaluate.py", "bench/report.py",
+                   "bench/data.py", "bench/paths.py") for rel in code)
 
 
 def test_a_clean_checkout_of_the_registered_code_runs_records_after_it_included(coded):
@@ -274,6 +294,52 @@ def test_the_execution_code_must_be_registered_and_match(coded):
 def test_python_that_gitignore_hides_under_the_execution_code_is_refused(coded):
     from bench.barrier import code_in_force
     repo, registered = coded
-    (repo / ".git" / "info" / "exclude").write_text("bench/agent/hidden.py\n")
+    (repo / ".gitignore").write_text("runs/\nbench/agent/hidden.py\n")
+    git(repo, "commit", "-q", "-am", "ignore it")
+    registered = {**registered, "commit": git_out(repo, "rev-parse", "HEAD").strip()}
     (repo / "bench" / "agent" / "hidden.py").write_text("import os\n")
     assert "ignored by git would run: bench/agent/hidden.py" in code_in_force(registered, repo)
+
+
+def test_a_user_level_excludes_file_does_not_make_a_tree_clean(coded, tmp_path):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    excludes = tmp_path / "global-excludes"
+    excludes.write_text("notes.txt\n")
+    git(repo, "config", "core.excludesFile", str(excludes))
+    (repo / "notes.txt").write_text("n\n")
+    assert git_out(repo, "status", "--porcelain") == ""  # git itself hides it
+    assert "not clean (?? notes.txt)" in code_in_force(registered, repo)
+
+
+def test_a_clone_local_exclude_entry_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("# comments and blank lines are fine\n\n")
+    assert code_in_force(registered, repo) == ""
+    exclude.write_text("# a comment\nscratch/\n")
+    assert "info/exclude hides files from git status (scratch/)" in code_in_force(registered, repo)
+
+
+def test_a_worktree_s_exclude_file_is_found(coded, tmp_path):
+    from bench.barrier import local_excludes
+    repo, _ = coded
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "--detach", str(worktree))
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "exclude").write_text("hidden/\n")  # shared by the worktrees of a clone
+    assert local_excludes(worktree) == ["hidden/"]
+
+
+def test_a_reading_needs_the_registered_tree_but_may_write_judgments(coded):
+    from bench.barrier import READING_RECORDS, registered_tree
+    repo, registered = coded
+    (repo / "judgments").mkdir()
+    (repo / "judgments" / "j3.json").write_text("{}")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "judgments after the test")
+    assert registered_tree(registered, repo, READING_RECORDS) == ""
+    (repo / "bench" / "agent" / "runner.py").write_text("x = 3\n")
+    git(repo, "commit", "-q", "-am", "code after the registration")
+    assert "bench/agent/runner.py" in registered_tree(registered, repo, READING_RECORDS)

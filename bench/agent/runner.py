@@ -139,8 +139,32 @@ def _answer(question_id: str, hooks, outcome: Dict[str, Dict], answer: Callable[
     return not (question_id in outcome["failures"] or harness_errors)  # a failed run spends nothing more
 
 
+JOURNAL = "answers{part}.jsonl"  # one line per question answered, as it ends: what a killed session leaves
+
+
+def journal_writer(run_dir: Path, part: str, config: Dict[str, Any]) -> Callable[[str, Dict[str, Dict]], None]:
+    """Append a completed question to run_dir/answers<part>.jsonl as soon as it ends (its prediction, as
+    predictions.json keeps it, and its tool errors, redacted as the manifest's are), flushed to disk: a
+    session killed outright (SIGKILL, a lost machine) leaves its completed questions there, and its C1
+    lines in calls<part>.jsonl, for `--resume-from` (`resume.recover_killed`)."""
+    from bench.provenance import redact
+    path = run_dir / JOURNAL.format(part=part)
+
+    def write(question_id: str, outcome: Dict[str, Dict]) -> None:
+        tool_errors = outcome["tool_errors"].get(question_id) or {}
+        tool_errors = json.loads(redact(json.dumps(tool_errors, ensure_ascii=False), config))
+        line = json.dumps({"question_id": question_id, "prediction": outcome["predictions"][question_id],
+                           "tool_errors": tool_errors}, ensure_ascii=False)
+        with open(path, "a") as fh:
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    return write
+
+
 def _answer_each(hooks, outcome: Dict[str, Dict], stop: Any,
-                 answers: Iterable[Tuple[str, Callable[[], Tuple[Optional[str], Dict]]]]) -> None:
+                 answers: Iterable[Tuple[str, Callable[[], Tuple[Optional[str], Dict]]]],
+                 journal: Optional[Callable[[str, Dict[str, Dict]], None]] = None) -> None:
     """The questions of one process, one after another, until one fails. `stop` is the flag the
     workers of a run share: a question that fails here sets it, and no question starts once it is
     set. A question that was running when the flag was set from outside had its model calls refused
@@ -157,6 +181,8 @@ def _answer_each(hooks, outcome: Dict[str, Dict], stop: Any,
             del outcome["predictions"][question_id]
             outcome["tool_errors"].pop(question_id, None)
             break
+        if journal is not None:
+            journal(question_id, outcome)
 
 
 def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: Path,
@@ -191,7 +217,7 @@ def _execute_questions(config: Dict[str, Any], arm: str, run_id: str, run_dir: P
                     state, _, _ = manager.worker(task)
                     return final_sql(state), state.errors
                 yield str(task.question_id), answer
-        _answer_each(hooks, outcome, stop, answers())
+        _answer_each(hooks, outcome, stop, answers(), journal_writer(run_dir, part, config))
     finally:
         _close(hooks, outcome)
 
@@ -245,7 +271,7 @@ def _execute_single_call(config: Dict[str, Any], engine: str, run_id: str, run_d
                     except Exception as e:  # the model's failure, already in C1
                         return None, {"generate_candidate": f"{type(e).__name__}: {e}"}
                 yield str(question["question_id"]), answer
-        _answer_each(hooks, outcome, stop, answers())
+        _answer_each(hooks, outcome, stop, answers(), journal_writer(run_dir, part, config))
     finally:
         _close(hooks, outcome)
 
@@ -494,6 +520,45 @@ def used_key_envs(config: Dict[str, Any], engines: List[str], retrieval: bool) -
     return [name for name in names if name]
 
 
+SESSION_LOCK = "session.lock"
+_SESSION_LOCKS: Dict[Path, int] = {}
+
+
+def hold_session(run_dir: Path) -> None:
+    """Hold run_dir/session.lock (an exclusive flock) while this session lives: the operating system
+    releases it when the process ends, however it ends, so a session whose manifest still says `running`
+    is known dead when the lock can be taken (`session_alive`). Released, and the file removed, by
+    `finish`."""
+    import fcntl
+    fd = os.open(run_dir / SESSION_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _SESSION_LOCKS[run_dir] = fd
+
+
+def release_session(run_dir: Path) -> None:
+    fd = _SESSION_LOCKS.pop(run_dir, None)
+    if fd is not None:
+        (run_dir / SESSION_LOCK).unlink(missing_ok=True)
+        os.close(fd)
+
+
+def session_alive(run_dir: Path) -> Optional[bool]:
+    """Whether the session of a run whose manifest says `running` still holds its lock: True, False, or
+    None when it left no lock (a session started before the lock existed: nobody can tell)."""
+    import fcntl
+    path = run_dir / SESSION_LOCK
+    if not path.is_file():
+        return None
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)  # closing releases a lock taken here
+    return False
+
+
 def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str, split: str,
              fields: Dict[str, Any], key_envs: List[str], resume_source: Optional[Dict[str, Any]] = None,
              redo_reason: Optional[str] = None) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
@@ -552,10 +617,12 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
         manifest["earlier_attempts"] = attempts
         manifest["redo_reason"] = redo_reason
         manifest["registry_intent"] = registry.commit_intent(
-            manifest, resumed_from=None if resume_source is None else resume_source["run_id"], redo_reason=redo_reason,
-            earlier_attempts=[a["run_id"] for a in attempts])
+            manifest, config, resumed_from=None if resume_source is None else resume_source["run_id"],
+            redo_reason=redo_reason, earlier_attempts=[a["run_id"] for a in attempts],
+            unregistered_source_hashes=manifest.get("unregistered_source_hashes"))
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
+    hold_session(run_dir)
     _write_json(run_dir / "config.json", config)
     _write_manifest(run_dir, manifest, config)
     return run_dir, manifest, None if test is None else test["call_sites"]
@@ -591,7 +658,7 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
               batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None,
               redo_reason: Optional[str] = None) -> Path:
-    """One agent run. With `resume_from`, a new run that copies what a failed or interrupted run
+    """One agent run. With `resume_from`, a new run that copies what a failed, interrupted or killed run
     answered and answers only the questions left (`bench.agent.resume`). On test, `redo_reason` runs a
     configuration that has an earlier attempt again from its first question (`open_run`)."""
     config = load_config(config_path)
@@ -654,14 +721,17 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         if bool(source.get("via_claude_code")) != via_claude_code:
             raise data.DataError(f"{resume_from} was {'' if source.get('via_claude_code') else 'not '}sent through "
                                  f"Claude Code: a resumed run must be the same run")
-        complete = resume.complete_questions(source)
+        fields["unregistered_source_hashes"] = resume.unregistered_source_hashes(source)  # before anything is read
+        answers = resume.source_answers(source)
+        complete = resume.complete_questions(source, answers)
         source_calls = resume.read_calls_of(source)  # before the run exists: an invalid source leaves none
     run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
                                           split, fields, key_envs, resume_source=source, redo_reason=redo_reason)
     outcome = new_outcome()
     remaining = selected
     if source is not None:
-        manifest.update(resume.manifest_fields(source, complete, resume.copy_source(source, source_calls, run_dir, complete, outcome)))
+        manifest.update(resume.manifest_fields(source, complete, resume.copy_source(source, source_calls, run_dir, complete, outcome,
+                                                                                   answers)))
         resume.open_session(manifest, workers)
         _write_manifest(run_dir, manifest, config)
         remaining = [q for q in selected if q not in set(complete)]
@@ -703,9 +773,13 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
 def outputs_sha256(run_dir: Path) -> Dict[str, Optional[str]]:
     """What an execution had produced when it ended, as its manifest (and on test, the registry) records
     it: the sha256 of predictions.json (an agent run's; a replay has none) and of calls.jsonl, or None for
-    a file that does not exist. A resumed test execution copies only outputs that still hash to these."""
-    return {key: data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
-            for key, name in (("predictions_sha256", "predictions.json"), ("calls_sha256", "calls.jsonl"))}
+    a file that does not exist, and how many predictions it holds. A resumed test execution copies only
+    outputs that still hash to these; the report prints an abandoned attempt's partial accuracy on them."""
+    found = {key: data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
+             for key, name in (("predictions_sha256", "predictions.json"), ("calls_sha256", "calls.jsonl"))}
+    found["n_predictions"] = len(json.loads((run_dir / "predictions.json").read_text())) \
+        if found["predictions_sha256"] else None
+    return found
 
 
 def end_reason(manifest: Dict[str, Any]) -> Optional[str]:
@@ -772,17 +846,22 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
     if manifest["split"] == "test":
         manifest["unregistered_call_sites"] = outcome.get("unregistered_call_sites", [])
     manifest["end_reason"] = end_reason(manifest)
-    _write_manifest(run_dir, manifest, config)
-    if manifest["split"] == "test":
-        try:
-            registry.commit_manifest(run_dir, config)
-        except registry.RegistryError as e:  # never a `done` run the registry does not show
-            manifest["status"] = "failed"
-            manifest["problems"].append(scrub(f"the manifest could not be committed to the registry: {e}"))
-            manifest["end_reason"] = manifest["end_reason"] or manifest["problems"][-1]
-            _write_manifest(run_dir, manifest, config)
-            if stopped_by is None:  # otherwise the exception that stopped the run goes on
-                raise
+    try:
+        _write_manifest(run_dir, manifest, config)
+        for journal in run_dir.glob(JOURNAL.format(part="*")):  # predictions.json and the manifest hold it now
+            journal.unlink()
+        if manifest["split"] == "test":
+            try:
+                registry.commit_manifest(run_dir, config)
+            except registry.RegistryError as e:  # never a `done` run the registry does not show
+                manifest["status"] = "failed"
+                manifest["problems"].append(scrub(f"the manifest could not be committed to the registry: {e}"))
+                manifest["end_reason"] = manifest["end_reason"] or manifest["problems"][-1]
+                _write_manifest(run_dir, manifest, config)
+                if stopped_by is None:  # otherwise the exception that stopped the run goes on
+                    raise
+    finally:
+        release_session(run_dir)
 
 
 def preprocess(config_path: str, db_ids: List[str]) -> None:

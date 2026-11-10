@@ -15,11 +15,15 @@ and the split accessor itself, calls `ensure_split_allowed`.
 
 An execution on the test split (`bench run`, `bench replay`) also calls `ensure_execution_allowed`: the
 code that runs is the code that was registered. The working tree is clean (`git status --porcelain`
-lists nothing: no modified and no untracked file; what .gitignore ignores does not count, see
-`code_in_force`), HEAD descends from the commit the registration recorded and differs from it only in
-the records that change by design after it (`RECORDS`: prereg/ and registry/), and the execution code
-(`EXECUTION_CODE`: the agent, CHESS, the serving plan, the curation) hashes, file by file, to what the
-registration recorded under `execution_code`.
+lists nothing, with no user-level excludes file and an empty .git/info/exclude: no modified and no
+untracked file; what the repository's .gitignore ignores does not count, see `code_in_force`), HEAD
+descends from the commit the registration recorded and differs from it only in the records that change
+by design after it (`RECORDS`: prereg/ and registry/), and the execution code (every file of bench/
+outside the analysis code, CHESS, the serving and training apps and the environments:
+`execution_pathspec`) hashes, file by file, to what the registration recorded under `execution_code`.
+A reading of the test (bench eval, the report) needs no clean tree, since it writes judgments/, but
+the same code: HEAD holds the registered tree outside prereg/, registry/ and judgments/
+(`registered_tree`), and the analysis code hashes to the registered one (bench.prereg).
 """
 import hashlib
 import json
@@ -37,15 +41,22 @@ REGISTERED = {"spec_sha256": "SPEC.md", "splits_sha256": paths.SPLITS.relative_t
               "data_manifest_sha256": paths.DATA_MANIFEST.relative_to(paths.ROOT).as_posix()}
 
 
-# The code that executes on the test split, beyond the analysis code the registration already hashes
-# (bench/prereg.py ANALYSIS_CODE): the agent and its harness, the patched CHESS it drives, the serving
-# plan of the SLM (what is served, from which revision, with which adapters) and the curation that
-# wrote the adapters' datasets. Every tracked file under these paths, by sha256.
-EXECUTION_CODE = ("bench/agent", "bench/curate.py", "vendor/chess", "modal_apps/common.py", "modal_apps/serve_vllm.py",
-                  "modal_apps/deploy.yaml", "runpod_apps")
+# The analysis code: every file whose code can change a score, a judgment or a verdict (the contracts
+# too: agreement, the C1 reader, the facts, the configuration, the router) and the paths they resolve.
+# The registration hashes it (`analysis_code`), and every reading of the test checks it (bench.prereg).
+ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py", "bench/contracts",
+                 "bench/paths.py")
+# The execution code, defined by exclusion so that a new file is never left out: every file under bench/
+# that is not analysis code, the patched CHESS, the serving and training apps (Modal, RunPod), and the
+# environments every one of them is installed from (env/, pyproject.toml, a uv.lock if there is one).
+# The registration hashes it file by file (`execution_code`); a test execution checks it.
+EXECUTION_ROOTS = ("bench", "vendor/chess", "modal_apps", "runpod_apps", "env", "pyproject.toml", "uv.lock")
+EXECUTION_EXCLUDED = ANALYSIS_CODE
 # What changes after the registration by design: the registration itself (its timestamp, a deviation
-# line) and the registry of test executions, which every test execution commits to.
+# line) and the registry of test executions, which every test execution commits to. The readings of
+# the test (bench eval, the judgments, the report) also write judgments/.
 RECORDS = ("prereg", "registry")
+READING_RECORDS = RECORDS + ("judgments",)
 # Where Python that runs lives (the execution and the analysis code): an ignored .py file there is refused.
 CODE_ROOTS = ("bench", "vendor", "modal_apps", "runpod_apps")
 
@@ -156,17 +167,21 @@ def ensure_split_allowed(split: str, config: Optional[Dict[str, Any]] = None, ro
         raise TestSplitLocked(f"refusing to touch the test split: {reason}")
 
 
-def tracked_code(root: Path, prefixes: Tuple[str, ...]) -> Dict[str, str]:
-    """The sha256 of every tracked file under `prefixes`, by path relative to the root."""
-    listed = _git(root, "ls-files", "--", *prefixes)
+def tracked_code(root: Path, pathspec: List[str]) -> Dict[str, str]:
+    """The sha256 of every tracked file a pathspec selects, by path relative to the root."""
+    listed = _git(root, "ls-files", "--", *pathspec)
     if listed.returncode != 0:
         raise TestSplitLocked(f"refusing to touch the test split: cannot list the code ({listed.stderr.strip()})")
     return {rel: _sha256(root / rel) for rel in sorted(listed.stdout.splitlines())}
 
 
+def execution_pathspec() -> List[str]:
+    return [*EXECUTION_ROOTS, *(f":(exclude){rel}" for rel in EXECUTION_EXCLUDED)]
+
+
 def execution_code(root: Optional[Path] = None) -> Dict[str, str]:
     """The execution code's hashes, as the registration records them (`execution_code`)."""
-    return tracked_code(root or paths.ROOT, EXECUTION_CODE)
+    return tracked_code(root or paths.ROOT, execution_pathspec())
 
 
 def ignored_python(root: Path, prefixes: Tuple[str, ...]) -> List[str]:
@@ -176,47 +191,86 @@ def ignored_python(root: Path, prefixes: Tuple[str, ...]) -> List[str]:
     return sorted(rel for rel in listed.stdout.splitlines() if rel.endswith(".py"))
 
 
-def _outside_records() -> List[str]:
-    return ["--", ".", *(f":(exclude){rel}" for rel in RECORDS)]
+def _outside(records: Tuple[str, ...]) -> List[str]:
+    return ["--", ".", *(f":(exclude){rel}" for rel in records)]
 
 
 def same_code(commit: str, other: str, root: Optional[Path] = None) -> bool:
     """Whether two commits hold the same tree outside RECORDS (both must exist here)."""
     root = root or paths.ROOT
-    return _git(root, "diff", "--quiet", "--no-renames", commit, other, *_outside_records()).returncode == 0
+    return _git(root, "diff", "--quiet", "--no-renames", commit, other, *_outside(RECORDS)).returncode == 0
 
 
-def code_in_force(registered: Dict[str, Any], root: Optional[Path] = None) -> str:
-    """Empty string when the checkout is the registered code; otherwise the reason not.
+def local_excludes(root: Path) -> List[str]:
+    """The entries of this clone's own exclude file (.git/info/exclude, wherever a worktree keeps it): a
+    pattern there hides files from `git status` that no commit and no reviewer sees."""
+    found = _git(root, "rev-parse", "--git-path", "info/exclude")
+    if found.returncode != 0:
+        return []
+    path = Path(found.stdout.strip())
+    path = path if path.is_absolute() else root / path
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
 
-    Dirty is what `git status --porcelain` lists: a modified, staged, deleted or untracked file. What
-    .gitignore ignores does not count: runs/ is what executions write (one test run would make the next
-    dirty), data/raw and data/bird_dev are inputs data/MANIFEST.json hashes and every run checks
-    (`data.check_database`), train/adapters and train/datasets are served or read by the facts the
-    configuration names, by hash, and reports/ is regenerated. judgments/ is not ignored: a judgment the
-    registered configuration names is committed before the registration (RUNBOOK step 12), so an
-    untracked one at test time is a fact no registered commit holds, and counts. A Python file .gitignore
-    hides under the execution or analysis code would run unseen: refused too."""
-    from bench.provenance import git_state
-    root = root or paths.ROOT
-    state = git_state(root)
-    if state["dirty"]:
-        shown = ", ".join(f"{e['status'].strip()} {e['path']}" for e in state["dirty_paths"][:5])
-        more = state["dirty_paths_total"] - min(5, len(state["dirty_paths"]))
-        return (f"the working tree is not clean ({shown}{f' and {more} more' if more > 0 else ''}): a test execution "
-                f"runs only the registered code, committed")
-    hidden = ignored_python(root, CODE_ROOTS)
-    if hidden:
-        return f"Python code ignored by git would run: {', '.join(hidden[:5])}"
+
+def dirty(root: Path) -> List[Dict[str, str]]:
+    """What `git status --porcelain` lists with no user-level excludes file (core.excludesFile): only the
+    repository's own .gitignore decides what is ignored, so what the record calls clean does not depend on
+    the machine."""
+    from bench.provenance import dirty_entries
+    status = subprocess.run(["git", "-c", "core.excludesFile=/dev/null", "-C", str(root), "status", "--porcelain", "-z"],
+                            capture_output=True, text=True)
+    if status.returncode != 0:
+        return [{"status": "??", "path": f"(git status failed: {status.stderr.strip()[:100]})"}]
+    return dirty_entries(status.stdout)
+
+
+def registered_tree(registered: Dict[str, Any], root: Path, records: Tuple[str, ...]) -> str:
+    """Empty string when HEAD descends from the registered commit and holds its tree outside `records`;
+    otherwise the reason not."""
     commit = registered.get("commit")
     if not isinstance(commit, str) or _git(root, "cat-file", "-e", f"{commit}^{{commit}}").returncode != 0:
         return f"the registered commit {commit!r} is not in this repository"
     if _git(root, "merge-base", "--is-ancestor", commit, "HEAD").returncode != 0:
         return f"HEAD does not descend from the registered commit {commit[:12]}"
-    changed = _git(root, "diff", "--name-only", "--no-renames", commit, "HEAD", *_outside_records()).stdout.split()
+    changed = _git(root, "diff", "--name-only", "--no-renames", commit, "HEAD", *_outside(records)).stdout.split()
     if changed:
-        return (f"HEAD differs from the registered commit {commit[:12]} outside {', '.join(RECORDS)}: "
+        return (f"HEAD differs from the registered commit {commit[:12]} outside {', '.join(f'{r}/' for r in records)}: "
                 f"{', '.join(changed[:5])}" + (f" and {len(changed) - 5} more" if len(changed) > 5 else ""))
+    return ""
+
+
+def code_in_force(registered: Dict[str, Any], root: Optional[Path] = None) -> str:
+    """Empty string when the checkout is the registered code, for an execution; otherwise the reason not.
+
+    Dirty is what `git status --porcelain` lists, with no user-level excludes file (`dirty`): a modified,
+    staged, deleted or untracked file. What the repository's .gitignore ignores does not count: runs/ is
+    what executions write (one test run would make the next dirty), data/raw and data/bird_dev are inputs
+    data/MANIFEST.json hashes and every run checks (`data.check_database`), train/adapters and
+    train/datasets are served or read by the facts the configuration names, by hash, and reports/ is
+    regenerated. judgments/ is not ignored: a judgment the registered configuration names is committed
+    before the registration (RUNBOOK step 12), so an untracked one at test time is a fact no registered
+    commit holds, and counts. A pattern in .git/info/exclude, and a Python file .gitignore hides under the
+    code, would each hide what runs: refused too."""
+    root = root or paths.ROOT
+    entries = dirty(root)
+    if entries:
+        shown = ", ".join(f"{e['status'].strip()} {e['path']}" for e in entries[:5])
+        return (f"the working tree is not clean ({shown}{f' and {len(entries) - 5} more' if len(entries) > 5 else ''}): "
+                f"a test execution runs only the registered code, committed")
+    excludes = local_excludes(root)
+    if excludes:
+        return (f"this clone's .git/info/exclude hides files from git status ({', '.join(excludes[:5])}): empty it, "
+                f"so that clean means what the repository says")
+    hidden = ignored_python(root, CODE_ROOTS)
+    if hidden:
+        return f"Python code ignored by git would run: {', '.join(hidden[:5])}"
+    reason = registered_tree(registered, root, RECORDS)
+    if reason:
+        return reason
     recorded = registered.get("execution_code")
     if not isinstance(recorded, dict):
         return "the registration records no execution code (`execution_code`): register again with a `bench prereg` that does"

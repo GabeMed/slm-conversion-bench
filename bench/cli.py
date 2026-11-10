@@ -80,6 +80,9 @@ def main(argv=None) -> int:
     p.add_argument("run_id")
     p.add_argument("--per-call", action="store_true",
                    help="score the SQL of every generate_candidate and revise invocation in the run's calls.jsonl")
+    p.add_argument("--partial", action="store_true",
+                   help="score an abandoned test attempt (failed or interrupted) on the questions it completed, for "
+                        "the report's list of attempts (plan key `attempts`); never read for a verdict")
 
     p = sub.add_parser("prereg", help="write and commit prereg/manifest.json and prereg/HASH (push to publish)")
     p.add_argument("--config", default="config.yaml")
@@ -157,7 +160,9 @@ def main(argv=None) -> int:
             print(update_call_sites(args.run_ids))
         elif args.command == "eval":
             from bench.evaluate import evaluate, evaluate_per_call
-            print((evaluate_per_call if args.per_call else evaluate)(args.run_id))
+            if args.per_call and args.partial:
+                raise DataError("--partial scores an attempt's predictions, not its calls: not with --per-call")
+            print(evaluate_per_call(args.run_id) if args.per_call else evaluate(args.run_id, partial=args.partial))
         elif args.command == "prereg":
             from pathlib import Path
             from bench.prereg import register

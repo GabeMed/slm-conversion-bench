@@ -4,7 +4,11 @@ of the non-inferiority tests: the fixed margin Δ, and what the pilot is for.
 
 It writes the two files the test barrier reads (`bench/barrier.py` documents the format):
 `prereg/manifest.json`, and `prereg/HASH`, one line with the sha256 of the manifest's bytes; and it
-commits them on a clean tree. It never pushes: publishing is left to a person, and the barrier
+commits them on a clean tree. Besides the analysis code (`analysis_code`), it records the execution code
+(`execution_code`: every file of bench/ outside the analysis code, CHESS, the serving and training apps
+and the environments, `barrier.execution_pathspec`) file by file, and the commit it registers: a test execution runs only on a clean checkout of that commit,
+with the registration and the registry as the only later changes, and that execution code
+(`barrier.ensure_execution_allowed`). It never pushes: publishing is left to a person, and the barrier
 opens only once `origin/main` has the registration. `commit` is informational (design §5): each
 test execution records its own.
 
@@ -31,8 +35,7 @@ from bench.judge import j4
 # a judgment or a verdict: the contracts too (agreement, the C1 reader, the facts, the configuration)
 # and the paths they resolve. The contracts include the router, so a routing change after the
 # registration needs a new one too.
-ANALYSIS_CODE = ("bench/judge", "bench/evaluate.py", "bench/data.py", "bench/report.py", "bench/contracts",
-                 "bench/paths.py")
+ANALYSIS_CODE = barrier.ANALYSIS_CODE  # defined beside the execution code, which is everything else of bench/
 REQUIRED_ANALYSIS = ("bench/judge/j4.py", "bench/evaluate.py", "bench/data.py")
 DEVIATIONS = "prereg/DEVIATIONS.md"  # one line per registration that replaced another: its date and the defect
 
@@ -166,6 +169,22 @@ def analysis_code(root: Path) -> Dict[str, str]:
     return {rel: _sha256(root / rel) for rel in files}
 
 
+def execution_code(root: Path) -> Dict[str, str]:
+    """The sha256 of every tracked file of the execution code (`barrier.execution_pathspec`), by path, as the
+    test barrier compares it. Python code under it that git does not track is refused, as the analysis
+    code's is."""
+    def untracked(*flags: str) -> List[str]:
+        return sorted(rel for rel in _git(root, "ls-files", "--others", *flags, "--", *barrier.execution_pathspec()).splitlines()
+                      if rel.endswith(".py"))
+    ignored = untracked("--ignored", "--exclude-standard")
+    if ignored:
+        raise PreregError(f"execution code ignored by git: {', '.join(ignored)}")
+    uncommitted = untracked("--exclude-standard")
+    if uncommitted:
+        raise PreregError(f"execution code not committed: {', '.join(uncommitted)}")
+    return barrier.execution_code(root)
+
+
 def delta_rule(config: Dict[str, Any]) -> Dict[str, Any]:
     """The rule J4 applies (bench/judge/j4.py), in words and parameters: a fixed margin, and a pilot that
     gives the planned power only (design §6.3 T3)."""
@@ -200,12 +219,17 @@ def unset(node: Any, where: str = "") -> List[str]:
 
 
 def check_registered_analysis_code(root: Path) -> None:
-    """A test result is produced only by the analysis code that was registered (prereg/manifest.json),
-    file by file; a registration that recorded none matches no code. For whatever scores or reads the
-    test: bench eval, and the report."""
+    """A test result is produced only by the code that was registered (prereg/manifest.json): HEAD holds
+    the registered commit's tree outside prereg/, registry/ and judgments/ (a reading writes judgments/,
+    so it needs no clean tree), and the analysis code, as the working tree holds it, hashes file by file
+    to the registered one; a registration that recorded none matches no code. For whatever scores or
+    reads the test: bench eval, and the report."""
     manifest = barrier.read_registered(root)
     if manifest is None:
         raise PreregError(f"{barrier.PREREG_MANIFEST} is not a JSON object: no analysis code is registered")
+    reason = barrier.registered_tree(manifest, root, barrier.READING_RECORDS)
+    if reason:
+        raise PreregError(f"the code is not the registered one: {reason}")
     registered = manifest.get("analysis_code") or {}
     now = analysis_code(root)
     changed = sorted(rel for rel in set(registered) | set(now) if registered.get(rel) != now.get(rel))
@@ -226,7 +250,7 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     if replace and not reason:
         raise PreregError(f"--replace needs --reason: the defect that made a new registration necessary, "
                           f"which becomes a line of {DEVIATIONS}")
-    if _git(root, "status", "--porcelain"):
+    if barrier.dirty(root):  # as the test barrier reads it: no user-level excludes file hides anything
         raise PreregError("the working tree has uncommitted changes: commit them, so the registration "
                           "hashes what the repository holds")
     config_file = (root / config_path).resolve()
@@ -250,7 +274,7 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
     manifest = {"config_path": config_file.relative_to(root).as_posix(), "config_sha256": config_sha256(config),
                 **{key: _sha256(root / rel) for key, rel in inputs.items()},
                 "commit": _git(root, "rev-parse", "HEAD"), "delta_rule": delta_rule(config),
-                "analysis_code": analysis_code(root)}
+                "analysis_code": analysis_code(root), "execution_code": execution_code(root)}
     manifest_path, hash_path = root / barrier.PREREG_MANIFEST, root / barrier.PREREG_HASH
     replaced = None  # the registration this one replaces, as the deviation line names it
     if manifest_path.exists() or hash_path.exists():
@@ -280,5 +304,6 @@ def register(config_path: str, root: Optional[Path] = None, replace: bool = Fals
         files.append(DEVIATIONS)
     _git(root, "add", "--", *files)
     _git(root, "commit", "-q", "-m", f"Pre-registration {digest}\n\nSPEC.md, {manifest['config_path']}, the splits, "
-         f"the data manifest, the delta rule and the analysis code, before the test split is touched. Push to publish.", "--", *files)
+         f"the data manifest, the delta rule, the analysis code and the execution code, before the test split is "
+         f"touched. Push to publish.", "--", *files)
     return {"hash": digest, "commit": _git(root, "rev-parse", "HEAD"), "new": True, "unset": unset(config)}

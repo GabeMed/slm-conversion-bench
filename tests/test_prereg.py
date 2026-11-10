@@ -44,9 +44,12 @@ ANALYSIS = ["bench/data.py", "bench/evaluate.py", "bench/judge/__init__.py", "be
             "bench/paths.py", *git(CODE, "ls-files", "bench/contracts").splitlines()]
 
 
+EXECUTION = ["bench/agent/resume.py", "bench/curate.py", "vendor/chess/src/runner/run_manager.py"]
+
+
 def copy_analysis_code(root):
-    """The analysis code the registration hashes, as the repository holds it."""
-    for rel in ANALYSIS:
+    """The analysis code the registration hashes, as the repository holds it, and some execution code."""
+    for rel in ANALYSIS + EXECUTION:
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(CODE / rel, root / rel)
 
@@ -115,6 +118,7 @@ def test_register_writes_the_contract_the_barrier_reads_and_commits_without_push
     assert rule["pilot"] == {"accessor": "bench.data.pilot_ids(config)", "size": 50,
                              "mix": {"simple": 15, "moderate": 25, "challenging": 10}}
     assert manifest["analysis_code"] == {rel: sha256(repo / rel) for rel in ANALYSIS}
+    assert manifest["execution_code"] == {rel: sha256(repo / rel) for rel in EXECUTION}  # all of bench/ but analysis
     assert git(repo, "rev-parse", "HEAD^") == before and git(repo, "status", "--porcelain") == ""
     assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == ["prereg/HASH", "prereg/manifest.json"]
     assert "not on origin/main" in prereg_published(CONFIG, repo)  # publishing is left to a person
@@ -520,3 +524,65 @@ def test_a_registration_that_recorded_no_analysis_code_matches_none(repo):
     (repo / "prereg" / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(PreregError, match="differs from the pre-registered one: bench/contracts/"):
         check_registered_analysis_code(repo)
+
+
+def test_the_execution_code_is_registered_and_what_the_commit_would_not_hold_is_refused(repo):
+    """The code a test execution runs, beyond the analysis code: the barrier compares it file by file."""
+    from bench.barrier import code_in_force
+    registered = register("config.yaml", root=repo)
+    manifest = json.loads((repo / "prereg" / "manifest.json").read_text())
+    assert code_in_force(manifest, repo) == ""
+    (repo / "vendor" / "chess" / "src" / "runner" / "run_manager.py").write_text("changed = True\n")
+    git(repo, "commit", "-q", "-am", "a change to CHESS after the registration")
+    assert "vendor/chess/src/runner/run_manager.py" in code_in_force(manifest, repo)
+    (repo / ".gitignore").write_text("bench/agent/local_*.py\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore local hooks")
+    (repo / "bench" / "agent" / "local_hook.py").write_text("x = 1\n")  # would run, and no commit holds it
+    with pytest.raises(PreregError, match="execution code ignored by git: bench/agent/local_hook.py"):
+        register("config.yaml", root=repo, replace=True, reason=REASON)
+    assert registered["new"]
+
+
+def test_a_reading_of_the_test_needs_the_registered_code_but_no_clean_tree(repo):
+    """bench eval and the report write judgments/, so they need no clean tree; they need the registered
+    code: HEAD holds the registered tree outside prereg/, registry/ and judgments/."""
+    register("config.yaml", root=repo)
+    (repo / "judgments" / "j3").mkdir(parents=True)
+    (repo / "judgments" / "j3" / "result.json").write_text("{}\n")
+    (repo / "notes.txt").write_text("not committed\n")  # a dirty tree: no matter for a reading
+    check_registered_analysis_code(repo)
+    git(repo, "add", "judgments")
+    git(repo, "commit", "-q", "-m", "judgments after the test")
+    check_registered_analysis_code(repo)
+    (repo / "bench" / "agent" / "resume.py").write_text("changed = True\n")  # execution code, not analysis code
+    git(repo, "commit", "-q", "-am", "a change after the registration")
+    with pytest.raises(PreregError, match="not the registered one: HEAD differs .* bench/agent/resume.py"):
+        check_registered_analysis_code(repo)
+
+
+def test_an_abandoned_test_attempt_is_scored_partially_on_the_predictions_it_recorded(published):
+    """`bench eval --partial`: for the report's list of attempts, on the questions the attempt completed,
+    and only on the predictions its manifest recorded when it ended; never for a done run, never off test."""
+    from bench.data import sha256_file
+    config, prereg_hash = published
+    run_id = test_run(config, prereg_hash, predictions={"9": "SELECT 9"})
+    run_dir = paths.RUNS / run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    with pytest.raises(DataError, match="--partial scores an abandoned test attempt"):
+        evaluate(run_id, partial=True)  # a done run is scored whole
+    failed = {**manifest, "status": "failed", "predictions_sha256": sha256_file(run_dir / "predictions.json")}
+    (run_dir / "manifest.json").write_text(json.dumps(failed))
+    with pytest.raises(DataError, match="not 'done'"):
+        evaluate(run_id)
+    out = evaluate(run_id, partial=True)
+    scored = json.loads((out / "manifest.json").read_text())
+    assert (scored["partial"], scored["n"], scored["correct"], scored["of_questions"]) == (True, 1, 1, 1)
+    assert scored["predictions_sha256"] == failed["predictions_sha256"] and out.name.startswith("eval-partial-")
+    (run_dir / "manifest.json").write_text(json.dumps({**failed, "harness_errors": {"9": ["a dead pod"]}}))
+    with pytest.raises(DataError, match="completed no question"):
+        evaluate(run_id, partial=True)
+    (run_dir / "predictions.json").write_text(json.dumps({"9": "SELECT 8"}))
+    (run_dir / "manifest.json").write_text(json.dumps(failed))
+    with pytest.raises(DataError, match="do not hash to what its manifest recorded"):
+        evaluate(run_id, partial=True)

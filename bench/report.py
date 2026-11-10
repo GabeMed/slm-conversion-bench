@@ -12,6 +12,7 @@ of (no number goes in it):
     adapters: <the adapters fact, when the plan has no J7; with J7, it must be J7's>
     teacher_train_cost: <J3 result of the teacher on train>
     b1k: <the choice of B1's few-shot k on the pilot (bench judge b1k); a test plan with B1 needs it>
+    attempts:   {<abandoned test attempt>: <its `bench eval --partial`>}   # every one that left predictions
 
 Every figure is read from a judgment or computed by one: J1's per-question table and summary
 (`ex_table`, `ex_summary`) and J4's tests (`noninferiority`, the candidate first, the reference
@@ -28,7 +29,11 @@ code is the registered one. **A test report is bound to the test registry**: eve
 under that registration; every arm's run is a `done` entry; a configuration (type, arm, engine, pre-registration)
 with more than one **completed** test run gets no verdict, and every run is listed (SPEC §6.1): one
 that did not finish as "not completed", which never blocks its re-run, and one under an earlier
-registration as "superseded by re-registration"; `prereg/DEVIATIONS.md`, one line per new registration,
+registration as "superseded by re-registration". Every attempt of each configuration is listed with how
+it ended (`end_reason`), the defect stated to run it again (`redo_reason`) or the attempt it resumed, and
+its n and EX: the final run's, and for an attempt abandoned with predictions, its partial EX on the
+questions it completed (`bench eval --partial`, which the plan's `attempts` names, checked against the
+predictions the registry recorded), never read for a verdict; `prereg/DEVIATIONS.md`, one line per new registration,
 is printed when it exists (T13); the facts the B3–B5 runs recorded are the ones the plan's J5, J6 and J7 name; the per-call evaluation
 replays the plan's B0 run; and the pilot finished before the first test execution started. The test
 registry is read from git as F1 records it: `registry/test/<run_id>.intent.json` before a test
@@ -142,6 +147,8 @@ def per_arm(evals: Dict[str, str], split: str, ex_table: Callable) -> Dict[str, 
     for arm, eval_run_id in evals.items():
         if arm not in ARMS:
             raise JudgmentError(f"unknown arm {arm!r} in the plan (one of {ARMS})")
+        if manifest(eval_run_id).get("partial"):
+            raise JudgmentError(f"{eval_run_id} scores an abandoned attempt (--partial): never an arm's evaluation")
         source = manifest(eval_run_id)["source_run_id"]
         mine = [r for r in rows if r["source_run_id"] == source]
         wrong = {(r["arm"], r["engine"], r["split"]) for r in mine} - {(*J1_KEY[arm], split)}
@@ -446,6 +453,8 @@ def gather(plan: Dict[str, Any], config: Dict[str, Any], ex_table: Callable, ex_
             "v3_min_ratio": config["claims"]["v3_min_ratio"],
             "utilizations": [f"{round(u * 100)}%" for u in sorted(config["cost"]["utilizations"])],
             "registry": registry, "prereg_in_force": in_force,
+            "attempts": attempts_by_configuration(registry, in_force, arms, plan.get("attempts") or {})
+            if split == "test" else [],
             "deviations": deviations(ref=remote if split == "test" else "HEAD"), "sources": sources}
     data["cost_ratios"] = cost_ratios(data, by_question, correct, config["seeds"]["bootstrap"], n_boot(config))
     return data
@@ -945,10 +954,16 @@ def test_registry(root: Optional[Path] = None, ref: str = "HEAD") -> Dict[str, A
     for run_id in run_ids:
         intent, ended = shown(f"{run_id}.intent.json") or {}, shown(f"{run_id}.manifest.json")
         found = ended or intent
+        ended_with = ended or {}
         runs.append({"run_id": run_id, "type": found.get("type"), "arm": found.get("arm"), "engine": found.get("engine"),
                      "status": ended.get("status") if ended else "interrupted (intent, no manifest)",
                      "commit": found.get("commit"), "prereg_hash": found.get("prereg_hash"),
-                     "started_at": intent.get("started_at"), "facts": (ended or {}).get("facts")})
+                     "started_at": intent.get("started_at"), "facts": ended_with.get("facts"),
+                     "end_reason": ended_with.get("end_reason"),
+                     "redo_reason": ended_with.get("redo_reason", intent.get("redo_reason")),
+                     "resumed_from": (ended_with.get("resumed_from") or {}).get("run_id") or intent.get("resumed_from"),
+                     "n_predictions": ended_with.get("n_predictions"),
+                     "predictions_sha256": ended_with.get("predictions_sha256")})
     return {"available": True, "runs": runs}
 
 
@@ -958,6 +973,50 @@ def deviations(root: Optional[Path] = None, ref: str = "HEAD") -> Optional[str]:
     there is none."""
     shown = subprocess.run(["git", "-C", str(root or paths.ROOT), "show", f"{ref}:{DEVIATIONS}"], capture_output=True, text=True)
     return shown.stdout if shown.returncode == 0 else None
+
+
+def attempts_by_configuration(registry: Dict[str, Any], in_force: Optional[str], arms: Dict[str, Any],
+                              partial_evals: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Every attempt of each configuration (type, arm, engine, pre-registration) the test registry holds,
+    in the order they started (SPEC 6.1): how each ended, the defect stated to run it again or the
+    attempt it resumed, and its n and EX. A done run the plan binds as an arm carries the arm's; an attempt
+    abandoned under the registration in force with predictions carries its partial EX, from the
+    `bench eval --partial` the plan's `attempts` names, whose predictions are the ones the registry
+    recorded (`predictions_sha256`). A plan that leaves one out is refused: no attempt is hidden."""
+    runs = registry.get("runs") or []
+    unknown = sorted(set(partial_evals) - {r["run_id"] for r in runs})
+    if unknown:
+        raise JudgmentError(f"the plan's attempts name executions the test registry does not hold: {unknown}")
+    final = {found["run_id"]: (found["n"], found["ex"]) for found in arms.values()}
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
+    for run in runs:
+        grouped.setdefault((run["type"], run["arm"], run["engine"], run["prereg_hash"]), []).append(run)
+    out = []
+    for (run_type, arm, engine, prereg_hash), found in sorted(grouped.items(), key=lambda kv: [str(k) for k in kv[0]]):
+        rows = []
+        for run in sorted(found, key=lambda r: (r.get("started_at") or "", r["run_id"])):
+            row = {"run_id": run["run_id"], "status": run_reading(run, in_force), "end_reason": run.get("end_reason"),
+                   "redo_reason": run.get("redo_reason"), "resumed_from": run.get("resumed_from"),
+                   "n": None, "ex": None, "partial": False}
+            if run["status"] == "done" and run["run_id"] in final:
+                row["n"], row["ex"] = final[run["run_id"]]
+            elif run["status"] != "done" and run.get("n_predictions") and run["type"] == "agent" \
+                    and in_force is not None and run["prereg_hash"] == in_force:
+                eval_run_id = partial_evals.get(run["run_id"])
+                if eval_run_id is None:
+                    raise JudgmentError(f"the abandoned attempt {run['run_id']} left {run['n_predictions']} predictions: "
+                                        f"name its `bench eval --partial` under the plan's attempts")
+                scored = manifest(eval_run_id)
+                if not scored.get("partial") or scored.get("source_run_id") != run["run_id"]:
+                    raise JudgmentError(f"{eval_run_id} is not a partial evaluation of {run['run_id']}")
+                if scored.get("predictions_sha256") != run.get("predictions_sha256"):
+                    raise JudgmentError(f"{eval_run_id} scored other predictions than the ones the registry recorded "
+                                        f"for {run['run_id']}")
+                row.update({"n": scored["n"], "ex": scored["correct"] / scored["n"] if scored["n"] else None,
+                            "partial": True, "eval": eval_run_id})
+            rows.append(row)
+        out.append({"type": run_type, "arm": arm, "engine": engine, "prereg_hash": prereg_hash, "attempts": rows})
+    return out
 
 
 def run_reading(run: Dict[str, Any], in_force: Optional[str]) -> str:
@@ -1123,6 +1182,19 @@ def render(data: Dict[str, Any]) -> str:
                               (r["commit"] or "—")[:12], (r["prereg_hash"] or "—")[:12]] for r in registry["runs"]]))
     else:
         parts.append("No test-split execution is committed.")
+    if data.get("attempts"):
+        parts += ["", "## Attempts per configuration", "",
+                  "Every attempt, in the order it started. The EX of an abandoned attempt is partial: on the questions "
+                  "it completed, never read for a verdict.", ""]
+        for group in data["attempts"]:
+            title = " ".join(str(x) for x in (group["type"], group["arm"], group["engine"]) if x is not None)
+            parts += [f"**{title}** (pre-registration {(group['prereg_hash'] or '—')[:12]})", "",
+                      _table(["attempt", "status", "how it ended", "run again because", "n", "EX"],
+                             [[a["run_id"], a["status"], a["end_reason"] or "—",
+                               a["redo_reason"] or (f"resumes {a['resumed_from']}" if a["resumed_from"] else "—"),
+                               "—" if a["n"] is None else a["n"],
+                               _pct(a["ex"]) + (" (partial)" if a["partial"] else "") if a["ex"] is not None else "—"]
+                              for a in group["attempts"]]), ""]
     if data["deviations"]:
         parts += ["", f"## Deviations from the pre-registration (`{DEVIATIONS}`)", "", data["deviations"].strip()]
     parts += ["", "## Error analysis, limitations, external references", "",

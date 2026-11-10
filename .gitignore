@@ -28,3 +28,6 @@ reports/
 
 # RunPod: what this machine created there (pods, volume, tunnels) and the pods' host keys (runpod_apps/state.py)
 .runpod/
+
+# Claude Code (local settings and worktrees): never run code, kept out of git status for the test barrier
+.claude/

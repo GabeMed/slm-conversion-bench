@@ -171,7 +171,7 @@ def test_a_resume_is_refused_unless_it_is_the_same_replay_of_an_infrastructure_f
 
     done = replay.replay(str(config_path), source, engine="production_llm", resume_from=name)
     before = runs_now()
-    refused("'done': only a failed or interrupted replay is resumed", resume_from=done.name)
+    refused("'done': only a failed, interrupted or killed replay is resumed", resume_from=done.name)
 
 
 def test_a_resume_on_test_goes_through_the_barrier(failed):

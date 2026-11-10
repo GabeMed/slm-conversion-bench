@@ -184,6 +184,7 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
               "question_ids": question_ids, "n_invocations": len(records), "facts": facts, **recorded,
               "workers": workers}  # as in an agent run, not the configuration's identity
     if failed is not None:
+        fields["unregistered_source_hashes"] = resume.unregistered_source_hashes(failed)  # before anything is read
         expected = {key: fields[key] for key in resume.REPLAY_IDENTITY if key != "split"}
         resume.check_same(failed, {"split": split, **json.loads(json.dumps(expected)), "config_sha256": config_sha256(config)})
         plan = resume.plan_replay(failed, resume.read_calls_of(failed), [identity(r) for r in records],
