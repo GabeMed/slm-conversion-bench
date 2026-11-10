@@ -142,9 +142,10 @@ right and take no responsibility for how it is used with any provider.
 SPEC v2.2 (D6, D10) amended the design for this before Stage 0: up to v2.1 the teacher was an open-weight
 model whose licence allows training on its outputs, and no closed LLM was in the core.
 
-`bench run --via-claude-code` sends K1, the teacher's logs on train, through Claude Code instead of the
-paid API; calibration and test always go through the API. Whoever runs it needs the provider's permission
-for that use. The details of the registered run are in SPEC.md (D25).
+The registered K1, the teacher's logs on train, ran through the paid API, like calibration and test
+(SPEC.md, D25). `bench run --via-claude-code` can send K1 through Claude Code instead of the paid API;
+calibration and test always go through the API. Whoever runs it needs the provider's permission for that
+use.
 
 ## Cite
 
