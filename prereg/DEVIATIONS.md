@@ -242,6 +242,27 @@ Changes after Stage 0 that can change a result or its interpretation.
   CPU time used under 90% of its 4 pinned cores (the cores' host-wide busy share from /proc/stat, which includes
   other tenants, is recorded apart as data), and no vLLM thread's affinity included a pinned core (vLLM's threads
   are kept off them before the sweep); a quantity that is not measured fails the level.
+- 2026-11-10 · the cost verdict rules (bench/report.py; SPEC.md §1, §5, §6.4, §6.6), decided before any SLM load
+  test result or test-split run was read; only the discarded smoke levels of the load test had been seen. (1) V3
+  and AV2 are judged on B4, the all-SLM arm, alone. Before, V3 took the cheapest of B4 and B5 (B5 counted as an
+  SLM arm if it made any SLM call), so a hybrid whose savings came from gpt-oss or the teacher could decide it;
+  B5 now belongs to A6, whose row prints its share of calls, tokens and cost per engine. AV2 prints B5 beside B4,
+  deciding nothing. If B4 is not non-inferior to B0, V3 reads "not testable: no all-SLM arm is non-inferior"
+  (before: inconclusive when B4 was inconclusive), and B4's cost ratio is still printed, as descriptive. (2) The
+  cost claims (V3, A6) read two comparators: the cheapest untrained arm non-inferior to B0, as before, and the
+  cheapest not shown worse than B0 (non-inferior or inconclusive). A claim confirms only if it holds against
+  both and refutes only if it fails against both; otherwise it is inconclusive, and both are printed. Before,
+  an untrained arm that was only inconclusive was dropped, leaving a dearer comparator (at worst B0, the most
+  expensive). A test report also refuses a plan that leaves out an arm with a done test run. (3) Labels only:
+  J4's interval is printed as two-sided 90% (one-sided 95% bounds); §5 states the refutation rule (the upper
+  bound below −Δ), which the code already applied; A5, AV2 and A6's cost part are labelled "by point estimate, no
+  interval"; the map states that its six claims are not corrected for multiplicity; the planned power is stated
+  at a true difference of 0. The "joint power" of §6.4, which the analysis code never computed, is removed.
+  (4) Text only: costs are marginal, and the training cost and hours are reported descriptively. The fixed cost
+  and payback of §1, §5 (AV2) and §6.6 were never computed by the analysis code. No stored judgment changes
+  (`bench verify`: 0 divergences); on the calibration report only labels change. Direction: (1) against the SLM:
+  it removes a hybrid's route to confirming V3 and makes AV2 easier to win against the SLM; (2) against
+  confirming: the comparator is never dearer, and refuting takes both comparators as before; (3) none; (4) none
 - 2026-11-10 · patch 16 extended (vendor/chess/src/workflow/agents/agent.py): the agent's tool is now the first
   `<tool_call>` block that names one of its tools, not the first block. Decided after reading B1's calibration
   pilot: in agent-B1-calib-20261110T035103.709962Z (k = 3), gpt-oss-120b wrote the tag inside a sentence before a
