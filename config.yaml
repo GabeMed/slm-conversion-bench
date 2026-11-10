@@ -320,7 +320,7 @@ loadtest:                      # execution `loadtest` (bench/loadtest.py), J8's 
   client: {cpu: 4, timeout_s: 7200}   # the Modal container that runs AIPerf beside the server
 
 preflight:                     # SPEC 7.1 and P-4 (bench/preflight.py)
-  lora_parity: {n_prompts: 8, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
+  lora_parity: {n_prompts: 32, max_new_tokens: 64, top_logprobs: 5, timeout_s: 600, reference_timeout_s: 3600}
   # the adapters train at the same time, one container each, so the largest one's projected hours are
   # what must fit (SPEC 7.3, Day 1 night). The projection times the training alone, so the limit stays
   # an hour under train.timeout_s, which also covers the container loading the base and saving the adapter
