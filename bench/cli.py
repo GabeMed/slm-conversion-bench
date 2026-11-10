@@ -93,7 +93,7 @@ def main(argv=None) -> int:
                         "config, data and step order, or it refuses)")
     p.add_argument("--save-every", type=int, metavar="STEPS",
                    help="--on tinker only: save the run's state on Tinker every STEPS optimizer steps, for --resume "
-                        "(0: never; default 50, ~18 min of a full run)")
+                        "(0: never; default 100, ~36 min of a full run)")
     p = sub.add_parser("loadtest", help="the loadtest execution: AIPerf replays a run's calls on an engine, one run per concurrency")
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--engine", required=True, help="an engine of the router, e.g. slm:qwen3-8b+lora:c3-<sha256[:12]>")

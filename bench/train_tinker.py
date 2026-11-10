@@ -88,11 +88,11 @@ SFT = {"learning_rate", "num_train_epochs", "max_steps", "per_device_train_batch
        "max_length", "lr_scheduler_type", "warmup_steps", "gradient_checkpointing", "logging_steps"}
 OPTIMIZER = {"beta1", "beta2", "eps", "weight_decay", "grad_clip_norm"}
 SWITCHES = ("train_attn", "train_mlp")  # create_lora_training_client's module groups; train_unembed is always off
-# Resume: a state every SAVE_EVERY optimizer steps. A full c0 run is ~1,500 steps in ~8.9 h (~21 s a step), so 50
-# steps is ~18 min: an interruption loses at most that (re-trained, billed twice), for ~30 checkpoint operations a
+# Resume: a state every SAVE_EVERY optimizer steps. A full c0 run is ~1,500 steps in ~8.9 h (~21 s a step), so 100
+# steps is ~36 min: an interruption loses at most that (re-trained, billed twice), for ~15 checkpoint operations a
 # run (Tinker bills checkpoints per checkpoint, and their storage per GB-month; only the latest state is kept).
 # Steps, not minutes: where the states fall is then the same on every run and in the tests.
-SAVE_EVERY = 50
+SAVE_EVERY = 100
 STATE_TTL_S = 7 * 24 * 3600  # a state outlives a deletion that failed by at most this; resume within it
 RESUME_RECORD = 1  # the resume record's format
 # What a resumed run does not reproduce exactly, recorded in its manifest (stats.resume.caveats)

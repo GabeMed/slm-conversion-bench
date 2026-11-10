@@ -730,11 +730,12 @@ def test_states_are_saved_every_n_steps_and_only_the_latest_is_kept(tmp_path, mo
     assert manifest["stats"]["global_step"] == 4 and not resume_records() and not pending_records()
 
 
-def test_the_default_cadence_is_every_50_steps(tmp_path, monkeypatch, tinker):
+def test_the_default_cadence_is_every_100_steps(tmp_path, monkeypatch, tinker):
     config_path, _ = full_repo(tmp_path, monkeypatch)
     assert train(config_path, settings(tmp_path)) == 0
     manifest = json.loads((paths.ROOT / "train" / "adapters" / "c0" / "manifest.json").read_text())
-    assert tt.SAVE_EVERY == 50 and manifest["stats"]["resume"]["save_every"] == 50
+    assert tt.SAVE_EVERY == 100 and manifest["stats"]["resume"]["save_every"] == 100
+    assert tinker["save_state"] == []  # 4 steps: no state before the export
 
 
 def test_an_interrupted_run_resumes_after_its_state_at_the_same_step_order_and_learning_rate(
