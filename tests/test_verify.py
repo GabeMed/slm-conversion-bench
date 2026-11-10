@@ -13,7 +13,7 @@ from bench import cli, data, paths, verify
 from bench.contracts import facts
 from bench.judge import j2, j3, j5, j6, j7, j8
 from bench.judge.base import read_result, relative, write_result
-from fixtures.fake import call, few_shot, repo, usage, write_run
+from fixtures.fake import aiperf_level, call, few_shot, repo, usage, write_run
 from fixtures.world import GOLD_SITES, gold_correct, per_call_eval, replay, teacher, trained_on
 
 QUESTIONS = [str(q) for q in range(1000, 1200)]
@@ -38,8 +38,7 @@ def without_centroids(config):
 def loadtest(run_id, concurrency, p95_ms, rps, engine="slm:qwen3-8b"):
     write_run(run_id, {"type": "loadtest", "engine": engine, "gpu": "L4", "concurrency": concurrency,
                        "prefix_cache": True, "sweep_id": f"sweep-{engine}", "composition": {"source": {"call_sites": {"select_tables": 1}}}},
-              files={j8.EXPORT: {"request_latency": {"unit": "ms", "p95": p95_ms},
-                                 "request_throughput": {"unit": "requests/sec", "avg": rps}}})
+              files=aiperf_level(concurrency, p95_ms, rps))
     return run_id
 
 
@@ -60,7 +59,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(data, "questions_for", lambda config, split: {q: {"difficulty": "simple"} for q in QUESTIONS})
 
     t = teacher("agent-B0-calib", "calib", QUESTIONS)  # every call takes 100 ms: the SLO is 100 ms, under the cap
-    write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib", "question_ids": QUESTIONS}, t)
+    write_run("agent-B0-calib", {"type": "agent", "arm": "B0", "split": "calib", "question_ids": QUESTIONS}, t, config={})
     teacher_ok = gold_correct("t", 0.9)
     per_call_eval("eval-t", "agent-B0-calib", t, teacher_ok)
     zeroshots = {}
@@ -156,8 +155,9 @@ def test_a_fabricated_result_does_not_come_out_of_its_own_reads(world):
     forged = forge(world)
     verified, divergences = verify.verify(world["config"], {**world["plan"], "j8": relative(forged)})
     assert divergences == [f"{relative(forged)}: recomputes to {relative(world['results']['j8'])}, not to the stored bytes "
-                           "(read cost.limit_min_calls, cost.limit_pool, cost.p95_slo_cap_ms, cost.slo_from, cost.utilizations, "
-                           "modal.gpu_prices, modal.gpu_prices_sensitivity, serving.cpu, serving.memory_gib "
+                           "(read cost.latency_groups, cost.limit_min_calls, cost.limit_pool, cost.p95_slo_cap_ms, "
+                           "cost.slo_from, cost.steady_inflight_share, cost.steady_min_requests, cost.steady_min_share, "
+                           "cost.utilizations, modal.gpu_prices, modal.gpu_prices_sensitivity, serving.cpu, serving.memory_gib "
                            "of the configuration)"]
     assert relative(world["results"]["j8"]) in verified  # the genuine one, which the J3 cost and J7 built on
 

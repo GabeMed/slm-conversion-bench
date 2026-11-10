@@ -238,7 +238,8 @@ modal:
     # 2026-09-30: L40S 0.000542, H100 0.001097)
   gpu_prices_sensitivity:      # that price, which J8 reads: every cost is given at it too, and a V3 or A6 confirmation
     as_of: "2026-11-09"        # must hold at both prices (SPEC 6.6). Modal bills CPU and memory apart: at serving.cpu
-    provider: modal            # and serving.memory_gib the container is $3.13/h, against the pod's $1.79/h
+    provider: modal            # and serving.memory_gib the container is $3.13/h, against the pod's $1.79/h (J8 prices
+                               # the CPU at the higher of serving.cpu and the vLLM server's measured cores, as Modal bills)
     usd_per_s: {A100-80GB: 0.000694}
     cpu_usd_per_core_s: 0.0000131
     memory_usd_per_gib_s: 0.00000222
@@ -409,6 +410,19 @@ cost:                          # J3 and J8 (SPEC §6.6); the container's price i
   # same SQL generation as generate_candidate, p95 12,438 against 12,383 ms)
   limit_min_calls: 30
   limit_pool: {revise: generate_candidate}
+  # each load level is read in its steady state (J8): the window in which the requests in flight are at least this
+  # share of the level's concurrency; a level is measured only with at least steady_min_requests whole requests in
+  # it (fewer, and the p95 is almost the maximum) and a window of at least steady_min_share of the level
+  steady_inflight_share: 0.9
+  steady_min_requests: 100
+  steady_min_share: 0.5
+  # the groups of call sites whose p95 J8 sets beside the teacher's, per level (a sensitivity, no verdict)
+  latency_groups:
+    sql: [generate_candidate, revise]
+    selection: [select_tables, select_columns]
+    filter: [filter_column]
+    agent: [agent_cg, agent_ir, agent_ss]
+    keywords: [extract_keywords]
   utilizations: [0.2, 0.5, 1.0]
 claims:                        # the SPEC §5 map (bench/report.py)
   v3_min_ratio: 3              # V3/A2: the paper's bar, met when the cost ratio's 95% CI lower bound is >= this (T9)
