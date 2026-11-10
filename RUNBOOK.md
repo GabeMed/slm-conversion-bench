@@ -492,6 +492,15 @@ At the end of the day, check the console's Pods page, and the network volume if 
   - The manifests also record `server_versions`: the serving image's vllm, torch, transformers and
     flashinfer. P-4's verdict records them too (`serving_versions`), with the reference's own
     (`reference_versions`).
+  - **No CPU pod in the server's data center: `--client colocated`** (opt-in; the default is `--client pod`,
+    above). AIPerf runs on the serving pod itself, in the same training environment from the volume, pinned
+    with `taskset` to 4 cores the server is not pinned to (vLLM unpinned: the last 4 of the container's
+    CPUs), against vLLM on the loopback, with no tunnel and no key. Each manifest records the client
+    (`client`: kind, pod, pinned cores, nproc, the cgroup's cpuset and CPU quota), the loopback's calibration
+    (`loopback_calibration`), and per level the CPU AIPerf, the server and the container used over AIPerf's
+    run (`cpu_sample`). Every sweep of one candidate under one configuration must use the same client: a
+    sweep on the other kind is refused before it starts. The fallback is a deviation: it is recorded in
+    prereg/DEVIATIONS.md once approved, before the first sweep.
 - **The training environment's build lock.** The first job builds the environment on the volume. It holds a
   lock there with its pod id and a heartbeat. A lock without a heartbeat for `runpod.lock_stale_minutes`
   (20) is broken by the next job, and the local side removes at once a lock whose pod no longer runs.

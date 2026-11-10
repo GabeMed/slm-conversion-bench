@@ -122,6 +122,10 @@ def main(argv=None) -> int:
                         "the router chose, all adapters on one server")
     p.add_argument("--on", required=True, choices=("local", "modal", "runpod"),
                    help="where the AIPerf client runs (modal, runpod: beside the server, in the same cloud)")
+    p.add_argument("--client", default="pod", choices=("pod", "colocated"),
+                   help="--on runpod only: the AIPerf client on a CPU pod in the server's data center (pod, the "
+                        "default), or on the serving pod itself pinned to 4 cores (colocated: the fallback when no "
+                        "CPU pod is available); every sweep of a base must use one")
     p.add_argument("--concurrency", type=int, nargs="+", help="levels (default: loadtest.concurrency)")
     p.add_argument("--tokenizer", help="HF repo of the engine's tokenizer, when the engine is not an SLM candidate")
     p.add_argument("--tokenizer-revision", help="its 40-hex commit")

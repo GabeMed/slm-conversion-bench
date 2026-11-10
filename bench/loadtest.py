@@ -44,7 +44,14 @@ levels. Every level is its own run:
 `--on local` runs AIPerf here against the engine's endpoint (the llama.cpp smoke server);
 `--on modal` runs it in a Modal CPU container (`modal_apps/loadtest.py`) against the deployed vLLM server,
 so the client sits in the same cloud as the server; `--on runpod` in a RunPod CPU pod in the serving pod's
-data center (`runpod_apps/loadtest.py`), through its own SSH tunnel to the server. Either way it first waits
+data center (`runpod_apps/loadtest.py`), through its own SSH tunnel to the server, or, with `--client
+colocated` (an opt-in fallback for a data center with no CPU pod), on the serving pod itself, pinned to 4
+cores, on the loopback.
+
+**One client kind per base and configuration** (`check_one_client`): the manifest records the client
+(`client.kind`: local, modal, pod or colocated, and what it ran on), and a sweep whose kind differs from a done
+load test of the same base candidate under the same configuration is refused before it starts, so J8's sweeps
+all share one client. Either way it first waits
 for the server to list the model (a cold vLLM loads its weights first), records the model card the server
 lists (for an adapter, the path it was loaded from), and warms it up before measuring. The manifest keeps
 what was configured (`gpu`, `prefix_cache`) apart from what was observed (`observed`): the GPUs the Modal or
@@ -71,7 +78,7 @@ import urllib.request
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from bench import paths
 
@@ -370,12 +377,13 @@ def run_aiperf(run_dir: Path, cmd: List[str]) -> int:
 # ---------------------------------------------------------------- one level, here or in the Modal load client
 
 def run_level(run_dir: Path, args: Dict[str, Any], api_key: Optional[str], headers: Dict[str, str],
-              api_key_var: Optional[str], aiperf: Optional[str]) -> Dict[str, Any]:
+              api_key_var: Optional[str], aiperf: Optional[str], measure: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
     """One concurrency level, the same sequence locally and in modal_apps/loadtest.py: wait for the model (and,
     as deployed, every adapter in `models`), warm up on calls outside the measured slice, empty the prefix cache
     when `reset_prefix_cache`, write aiperf.yaml (credentials by reference only), run
     AIPerf, scrub every credential value from what it wrote. `api_key_var` is the variable holding
-    `api_key` in AIPerf's environment."""
+    `api_key` in AIPerf's environment. `measure`: a context manager around AIPerf's run alone, whose `result`
+    is returned as `cpu_sample` (the co-located client's CPU sample, runpod_apps/colocated.py)."""
     cmd = aiperf_command(aiperf, args["tokenizer"])
     sent = auth_headers(api_key, headers)
     waited, card = wait_ready(args["base_url"], sent, args["model"], args["ready_timeout_s"])
@@ -387,12 +395,17 @@ def run_level(run_dir: Path, args: Dict[str, Any], api_key: Optional[str], heade
                                                args["timeout_s"], args["stream"], api_key_var if api_key else None,
                                                args["headers_env"]))
     redacted: List[str] = []
+    sampler = measure() if measure else None
     try:
-        returncode = run_aiperf(run_dir, cmd)
+        with sampler or nullcontext():
+            returncode = run_aiperf(run_dir, cmd)
     finally:  # an interrupted AIPerf may have written credentials too
         redacted = scrub_secrets(run_dir, [api_key or "", *headers.values()])
-    return {"returncode": returncode, "ready_after_s": waited, "served_model": card, "secrets_redacted_in": redacted,
-            "prefix_cache_reset": reset}
+    out = {"returncode": returncode, "ready_after_s": waited, "served_model": card, "secrets_redacted_in": redacted,
+           "prefix_cache_reset": reset}
+    if sampler is not None:
+        out["cpu_sample"] = sampler.result
+    return out
 
 
 # ---------------------------------------------------------------- the execution
@@ -439,8 +452,50 @@ def _tokenizer(config: Dict[str, Any], engine: str, override: Optional[Dict[str,
     raise LoadtestError(f"engine {engine} is not an SLM: give its tokenizer (--tokenizer REPO --tokenizer-revision REV)")
 
 
+CLIENTS = ("pod", "colocated")  # --on runpod's load client: a CPU pod (the default), or the serving pod itself
+
+
+def client_kind(on: str, client: str = "pod") -> str:
+    """The kind of load client a sweep runs on: local, modal, or, on RunPod, pod or colocated."""
+    if client not in CLIENTS:
+        raise LoadtestError(f"--client must be one of {CLIENTS}, not {client!r}")
+    if client != "pod" and on != "runpod":
+        raise LoadtestError(f"--client {client} is RunPod's (--on runpod), not --on {on}'s")
+    return client if on == "runpod" else on
+
+
+def recorded_client(manifest: Dict[str, Any]) -> str:
+    """The client kind a load test's manifest records; one from before the record, its `where` (a RunPod one ran
+    on a CPU pod, the only client then)."""
+    kind = (manifest.get("client") or {}).get("kind")
+    return kind or ("pod" if manifest.get("where") == "runpod" else manifest.get("where"))
+
+
+def check_one_client(base: str, config_hash: str, kind: str) -> None:
+    """Refuse a sweep whose client kind differs from a done load test's of the same base engine under the same
+    configuration (J8 takes the sweeps of one base: they must share one client)."""
+    others: Dict[str, set] = {}
+    for manifest_path in sorted(paths.RUNS.glob("loadtest-*/manifest.json")):
+        try:
+            found = json.loads(manifest_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (found.get("type"), found.get("status"), found.get("config_sha256")) != ("loadtest", "done", config_hash):
+            continue
+        if str(found.get("engine", "")).split("+", 1)[0] != base:
+            continue
+        other = recorded_client(found)
+        if other != kind:
+            others.setdefault(other, set()).add(found.get("sweep_id") or manifest_path.parent.name)
+    if others:
+        listed = "; ".join(f"{k}: {', '.join(sorted(v))}" for k, v in sorted(others.items(), key=lambda kv: str(kv[0])))
+        raise LoadtestError(f"the load tests of {base} under this configuration ran on another client ({listed}), "
+                            f"not {kind}: every sweep J8 reads must share one client kind; run with that client, "
+                            f"or move those runs out of runs/")
+
+
 def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: Optional[List[int]] = None,
-             tokenizer: Optional[Dict[str, str]] = None, as_deployed: bool = False) -> List[Path]:
+             tokenizer: Optional[Dict[str, str]] = None, as_deployed: bool = False, client: str = "pod") -> List[Path]:
     import os
 
     from bench.contracts.config import config_sha256, engine_spec, load_config
@@ -448,6 +503,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
 
     config = load_config(config_path)
     settings = config["loadtest"]
+    kind = client_kind(on, client)
     spec = engine_spec(config, engine)
     endpoint = spec["endpoint"]
     if not endpoint.get("base_url"):
@@ -480,6 +536,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
     levels = list(concurrency or settings["concurrency"])
     counts = level_counts(levels, settings)
     cold = cold_cache(settings.get("cold_prefix_cache", "never"))
+    check_one_client(engine.split("+", 1)[0], config_sha256(config), kind)
 
     remote, aiperf = None, None
     if on == "local":
@@ -497,7 +554,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
         sys.path.insert(0, str(paths.ROOT))
         from runpod_apps import loadtest as runpod_loadtest
 
-        remote = runpod_loadtest.connect(config, engine[len("slm:"):].partition("+lora:")[0])
+        remote = runpod_loadtest.connect(config, engine[len("slm:"):].partition("+lora:")[0], client)
     elif on != "local":
         raise LoadtestError(f"--on must be local, modal or runpod, not {on!r}")
 
@@ -521,7 +578,7 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                 "engine": label, "model": spec["model"], "models": sorted(models.values()) if models else None,
                 "traffic": selected["traffic"], "traffic_kind": selected["kind"],
                 "cluster": selected["traffic"] if selected["kind"] == "adapter" else None,
-                "endpoint_kind": endpoint["kind"], "where": on,
+                "endpoint_kind": endpoint["kind"], "where": on, "client": {"kind": kind},
                 "gpu": config["serving"]["gpu"] if vllm else None,
                 "prefix_cache": config["serving"]["prefix_caching"] if vllm else None,
                 "server": f"vllm {config['serving']['vllm_version']}" if vllm else endpoint["kind"],
@@ -571,6 +628,12 @@ def loadtest(config_path: str, engine: str, source: str, on: str, concurrency: O
                     manifest["server_versions"] = server_state["versions"]
                 if remote and result.get("tunnel_calibration"):  # RunPod: what the client's SSH tunnel adds
                     manifest["tunnel_calibration"] = result["tunnel_calibration"]
+                if remote and result.get("loopback_calibration"):  # co-located: the loopback's, pinned
+                    manifest["loopback_calibration"] = result["loopback_calibration"]
+                if remote and result.get("client"):  # RunPod: what the client ran on
+                    manifest["client"] = result["client"]
+                if result.get("cpu_sample") is not None:  # co-located: AIPerf's and the server's CPU over the level
+                    manifest["cpu_sample"] = result["cpu_sample"]
             except Exception as e:
                 manifest["stopped_by"] = scrub(f"{type(e).__name__}: {e}")
                 raise
@@ -598,7 +661,7 @@ def cli(args) -> int:
         errors += (RunPodError,)
     try:
         run_dirs = loadtest(args.config, args.engine, args.source, args.on, args.concurrency, tokenizer,
-                            bool(getattr(args, "as_deployed", False)))
+                            bool(getattr(args, "as_deployed", False)), getattr(args, "client", None) or "pod")
     except errors as e:
         print(f"bench loadtest: {e}", file=sys.stderr)
         return 2
