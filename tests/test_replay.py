@@ -220,7 +220,7 @@ def test_the_cli_passes_the_ids_and_the_workers(monkeypatch, capsys):
     monkeypatch.setattr(runner, "run_agent", lambda config, arm, split, **kwargs: seen.update(run=kwargs) or "a")
     assert cli.main(["replay", "agent-B0-calib-x", "--engine", "cheap_alt", "--ids", "7", "8"]) == 0
     assert seen["replay"] == ("agent-B0-calib-x", {"engine": "cheap_alt", "arm": None, "call_sites": None, "ids": ["7", "8"],
-                                                   "workers": 1})  # the default
+                                                   "workers": 1, "resume_from": None})  # the defaults
     assert cli.main(["replay", "agent-B0-calib-x", "--engine", "cheap_alt", "--workers", "4"]) == 0
     assert seen["replay"][1]["workers"] == 4
     assert cli.main(["run", "--arm", "B0", "--split", "calib", "--workers", "8"]) == 0
