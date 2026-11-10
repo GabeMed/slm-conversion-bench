@@ -107,6 +107,13 @@ def main(argv=None) -> int:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--parity", metavar="CLUSTER", help="run P-4 on this cluster's adapter against the served candidate")
     p.add_argument("--on", default="modal", choices=("local", "modal", "runpod"), help="where P-4's HF-PEFT reference runs")
+    p.add_argument("--base-check", metavar="CLUSTER",
+                   help="only the base-identity check (bench/basecheck.py): the pinned base + this cluster's adapter "
+                        "scored on the rows of training's last steps, against Tinker's logged losses")
+    p.add_argument("--tinker-loss", action="append", metavar="STEP=LOSS",
+                   help="with --base-check: a loss Tinker logged for a step (repeatable), e.g. 100=0.1453")
+    p.add_argument("--no-restart", action="store_true",
+                   help="with --base-check --on runpod: leave the server stopped afterwards (the pod goes down next)")
     p.add_argument("--train-backend", choices=("modal", "tinker"),
                    help="where the adapters are trained, for training_time (default: runpod.train_backend when the "
                         "configuration has a runpod section, else modal)")
@@ -169,6 +176,9 @@ def main(argv=None) -> int:
             return 2
         elif args.command in ("train", "loadtest", "preflight"):  # F3: each reports its own errors
             from bench import loadtest, preflight, train
+            if args.command == "preflight" and args.base_check:
+                from bench import basecheck
+                return basecheck.cli(args)
             return {"train": train.cli, "loadtest": loadtest.cli, "preflight": preflight.cli}[args.command](args)
     except (TestSplitLocked, ConfigError, DataError, FactError, HarnessError) as e:
         print(f"bench {args.command}: {e}", file=sys.stderr)
