@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from bench import barrier, data, paths
-from bench.agent import TRACING_OFF, registry
+from bench.agent import ONNXRUNTIME_TELEMETRY_OFF, TRACING_OFF, registry
 from bench.contracts.calls import read_calls, validate_calls
 from bench.contracts.config import chess_team_config, config_sha256, load_config
 from bench.provenance import git_state, scrub
@@ -66,6 +66,7 @@ def _prepare_chess(config: Dict[str, Any], db_root: Path):
     os.environ.setdefault("INDEX_SERVER_PORT", "0")  # read at import by CHESS; unused by IR -> SS -> CG
     os.environ["ANONYMIZED_TELEMETRY"] = "False"  # Chroma would otherwise send usage telemetry
     os.environ.update(TRACING_OFF)
+    os.environ.update(ONNXRUNTIME_TELEMETRY_OFF)  # before CHESS's reader imports Chroma, hence onnxruntime
     for name in REDIRECTING_ENV:
         os.environ.pop(name, None)
     for name in [n for n in os.environ if n.upper().startswith("CHROMA_")]:  # e.g. CHROMA_SERVER_HOST: a remote

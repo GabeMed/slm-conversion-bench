@@ -3,6 +3,7 @@ so nothing patched in this process reaches them: the model is a fake OpenAI-comp
 answers CHESS's prompts as a model following the protocol would, and the run goes through the agent's
 real client. Agent environment only; no llama.cpp server, no BIRD download."""
 import json
+import multiprocessing
 import os
 import signal
 import subprocess
@@ -566,3 +567,34 @@ def test_the_replay_merge_writes_the_questions_in_order_and_adds_the_failures_up
     assert [json.loads(row)["call_id"] for row in rows[:-1]] == ["a", "a2", "b", "c", "d"]
     assert rows[-1] == '{"question_id": "5", "cut'
     assert sorted(p.name for p in tmp_path.iterdir()) == ["calls.jsonl"]
+
+
+def _build_the_chess_reader(outcome, part, stop, config, run_dir, dataset):
+    """A worker's `execute` that only prepares CHESS: importing its reader imports Chroma, which
+    imports onnxruntime (its default embedding function is built at import, unused here)."""
+    runner._prepare_chess(config, run_dir)
+
+
+def test_a_worker_switches_onnxruntime_telemetry_off_before_the_chess_reader_imports_it(tmp_path, monkeypatch):
+    """onnxruntime starts its telemetry uploader when imported, and that thread can abort the worker
+    at exit (SIGABRT in its event dispatch): the switch must be in a worker's environment by then.
+    A stand-in onnxruntime records the switch at its import; this process does not pass it on."""
+    fake = tmp_path / "fake"
+    (fake / "onnxruntime").mkdir(parents=True)
+    (fake / "onnxruntime" / "__init__.py").write_text(
+        "import os, pathlib\n"
+        "pathlib.Path(os.environ['FAKE_ORT_RECORD']).write_text(os.environ.get('ORT_DISABLE_TELEMETRY', 'unset'))\n"
+        "def get_available_providers():\n    return ['CPUExecutionProvider']\n")
+    record = tmp_path / "ort_telemetry"
+    monkeypatch.syspath_prepend(str(fake))  # a spawned worker starts with this process's sys.path
+    monkeypatch.setenv("FAKE_ORT_RECORD", str(record))
+    monkeypatch.delenv("ORT_DISABLE_TELEMETRY", raising=False)
+    context = multiprocessing.get_context("spawn")
+    kwargs = {"config": load_config(paths.ROOT / "configs" / "smoke-local.yaml"), "run_dir": tmp_path, "dataset": []}
+    stop = context.Event()
+    worker = context.Process(target=runner._worker, args=(_build_the_chess_reader, kwargs, 0, stop))
+    worker.start()
+    worker.join(120)
+    assert worker.exitcode == 0
+    assert "stopped_by" not in json.loads((tmp_path / "outcome.w0.json").read_text())
+    assert record.read_text() == "1"
