@@ -286,3 +286,13 @@ Changes after Stage 0 that can change a result or its interpretation.
   and stays in n; with the refusal, 701 is wrong for every arm or scored for every arm, and the test runs are
   evaluated on an idle machine, one after the other (RUNBOOK step 14). Direction: none between arms (it removes a
   timing asymmetry); if 701's gold times out, every arm's EX is lower by 1/498
+- 2026-11-10 · SPEC §6.1 and §8 now declare exploratory readings before the test. They change no verdict, margin,
+  arm or allocation. The new text covers the primary descriptive metric per call site, beside a trivial rule, the
+  base, the adapter, the cheap alternative and the teacher's repetition. It also covers question-level intervals,
+  the published family of cuts, and a reading rule for the c1 learning curve. Two readings may be run on the test:
+  the teacher on its own test calls, and c0 alone swapped live (extension 1). The call sites are classified against
+  the paper's conditional claim; the classification was written after the calibration and is shown beside the
+  registered predictions. Three limits of the training data are added (207 of 826 SQL rows wrong against the
+  gold; an 87.6% always-"No" floor at the column filter; 1,534 questions on the 11 databases). Together they bound
+  the reading in both directions: a loss outside the claim's antecedent does not refute it, and agreement at the
+  column filter does not support it without an end-to-end measure
