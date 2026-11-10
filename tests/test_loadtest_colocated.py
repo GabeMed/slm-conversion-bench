@@ -100,7 +100,7 @@ def test_the_sample_is_each_sides_cpu_over_the_level(tmp_path, monkeypatch):
     clock = iter([10.0, 20.0])
     sampler = colocated.Sampler([12, 13], proc, sysfs, clock=lambda: next(clock))
     sampler.tick = 100
-    children = iter([1.0, 31.0])  # AIPerf's processes: 30 CPU seconds over the 10 s level
+    children = iter([1.0, 11.0])  # AIPerf's processes: 10 CPU seconds over the 10 s level
     monkeypatch.setattr(sampler, "_children_s", lambda: next(children))
     with sampler:
         fake_proc(proc, {**SERVER, 52: (51, "VLLM::EngineCore", 3000 + 900, 200 + 100, "0-15")},  # +10 s of CPU
@@ -108,15 +108,19 @@ def test_the_sample_is_each_sides_cpu_over_the_level(tmp_path, monkeypatch):
         fake_cgroup(sysfs, usage_usec=1_000_000 + 41_000_000)
     out = sampler.result
     assert out["wall_s"] == 10.0
-    assert out["aiperf"] == {"cpu_s": 30.0, "cores": 3.0}
+    assert out["aiperf"] == {"cpu_s": 10.0, "cores": 1.0}
     assert out["server"] == {"pids": 3, "cpu_s": 10.0, "cores": 1.0}
     assert out["container"] == {"cpu_s": 41.0, "cores": 4.1}
     assert out["pinned_cores_host_busy"] == {"12": 0.3, "13": 0.0}
-    assert out["cpu_limit"] == 16.0 and out["throttling"]["before"] is None  # this fake cgroup shows no counters
+    assert out["cpu_limit"] == 16.0 and out["cgroup_cpu_max"] == "1600000 100000"  # the quota used, stated
+    assert out["throttling"]["before"] is None  # this fake cgroup shows no counters
     assert out["server_affinity"] == {"50/50": "0-15", "51/51": "0-15", "52/52": "0-15"}
     check = out["contention_check"]  # vLLM unpinned here: it may run on the client's cores
     assert check["pass"] is False and [f[0] for f in check["failed"]] == ["a", "d"]
     assert check["metrics"]["container_share"] == round(4.1 / 16, 3) and check["metrics"]["server_cores_used"] == 1.0
+    # (c) is AIPerf's own use, 1 core of its 2 (50%); core 12 being 30% busy host-wide is data only
+    assert check["metrics"]["aiperf_pinned_share"] == 0.5 and check["metrics"]["pinned_cores_host_busy_mean"] == 0.15
+    assert check["metrics"]["cgroup_cpu_max"] == "1600000 100000" and check["metrics"]["allotted_vcpus"] == 16.0
 
 
 def test_the_sample_says_none_for_what_the_machine_does_not_show(tmp_path):
@@ -126,7 +130,7 @@ def test_the_sample_says_none_for_what_the_machine_does_not_show(tmp_path):
     assert out["server"] == {"pids": 0, "cpu_s": None, "cores": None}
     assert out["container"] == {"cpu_s": None, "cores": None} and out["pinned_cores_host_busy"] is None
     assert out["aiperf"]["cpu_s"] >= 0
-    assert [f[0] for f in out["contention_check"]["failed"]] == ["a", "b", "c", "d"]  # unmeasured is no proof
+    assert [f[0] for f in out["contention_check"]["failed"]] == ["a", "b", "d"]  # unmeasured is no proof
 
 
 def test_the_aiperf_job_samples_only_when_asked(tmp_path, monkeypatch):
@@ -176,6 +180,7 @@ def clean_sample(**changes):
     sample = {"throttling": {"before": {"source": "/sys/fs/cgroup/cpu.stat", "nr_throttled": 7, "throttled_usec": 900.0},
                              "after": {"source": "/sys/fs/cgroup/cpu.stat", "nr_throttled": 7, "throttled_usec": 900.0}},
               "container": {"cpu_s": 40.0, "cores": 4.0}, "cpu_limit": 16.0, "cpu_limit_from": "quota",
+              "aiperf": {"cpu_s": 8.0, "cores": 0.8},
               "pinned_cores_host_busy": {"12": 0.3, "13": 0.3, "14": 0.3, "15": 0.3},
               "server_affinity": {"50/50": list(range(12)), "52/53": list(range(12))},
               "server": {"pids": 3, "cpu_s": 10.0, "cores": 1.0}}
@@ -189,7 +194,7 @@ CORES = [12, 13, 14, 15]
 def test_a_level_without_contention_passes_and_says_its_metrics_and_thresholds():
     check = colocated.contention_check(clean_sample(), CORES)
     assert check["pass"] is True and check["failed"] == []
-    assert check["metrics"]["container_share"] == 0.25 and check["metrics"]["pinned_cores_busy_mean"] == 0.3
+    assert check["metrics"]["container_share"] == 0.25 and check["metrics"]["aiperf_pinned_share"] == 0.2
     assert check["metrics"]["server_pinned_core_overlap"] == [] and check["metrics"]["server_cores_used"] == 1.0
     assert check["thresholds"]["CONTAINER_SHARE_MAX"] == 0.75 and check["thresholds"]["PINNED_BUSY_MAX"] == 0.90
 
@@ -200,7 +205,8 @@ def test_a_level_without_contention_passes_and_says_its_metrics_and_thresholds()
     ({"throttling": {"before": {"nr_throttled": 7, "throttled_usec": 900.0},
                      "after": {"nr_throttled": 7, "throttled_usec": 1200.0}}}, "a"),
     ({"container": {"cpu_s": 120.0, "cores": 12.0}}, "b"),  # exactly 75% of 16
-    ({"pinned_cores_host_busy": {"12": 0.95, "13": 0.9, "14": 0.85, "15": 0.9}}, "c"),  # 90% on average
+    ({"aiperf": {"cpu_s": 36.0, "cores": 3.6}}, "c"),  # AIPerf itself used 90% of its 4 cores
+    ({"aiperf": {"cpu_s": None, "cores": None}}, "c"),
     ({"server_affinity": {"50/50": list(range(16))}}, "d"),
     ({"server_affinity": {}}, "d"),
 ])
@@ -261,3 +267,38 @@ def test_a_failed_level_is_reported_and_the_cli_exits_3_after_writing_the_sweep(
     assert "CONTENTION: level 2" in err and "level 1" not in err
     monkeypatch.setattr(loadtest, "loadtest", lambda *a: dirs[:1])
     assert cli.main(args) == 0
+
+
+def test_other_tenants_load_on_the_pinned_cores_is_data_not_a_failure():
+    check = colocated.contention_check(clean_sample(pinned_cores_host_busy={"12": 0.99, "13": 0.95, "14": 0.9,
+                                                                            "15": 0.97}), CORES)
+    assert check["pass"] is True and check["metrics"]["pinned_cores_host_busy_mean"] == 0.952
+
+
+def test_the_cores_are_the_least_host_busy_not_pinned_to_the_server():
+    allowed = list(range(16))
+    busy = {c: 0.5 for c in allowed} | {1: 0.0, 3: 0.01, 5: 0.0, 7: 0.02, 9: 0.03, 12: 0.0}
+    choice = colocated.choose_cores(allowed, {101: allowed, 102: [12, 13]}, busy=busy)
+    assert choice["cores"] == [1, 3, 5, 7] and "least host-busy" in choice["rule"]  # 12 is the server's
+    tie = colocated.choose_cores(allowed, {101: allowed}, busy={c: 0.0 for c in allowed})
+    assert tie["cores"] == [12, 13, 14, 15]  # ties to the higher core
+    assert colocated.choose_cores(allowed, {101: allowed})["cores"] == [12, 13, 14, 15]  # no sample: the last 4
+
+
+def test_the_probe_samples_the_hosts_load_once_and_chooses_by_it(tmp_path, monkeypatch):
+    proc, sysfs = tmp_path / "proc", tmp_path / "sys"
+    ticks = {c: [0, 0, 0, 1000] for c in range(16)}
+    fake_proc(proc, SERVER, cpus=ticks)
+    fake_cgroup(sysfs)
+    monkeypatch.setattr(colocated, "own_affinity", lambda: list(range(16)))
+    slept = []
+
+    def sleep(seconds):  # over the sample, every core is busy but 2, 4, 6 and 8
+        slept.append(seconds)
+        fake_proc(proc, SERVER, cpus={c: [0, 0, 0, 2000] if c in (2, 4, 6, 8) else [900, 0, 0, 1100]
+                                      for c in range(16)})
+    found = colocated.probe(proc, sysfs, sample_s=2.0, sleep=sleep)
+    assert slept == [2.0] and found["choice"]["cores"] == [2, 4, 6, 8]
+    sample = found["choice"]["host_busy_sample"]
+    assert sample["seconds"] == 2.0 and sample["chosen"] == {"2": 0.0, "4": 0.0, "6": 0.0, "8": 0.0}
+    assert sample["allowed_least"] == [0.0, 0.0, 0.0, 0.0] and sample["allowed_mean"] == 0.675

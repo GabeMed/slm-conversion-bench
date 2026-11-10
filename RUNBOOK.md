@@ -494,13 +494,14 @@ At the end of the day, check the console's Pods page, and the network volume if 
     (`reference_versions`).
   - **No CPU pod in the server's data center: `--client colocated`** (opt-in; the default is `--client pod`,
     above). AIPerf runs on the serving pod itself, in the same training environment from the volume, pinned
-    with `taskset` to 4 cores the server is not pinned to (vLLM unpinned: the last 4 of the container's
-    CPUs), against vLLM on the loopback, with no tunnel and no key. Each manifest records the client
+    with `taskset` to 4 cores the server is not pinned to (the 4 least host-busy of the container's
+    CPUs, by a 2 s /proc/stat sample at the sweep's start), against vLLM on the loopback, with no tunnel and no key. Each manifest records the client
     (`client`: kind, pod, pinned cores, nproc, the cgroup's cpuset and CPU quota), the loopback's calibration
     (`loopback_calibration`), and per level the CPU AIPerf, the server and the container used over AIPerf's
     run (`cpu_sample`). The server's threads that could run on the 4 cores are kept off them first
     (`client.server_isolated`). Each level records `contention_check` (see runpod_apps/colocated.py): it fails
-    if the cgroup throttled, the container used >= 75% of its vCPUs, the pinned cores were >= 90% busy, or the
+    if the cgroup throttled, the container used >= 75% of its vCPUs, AIPerf used >= 90% of its 4 pinned cores
+    (its own CPU time; the cores' host-wide busy share is recorded apart), or the
     server could run on them. A sweep with a failed level is still completed and written, and `bench loadtest`
     exits 3, printing `CONTENTION: level N ... failed <which>`. Every sweep of one candidate under one
     configuration must use the same client: a sweep on the other kind is refused before it starts. The fallback is a deviation: it is recorded in
