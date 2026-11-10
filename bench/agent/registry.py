@@ -21,8 +21,9 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from bench import barrier, paths
 from bench.agent.hooks import HarnessError
@@ -32,6 +33,10 @@ from bench.provenance import SECRET_MIN_LENGTH, redact  # noqa: F401  (redact: r
 CALL_SITES_FILE = "registry/call_sites.json"
 TEST_DIR = "registry/test"
 SOURCE_SPLITS = ("train", "calib")
+# Another git process (an editor, a `git status` in another shell, a merge in this checkout) holds the
+# index or a ref for a moment: wait for it, a bounded number of times, rather than fail a finished run.
+LOCK_WAITS_S = (0.5, 1, 2, 4, 8, 15)
+_LOCKED = ("index.lock", "cannot lock ref")
 
 
 class RegistryError(HarnessError):
@@ -44,10 +49,21 @@ def _git(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(paths.ROOT), *args], capture_output=True, text=True)
 
 
+def _git_waiting_for_locks(*args: str) -> subprocess.CompletedProcess:
+    """`_git`, tried again while another git process holds the index or a ref (`LOCK_WAITS_S`, about
+    30 s in all); any other failure, or a lock that outlasts the waits, is returned as it is."""
+    for wait in (*LOCK_WAITS_S, None):
+        result = _git(*args)
+        if result.returncode == 0 or wait is None or not any(m in result.stderr for m in _LOCKED):
+            return result
+        time.sleep(wait)
+    return result
+
+
 def _commit(rel: str, message: str) -> None:
     """Commit exactly one file, leaving anything else staged or changed as it was."""
     for args in (("add", "--", rel), ("commit", "-q", "-m", message, "--only", "--", rel)):
-        result = _git(*args)
+        result = _git_waiting_for_locks(*args)
         if result.returncode != 0:
             raise RegistryError(f"git {args[0]} {rel} failed: {result.stderr.strip() or result.stdout.strip()}")
 
@@ -94,10 +110,10 @@ def check_keys(key_envs: List[str]) -> None:
                                       f"record without corrupting it")
 
 
-def registry_pushed() -> None:
+def registry_pushed() -> str:
     """Every earlier registry commit is on origin's main as a fetch finds it now (the barrier's
     `fetch_origin_main`, never a remote-tracking ref that may be stale): a record that lives only in a
-    local clone is no record."""
+    local clone is no record. Returns the commit origin's main is at."""
     remote_commit, why_not = barrier.fetch_origin_main(paths.ROOT)
     if remote_commit is None:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {why_not}: the registry cannot be "
@@ -110,10 +126,12 @@ def registry_pushed() -> None:
     if unpushed:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {len(unpushed)} commit(s) of registry/ are "
                                       f"not on origin/main: push the registry first")
+    return remote_commit
 
 
 def registered_call_sites() -> Dict[str, Any]:
-    """The committed set, for an execution on test: {"call_sites": [...], "sha256": ...}."""
+    """The committed set, for an execution on test: {"call_sites": [...], "sha256": ..., "origin": the
+    commit origin's main is at, the published registry}."""
     path = paths.ROOT / CALL_SITES_FILE
     if not path.is_file():
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} does not exist "
@@ -122,11 +140,33 @@ def registered_call_sites() -> Dict[str, Any]:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} is not committed")
     if _git("diff", "--quiet", "HEAD", "--", CALL_SITES_FILE).returncode != 0:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} has uncommitted changes")
-    registry_pushed()
+    origin = registry_pushed()
     call_sites = json.loads(path.read_text()).get("call_sites") or []
     if not call_sites:
         raise barrier.TestSplitLocked(f"refusing to touch the test split: {CALL_SITES_FILE} registers no call site")
-    return {"call_sites": call_sites, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    return {"call_sites": call_sites, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "origin": origin}
+
+
+def done_runs_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg_hash: str, ref: str) -> List[str]:
+    """The test executions the registry at `ref` records as `done` for this configuration, keyed as the
+    report keys one (type, arm, engine, pre-registration): more than one is "several runs" there, and that
+    arm's comparisons get no verdict (SPEC 6.1)."""
+    listed = _git("ls-tree", "-r", "--name-only", ref, TEST_DIR)
+    if listed.returncode != 0:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot list {TEST_DIR} at {ref} "
+                                      f"({listed.stderr.strip()})")
+    found = []
+    for rel in listed.stdout.split():
+        if not rel.endswith(".manifest.json"):
+            continue
+        shown = _git("show", f"{ref}:{rel}")
+        if shown.returncode != 0:
+            raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot read {rel} at {ref}")
+        ended = json.loads(shown.stdout)
+        if ended.get("status") == "done" and (ended.get("type"), ended.get("arm"), ended.get("engine"),
+                                              ended.get("prereg_hash")) == (run_type, arm, engine, prereg_hash):
+            found.append(ended.get("run_id") or Path(rel).name.rsplit(".", 2)[0])
+    return sorted(found)
 
 
 # ---------------------------------------------------------------- executions on test

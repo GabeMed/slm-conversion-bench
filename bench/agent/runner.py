@@ -495,7 +495,8 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
              fields: Dict[str, Any], key_envs: List[str]) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
     """Create runs/<run_id>/ with its manifest and configuration snapshot, after every precondition.
     On the test split: the registered call sites are required, every key used is long enough to be
-    redacted, and the intent is committed and published first (a refusal there leaves no run).
+    redacted, no completed run of the same configuration is in the published registry, and the intent
+    is committed and published first (a refusal there leaves no run).
     Returns (run_dir, manifest, the call sites a test run may emit or None)."""
     if split == "test":
         registry.check_keys(key_envs)
@@ -512,6 +513,14 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
     }
     if test is not None:
         manifest.update({"prereg_hash": barrier.prereg_hash_in_force(config), "call_sites_registry_sha256": test["sha256"]})
+        done = registry.done_runs_of(run_type, manifest.get("arm"), manifest.get("engine"), manifest["prereg_hash"],
+                                     test["origin"])
+        if done:  # before the intent: a refusal here leaves no record and spends nothing
+            raise barrier.TestSplitLocked(
+                f"refusing to run {run_type} {manifest.get('arm')}{'' if manifest.get('engine') is None else ' ' + manifest['engine']} "
+                f"on the test split: {', '.join(done)} already completed it under this pre-registration, and a second "
+                f"completed run leaves its comparisons without a verdict (SPEC 6.1). Go on with the next configuration; "
+                f"a defect that needs it run again needs `bench prereg --replace` first")
         manifest["registry_intent"] = registry.commit_intent(manifest)
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
