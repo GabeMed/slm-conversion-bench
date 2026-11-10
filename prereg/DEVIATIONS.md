@@ -263,3 +263,36 @@ Changes after Stage 0 that can change a result or its interpretation.
   (`bench verify`: 0 divergences); on the calibration report only labels change. Direction: (1) against the SLM:
   it removes a hybrid's route to confirming V3 and makes AV2 easier to win against the SLM; (2) against
   confirming: the comparator is never dearer, and refuting takes both comparators as before; (3) none; (4) none
+- 2026-11-10 · patch 16 extended (vendor/chess/src/workflow/agents/agent.py): the agent's tool is now the first
+  `<tool_call>` block that names one of its tools, not the first block. Decided after reading B1's calibration
+  pilot: in agent-B1-calib-20261110T035103.709962Z (k = 3), gpt-oss-120b wrote the tag inside a sentence before a
+  valid call in 2 of 50 questions (874 and 1181, agent_ir ir:0: "We need to output a <tool_call> with the tool name
+  ...", then the call); the old rule read "with", rejected it, and that agent's loop ended. Re-parsing every recorded
+  agent answer offline with both rules, only these change: B1's k = 3 pilot 2 of 481 answered agent calls (874,
+  1181; both still scored correct there); the granite-4.2-8b zero-shot replay 4 of 2,198 (182, 430, 515, 953;
+  agent_ir and agent_ss), which moves granite's J6 mean by under 0.001 against qwen3-8b's lead of 0.21, so the
+  choice stands. Zero change in B0's calibration pilot (2,198), K1 (9,167), B3's calibration run (2,200), B4's
+  (184240: 1,760; its resume 191453: 2,200), the B4 replay (2,198), the Qwen base replays (2 x 2,198), the cheap_alt
+  replays (40, 625, 2,198) and B1's k = 0 pilot and first k = 3 pilot (375, 402). No answer the old rule accepted
+  changes its tool. Direction: favours B1, the comparator (only gpt-oss writes this form; the SLM arms had no such
+  failure on calib), so against confirming the SLM's non-inferiority. B1's few-shot k (b1k, k = 3) and the pilot
+  readings were made under the old rule; k = 0's pilot had no affected answer, k = 3's had the two above
+- 2026-11-10 · analysis code changed after Stage 0, before any execution on test: bench/evaluate.py records the
+  wall-clock seconds of each gold and each prediction (`gold_seconds`, `pred_seconds`), and bench/judge/j1.py
+  refuses eval executions of one split whose golds failed (`gold_error`, a timeout included) on different
+  questions. The evaluator's 60 s timeout is wall clock, and the gold of test question 701 (codebase_community)
+  timed out on the machine that built the data (data/MANIFEST.json, gold_observed.timeouts; also train 1131), so it
+  could time out in one arm's eval and not in another's. Rule, declared now: a gold that fails is wrong for the arm
+  and stays in n; with the refusal, 701 is wrong for every arm or scored for every arm, and the test runs are
+  evaluated on an idle machine, one after the other (RUNBOOK step 14). Direction: none between arms (it removes a
+  timing asymmetry); if 701's gold times out, every arm's EX is lower by 1/498
+- 2026-11-10 · SPEC §6.1 and §8 now declare exploratory readings before the test. They change no verdict, margin,
+  arm or allocation. The new text covers the primary descriptive metric per call site, beside a trivial rule, the
+  base, the adapter, the cheap alternative and the teacher's repetition. It also covers question-level intervals,
+  the published family of cuts, and a reading rule for the c1 learning curve. Two readings may be run on the test:
+  the teacher on its own test calls, and c0 alone swapped live (extension 1). The call sites are classified against
+  the paper's conditional claim; the classification was written after the calibration and is shown beside the
+  registered predictions. Three limits of the training data are added (207 of 826 SQL rows wrong against the
+  gold; an 87.6% always-"No" floor at the column filter; 1,534 questions on the 11 databases). Together they bound
+  the reading in both directions: a loss outside the claim's antecedent does not refute it, and agreement at the
+  column filter does not support it without an end-to-end measure
