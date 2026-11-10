@@ -842,7 +842,9 @@ def _a5(data) -> Dict[str, str]:
 
 def _appendix_b(data) -> Dict[str, str]:
     """Appendix B is decided on repair alone (T4): the routine's agreement with the teacher is a proxy
-    that supports no claim (D15), shown beside it with no effect on the verdict."""
+    that supports no claim (D15), shown beside it with no effect on the verdict. With fewer repair calls
+    (`revise`, with gold) than `allocation.min_calls`, the floor every per-call reading keeps (J7, A5), it is
+    inconclusive by design."""
     row = {"claim": "Appendix B (this workload): the LLM keeps unstructured error resolution (p.16)",
            "power": _power(data["repair_test"])}
     per_call, repair = data["judgments"]["per_call"], data["repair_test"]
@@ -856,6 +858,11 @@ def _appendix_b(data) -> Dict[str, str]:
     result = (f"repair: SLM − teacher {_pp(repair['diff'])} (Δ {_margin(repair['delta'])}, {_ci(repair)}), {repaired}; "
               f"routine agreement with the teacher, a proxy with no effect on the verdict (D15): "
               + (", ".join(f"{s} {_pct(r)}" for s, r in sorted(routine.items())) or "none measured"))
+    floor = data.get("min_calls")
+    calls = ((per_call["per_call_site"].get("revise") or {}).get("gold") or {}).get("n", 0)
+    if floor is not None and calls < floor:  # too few repairs for any reading, whatever the bootstrap says
+        return {**row, "result": f"{calls} repair calls; " + result,
+                "verdict": f"inconclusive by design ({calls} repair calls, fewer than allocation.min_calls = {floor})"}
     verdict = _several(data, repair) or {"worse": "confirms (the SLM is worse on repair)",
                                          "non-inferior": "refutes (the SLM is non-inferior on repair)"}.get(repaired) \
         or _inconclusive(repair)

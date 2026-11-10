@@ -362,8 +362,10 @@ def test_a4_states_b5s_own_outcome_and_a5_honours_several_runs():
         "no verdict (several test runs of one configuration of B4: b4-a, b4-b)"
 
 
-def per_call(rates):
-    return {"per_call_site": {site: {"agreement": {"rate": rate}} for site, rate in rates.items()}}
+def per_call(rates, repairs=100):
+    """J2's per-call result: the routine sites' agreement, and `repairs` revise calls with gold."""
+    return {"per_call_site": {**{site: {"agreement": {"rate": rate}} for site, rate in rates.items()},
+                              "revise": {"agreement": None, "gold": {"n": repairs}}}}
 
 
 def test_appendix_b_is_decided_on_repair_alone():
@@ -383,6 +385,20 @@ def test_appendix_b_is_decided_on_repair_alone():
     assert appendix_b(None)["verdict"] == "no data"
     several = appendix_b({**j4(True), "several_runs": ["r-a", "r-b"]})
     assert several["verdict"] == "no verdict (several test runs of one configuration: r-a, r-b)"
+
+
+def test_appendix_b_is_inconclusive_by_design_below_min_calls_repairs():
+    """Fewer repair calls than allocation.min_calls (calib had 5 revise calls, K1 6, against 100): no reading
+    of repair, whatever its bootstrap, any more than a call site that thin counts for A5 or J7."""
+    def appendix_b(repair, repairs):
+        return row(report.claims_map(data_with({}, {}, repair=repair, per_call=per_call({"filter_column": 0.97}, repairs))),
+                   "Appendix B")
+    for repair in (j4(False, diff=-0.2), j4(True), j4(False, diff=-0.02)):
+        thin = appendix_b(repair, 6)
+        assert thin["verdict"] == "inconclusive by design (6 repair calls, fewer than allocation.min_calls = 100)"
+        assert thin["result"].startswith("6 repair calls; repair: SLM − teacher")
+    assert appendix_b(j4(False, diff=-0.2), 99)["verdict"].startswith("inconclusive by design (99 repair calls")
+    assert appendix_b(j4(False, diff=-0.2), 100)["verdict"] == "confirms (the SLM is worse on repair)"  # the floor counts
 
 
 def test_the_steps_table_reads_the_judgments():
