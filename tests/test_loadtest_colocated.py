@@ -269,6 +269,27 @@ def test_a_failed_level_is_reported_and_the_cli_exits_3_after_writing_the_sweep(
     assert cli.main(args) == 0
 
 
+def test_a_colocated_level_without_a_contention_check_fails_as_not_measured(tmp_path):
+    from bench import loadtest
+
+    def level(name, client, **extra):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps({"run_id": name, "level_index": 0, "concurrency": 1,
+                                                     "where": "runpod", "client": client, **extra}))
+        return d
+
+    missing = level("colocated-missing", {"kind": "colocated"})
+    null = level("colocated-null", {"kind": "colocated"}, contention_check=None)
+    for d in (missing, null):
+        line, = loadtest.contention_failures([d])
+        assert line.startswith(f"CONTENTION: level 1 (concurrency 1, runs/{d.name})") and "not measured" in line
+    # a CPU pod's client shares no cores with the server: no check, and none needed
+    assert loadtest.contention_failures([level("pod", {"kind": "pod"}), level("pod-null", {"kind": "pod"},
+                                                                            contention_check=None)]) == []
+    assert loadtest.contention_failures([level("legacy-pod", None)]) == []  # a RunPod level from before the record
+
+
 def test_other_tenants_load_on_the_pinned_cores_is_data_not_a_failure():
     check = colocated.contention_check(clean_sample(pinned_cores_host_busy={"12": 0.99, "13": 0.95, "14": 0.9,
                                                                             "15": 0.97}), CORES)
