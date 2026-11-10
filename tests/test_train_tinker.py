@@ -313,6 +313,7 @@ def test_bench_train_on_tinker_writes_the_adapter_and_manifest_as_modal_does(tmp
     assert stats["trained"] == {"r": 8, "lora_alpha": 16, "target_modules": sorted(config["train"]["lora"]["target_modules"]),
                                 "rank_pattern": {}, "alpha_pattern": {}}
     assert "lora.dropout" in stats["run"]["differences"] and stats["versions"]["tinker"] == "0.39.0"
+    assert stats["run"]["base_snapshot"] == "headers-only"  # the converter read the base's headers, not its weights
     assert "price" not in json.dumps(stats)
     assert not list((paths.ROOT / "train" / "adapters" / ".tinker").iterdir())  # the pending record is cleared
     out = capsys.readouterr().out
@@ -497,6 +498,136 @@ def test_a_missing_cookbook_is_refused_by_name(monkeypatch):
     monkeypatch.setitem(sys.modules, "tinker_cookbook", None)
     with pytest.raises(tt.TinkerMissing, match="install env/tinker"):
         tt.base_snapshot({"base": dict(TINY)})
+
+
+# ---------------------------------------------------------------- the header-only base
+
+class LocalHub:
+    """A snapshot directory standing in for the HF Hub: its files, and byte ranges of them (as range requests)."""
+
+    def __init__(self, directory, size_offset=0):
+        self.directory, self.size_offset, self.reads = Path(directory), size_offset, []
+
+    def files(self):
+        return sorted(p.name for p in self.directory.iterdir())
+
+    def download(self, name):
+        return str(self.directory / name)
+
+    def read(self, name, start, end):
+        self.reads.append((name, start, end))
+        with open(self.directory / name, "rb") as f:
+            f.seek(start)
+            return f.read(end - start + 1), (self.directory / name).stat().st_size + self.size_offset
+
+
+def tiny_snapshot():
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(TINY["repo"], revision=TINY["revision"], allow_patterns=["*.json", "*.safetensors"]))
+
+
+def test_a_header_only_base_reads_as_the_real_one_and_takes_no_disk(tmp_path):
+    pytest.importorskip("torch")  # safe_open(framework="pt")
+    real = tiny_snapshot()
+    hub = LocalHub(real)
+    base = tt.header_only_base(TINY["repo"], TINY["revision"], tmp_path, hub)
+    assert base == tmp_path / TINY["repo"].replace("/", "--") / TINY["revision"]  # apart from the HF cache
+    assert sorted(p.name for p in base.iterdir()) == ["HEADERS-ONLY.txt", "config.json", "model.safetensors"]
+    assert tt.header_shapes(base) == tt.header_shapes(real) and tt.header_shapes(base)["model.safetensors"]
+    shard = base / "model.safetensors"
+    assert shard.stat().st_size == (real / "model.safetensors").stat().st_size
+    assert shard.stat().st_blocks * 512 < 1 << 20  # sparse: the header on disk, not the tensors
+    length = int.from_bytes(shard.read_bytes()[:8], "little")
+    assert hub.reads == [("model.safetensors", 0, 7), ("model.safetensors", 8, 8 + length - 1)]
+    assert (base / "config.json").read_bytes() == (real / "config.json").read_bytes()
+    assert "NOT the weights" in (base / "HEADERS-ONLY.txt").read_text()
+    assert not [p for p in base.parent.iterdir() if p != base]  # the build directory is gone
+
+    class Offline(LocalHub):
+        def files(self):
+            raise AssertionError("built once, then reused")
+
+    assert tt.header_only_base(TINY["repo"], TINY["revision"], tmp_path, Offline(real)) == base
+
+
+def test_a_header_that_does_not_describe_the_served_file_is_refused(tmp_path):
+    pytest.importorskip("torch")
+    with pytest.raises(TrainError, match="its header describes .* bytes, the Hub serves"):
+        tt.header_only_base(TINY["repo"], TINY["revision"], tmp_path, LocalHub(tiny_snapshot(), size_offset=1))
+    assert not (tmp_path / TINY["repo"].replace("/", "--") / TINY["revision"]).exists()
+
+
+def test_the_cookbook_converts_an_adapter_against_a_header_only_base_as_against_the_real_one(tmp_path):
+    """tinker-cookbook's weights.build_lora_adapter, on a Tinker-format adapter for the tiny Qwen3: the same PEFT
+    adapter from the real base and from its header-only copy (env/tinker)."""
+    pytest.importorskip("tinker_cookbook")
+    import torch
+    from safetensors.torch import load_file, save_file
+    from tinker_cookbook import weights
+
+    real = tiny_snapshot()
+    base = tt.header_only_base(TINY["repo"], TINY["revision"], tmp_path / "headers", LocalHub(real))
+    rank, torch_gen = 4, torch.Generator().manual_seed(0)
+    shapes = tt.header_shapes(real)["model.safetensors"]
+    modules = [k for k in shapes if k.endswith("_proj.weight")]
+    assert len(modules) == 2 * 7  # 2 layers x q k v o gate up down
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    tensors = {}
+    for key in modules:
+        (out_features, in_features), _ = shapes[key]
+        name = "base_model.model." + key.removesuffix(".weight")
+        tensors[f"{name}.lora_A.weight"] = torch.randn(rank, in_features, generator=torch_gen)
+        tensors[f"{name}.lora_B.weight"] = torch.randn(out_features, rank, generator=torch_gen)
+    save_file(tensors, str(raw / "adapter_model.safetensors"))
+    (raw / "adapter_config.json").write_text(json.dumps({"r": rank, "lora_alpha": 8}))
+
+    outputs = {}
+    for label, directory in (("real", real), ("headers", base)):
+        out = tmp_path / f"peft-{label}"
+        weights.build_lora_adapter(base_model=str(directory), adapter_path=str(raw), output_path=str(out))
+        config = json.loads((out / "adapter_config.json").read_text())
+        config.pop("base_model_name_or_path")
+        outputs[label] = config, load_file(str(out / "adapter_model.safetensors"))
+    (real_config, real_tensors), (config, converted) = outputs["real"], outputs["headers"]
+    assert config == real_config and config["r"] == rank
+    assert sorted(config["target_modules"]) == sorted({k.split(".")[-2] for k in modules})
+    assert converted.keys() == real_tensors.keys() and len(converted) == 2 * len(modules)
+    assert all(torch.equal(converted[k], real_tensors[k]) for k in converted)
+
+
+def _hub_reachable():
+    import socket
+
+    try:
+        socket.create_connection(("huggingface.co", 443), timeout=5).close()
+        return True
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _hub_reachable(), reason="needs the HF Hub (a few hundred KB of headers)")
+def test_the_header_only_qwen3_8b_reads_as_the_hub_describes_it(tmp_path):
+    """The real base, by range requests at the revision config.yaml pins: each shard's header as the Hub's own
+    safetensors metadata gives it, at the shard's size, in under a megabyte of disk."""
+    pytest.importorskip("torch")
+    from huggingface_hub import get_safetensors_metadata
+
+    from bench.contracts.config import load_config
+
+    qwen = next(c for c in load_config(str(paths.ROOT / "config.yaml"))["roles"]["slm_candidates"]
+                if c["hf"]["repo"] == "Qwen/Qwen3-8B")["hf"]
+    base = tt.header_only_base(qwen["repo"], qwen["revision"], tmp_path)
+    hub = get_safetensors_metadata(qwen["repo"], revision=qwen["revision"])
+    shapes = tt.header_shapes(base)
+    assert shapes == {shard: {k: (tuple(t.shape), t.dtype) for k, t in meta.tensors.items()}
+                      for shard, meta in hub.files_metadata.items()}
+    assert sum(len(t) for t in shapes.values()) == 399  # 36 layers x 11, the embeddings, the norm, lm_head
+    sizes = {p.name: p.stat().st_size for p in base.glob("*.safetensors")}
+    tensor_bytes = json.loads((base / "model.safetensors.index.json").read_text())["metadata"]["total_size"]
+    assert 0 < sum(sizes.values()) - tensor_bytes < 1 << 20  # the shards' real sizes: their tensors and headers
+    assert sum(p.stat().st_blocks * 512 for p in base.iterdir()) < 1 << 20
 
 
 # ---------------------------------------------------------------- the probe

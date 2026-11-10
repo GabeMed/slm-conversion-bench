@@ -24,8 +24,10 @@ optimizer loop on this machine:
     export      `save_weights_external`, downloaded and converted to a PEFT adapter by tinker-cookbook's
                 `weights.download` and `weights.build_lora_adapter` (adapter_config.json +
                 adapter_model.safetensors, what vLLM's `--lora-modules` and HF PEFT load); the converter reads
-                the base's safetensors, so the base at its pinned revision is downloaded into the HF cache, with
-                the cookbook checked, before anything is paid for (`base_snapshot`)
+                the base's config.json and safetensors headers only, so a header-only base at the pinned revision
+                (the real headers by HTTP range request, in sparse files of the shards' sizes; no weights) is
+                built apart from the HF cache, with the cookbook checked, before anything is paid for
+                (`base_snapshot`); the manifest records it (stats.run.base_snapshot: headers-only)
 
 What Tinker cannot honour is never silent: configs/train-tinker.yaml's `accept_differences` must name every
 difference this plan has (`differences`), and the manifest records them; a hyper-parameter this module does not
@@ -47,8 +49,10 @@ train/adapters/.probe/<cluster>/, never served nor registered, and never in the 
 """
 import json
 import math
+import os
 import random
 import shutil
+import struct
 import sys
 import tempfile
 import time
@@ -310,24 +314,139 @@ def train_on_tinker(sdk: Any, run: Dict[str, Any], encoded: List[Dict[str, List]
     return stats
 
 
-def base_snapshot(plan: Dict[str, Any]) -> str:
+BASE_SNAPSHOT = "headers-only"  # what the manifest records of the base the converter read (stats.run.base_snapshot)
+HEADERS_ONLY_NOTE = "HEADERS-ONLY.txt"
+SPARSE_PROBE_BYTES = 64 << 20
+
+
+class Hub:
+    """What `header_only_base` asks of the HF Hub, at one pinned revision (the tests stand a local directory in)."""
+
+    def __init__(self, repo: str, revision: str):
+        self.repo, self.revision = repo, revision
+
+    def files(self) -> List[str]:
+        from huggingface_hub import HfApi
+
+        return HfApi().list_repo_files(self.repo, revision=self.revision)
+
+    def download(self, name: str) -> str:
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(self.repo, name, revision=self.revision)
+
+    def read(self, name: str, start: int, end: int) -> Tuple[bytes, int]:
+        """Bytes start..end (inclusive) of `name`, by an HTTP range request, and the file's whole size."""
+        from huggingface_hub import hf_hub_url
+        from huggingface_hub.utils import build_hf_headers, get_session, hf_raise_for_status
+
+        response = get_session().get(hf_hub_url(self.repo, name, revision=self.revision), timeout=60,
+                                     headers={**build_hf_headers(), "Range": f"bytes={start}-{end}"})
+        hf_raise_for_status(response)
+        content_range = response.headers.get("Content-Range", "")
+        if response.status_code != 206 or not content_range.startswith(f"bytes {start}-"):
+            raise TrainError(f"the Hub did not answer a range request for {name} (HTTP {response.status_code}, "
+                             f"Content-Range {content_range!r})")
+        return response.content, int(content_range.rsplit("/", 1)[1])
+
+
+def _check_sparse(directory: Path) -> None:
+    """A file extended by truncate takes no disk here, or the header-only base would take the base's whole size."""
+    probe = directory / "sparse.probe"
+    probe.touch()
+    os.truncate(probe, SPARSE_PROBE_BYTES)
+    used = os.stat(probe).st_blocks * 512
+    probe.unlink()
+    if used >= SPARSE_PROBE_BYTES // 2:
+        raise TrainError(f"{directory}'s file system does not keep sparse files ({used} bytes on disk for an empty "
+                         f"{SPARSE_PROBE_BYTES}-byte file): the header-only base would take the base's whole size")
+
+
+def header_shapes(directory: Path) -> Dict[str, Dict[str, Tuple[Tuple[int, ...], str]]]:
+    """Each shard's tensors, shapes and dtypes, read as the converter reads them (safe_open: the header only)."""
+    from safetensors import safe_open
+
+    shards = {}
+    for path in sorted(directory.glob("*.safetensors")):
+        with safe_open(str(path), framework="pt") as f:
+            shards[path.name] = {k: (tuple(f.get_slice(k).get_shape()), f.get_slice(k).get_dtype()) for k in f.keys()}
+    return shards
+
+
+def header_only_base(repo: str, revision: str, root: Path, hub: Optional[Hub] = None) -> Path:
+    """A directory the export's converter reads as the base at its pinned revision, without its weights:
+    config.json (and model.safetensors.index.json when the repo has one) as the Hub serves them, and each
+    top-level *.safetensors shard as a sparse file: the shard's real 8-byte length and JSON header (two range
+    requests), extended to the shard's real size with nothing written, so safetensors opens it (it checks the
+    size against the header) and lists the real names, shapes and dtypes. Its tensor data reads as zeros, so it
+    is kept at <root>/<repo with -- for />/<revision>, apart from the HF cache, with HEADERS-ONLY.txt saying so.
+    Built once (in a temporary directory, renamed into place when complete and checked), then reused."""
+    hub = hub or Hub(repo, revision)
+    target = root / repo.replace("/", "--") / revision
+    if (target / HEADERS_ONLY_NOTE).is_file():
+        if not header_shapes(target):
+            raise TrainError(f"{target} holds no safetensors header: delete it to build it again")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=f".{revision}.") as work:
+        build = Path(work)
+        _check_sparse(build)
+        files = hub.files()
+        shards = sorted(n for n in files if n.endswith(".safetensors") and "/" not in n)
+        if "config.json" not in files or not shards:
+            raise TrainError(f"{repo}@{revision} has no config.json or no top-level *.safetensors shard")
+        index = "model.safetensors.index.json"
+        for name in ["config.json"] + ([index] if index in files else []):
+            shutil.copyfile(hub.download(name), build / name)
+        for name in shards:
+            prefix, size = hub.read(name, 0, 7)
+            if len(prefix) != 8:
+                raise TrainError(f"{name}: the Hub answered {len(prefix)} bytes for its first 8")
+            (length,) = struct.unpack("<Q", prefix)
+            if not 0 < length <= min(100 << 20, size - 8):  # safetensors refuses headers over 100 MB
+                raise TrainError(f"{name}: a header of {length} bytes in a file of {size} is not safetensors")
+            header, _ = hub.read(name, 8, 8 + length - 1)
+            if len(header) != length:
+                raise TrainError(f"{name}: the Hub answered {len(header)} bytes of its {length}-byte header")
+            end = max((t["data_offsets"][1] for k, t in json.loads(header).items() if k != "__metadata__"), default=0)
+            if 8 + length + end != size:
+                raise TrainError(f"{name}: its header describes {8 + length + end} bytes, the Hub serves {size}")
+            (build / name).write_bytes(prefix + header)
+            os.truncate(build / name, size)
+        shapes = header_shapes(build)
+        if (build / index).is_file():
+            weight_map = json.loads((build / index).read_text())["weight_map"]
+            if weight_map != {k: shard for shard, tensors in shapes.items() for k in tensors}:
+                raise TrainError(f"{repo}@{revision}: the shards' headers disagree with {index}")
+        (build / HEADERS_ONLY_NOTE).write_text(
+            f"{repo}@{revision}, for tinker-cookbook's weights.build_lora_adapter, which reads config.json and the "
+            "safetensors headers only (bench/train_tinker.py, header_only_base). Each *.safetensors file here is "
+            "sparse: the shard's real header, then zeros to its real size. These are NOT the weights: never load "
+            "a model from this directory.\n")
+        os.replace(build, target)
+        build.mkdir()  # for TemporaryDirectory to remove
+    return target
+
+
+def base_snapshot(plan: Dict[str, Any], root: Optional[Path] = None) -> str:
     """What the export's converter reads, fetched before anything is paid for, so a missing package, a full disk
     or the HF Hub fails here and not after training. The converter (tinker-cookbook 0.6.1,
-    weights._artifacts.get_model_state_keys) opens the base's *.safetensors files themselves for their tensor
-    names, with no fallback to model.safetensors.index.json: the whole base at its pinned revision (~16 GB for
-    Qwen3-8B, kept in the HF cache)."""
+    weights.build_lora_adapter) reads the base's config.json and, through safetensors' safe_open, the headers of
+    its *.safetensors files (get_model_state_keys, get_model_state_shapes: tensor names and shapes, no tensor
+    data; no fallback to model.safetensors.index.json): `header_only_base` gives it those, under a megabyte
+    instead of the whole base (~16 GB for Qwen3-8B). The manifest says so (stats.run.base_snapshot)."""
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import constants
         from tinker_cookbook import weights  # noqa: F401 (the export's converter: missing, it fails here)
     except ImportError as e:
         raise TinkerMissing(f"`--on tinker` exports through tinker-cookbook, which is missing ({e}): install "
                             "env/tinker (uv pip install -r env/tinker/requirements.lock)") from None
+    root = root or Path(constants.HF_HOME) / "bench-headers-only"
     try:
-        return snapshot_download(plan["base"]["repo"], revision=plan["base"]["revision"],
-                                 allow_patterns=["*.json", "*.safetensors"])
+        return str(header_only_base(plan["base"]["repo"], plan["base"]["revision"], root))
     except Exception as e:  # noqa: BLE001 (network, auth, disk: all refuse before training)
-        raise TrainError(f"cannot fetch {plan['base']['repo']}@{plan['base']['revision']}, which the export's "
-                         f"converter reads: {type(e).__name__}: {e}") from None
+        raise TrainError(f"cannot fetch the headers of {plan['base']['repo']}@{plan['base']['revision']}, which "
+                         f"the export's converter reads: {type(e).__name__}: {e}") from None
 
 
 def export_adapter(external_weights: str, base_dir: str, out: Path) -> None:
@@ -450,7 +569,9 @@ def train_cluster(config_path: str, cluster: str, settings_path: str = SETTINGS,
         target.mkdir(parents=True)
         shutil.move(str(converted), str(target / "adapter"))
     adapter = target / "adapter"
-    stats = {**record["stats"], **token_stats, "backend": "tinker", "device": "tinker", "run": run,
+    # the converter read a header-only base (`base_snapshot`); recorded here, outside the key a re-run collects by
+    stats = {**record["stats"], **token_stats, "backend": "tinker", "device": "tinker",
+             "run": {**run, "base_snapshot": BASE_SNAPSHOT},
              "trained": trained, "collected_from_earlier_run": collected, "probe": probe,
              "versions": {"tinker": sdk.__version__, "tinker_cookbook": _cookbook_version()}}
     # Tinker bills tokens, not GPU-seconds: no GPU, no cost here (the tokens are in stats; no price in the repo)

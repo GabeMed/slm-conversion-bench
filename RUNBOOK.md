@@ -291,8 +291,10 @@ modal volume put slm-bench-adapters train/adapters/<c>/adapter /<adapter_sha256>
   `accept_differences` and recorded in the manifest. An adapter whose exported rank, alpha or modules differ
   from config.yaml is not installed.
 - Tinker bills per token. The manifest records the tokens, not a price.
-- Before any paid call it downloads the base at its pinned revision into the HF cache (~16 GB for
-  Qwen3-8B). The export's converter reads its safetensors.
+- Before any paid call it fetches the base's config.json and safetensors headers at the pinned revision
+  (under 1 MB), not its weights: the export's converter reads only those. They are kept as sparse files of
+  the shards' real sizes in `~/.cache/huggingface/bench-headers-only/`, apart from the HF cache. Never load a
+  model from there. The manifest records `stats.run.base_snapshot: headers-only`.
 - The exported weights stay on Tinker for `export_ttl_s`. Running the same command again collects them. Once
   they expire, it says so; delete the `train/adapters/.tinker/` file it names to train again.
 - A run interrupted before the export starts over: there is no mid-run checkpoint. Two processes on the same
