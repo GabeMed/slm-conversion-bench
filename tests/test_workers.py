@@ -497,7 +497,8 @@ def read_replay(run_dir):
     return json.loads((run_dir / "manifest.json").read_text()), read_calls(run_dir / "calls.jsonl")
 
 
-RUN_OWN = ("run_id", "started_at", "finished_at", "commit", "dirty", "dirty_paths", "dirty_paths_total", "workers")  # what is each run's own
+RUN_OWN = ("run_id", "started_at", "finished_at", "commit", "dirty", "dirty_paths", "dirty_paths_total", "workers",
+           "calls_sha256")  # what is each run's own (its calls carry its run_id and latencies)
 
 
 def test_three_workers_give_the_replay_of_one(tmp_path, monkeypatch, capsys):

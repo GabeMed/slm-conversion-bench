@@ -2,6 +2,7 @@
 and the execution uses exactly what was registered (configuration, splits, SPEC, data manifest)."""
 import hashlib
 import json
+import re
 import subprocess
 
 import pytest
@@ -179,3 +180,100 @@ def test_no_remote_no_test(tmp_path):
 def test_other_splits_are_never_locked(tmp_path):
     ensure_split_allowed("train", None, tmp_path)
     ensure_split_allowed("calib", None, tmp_path)
+
+
+# ---------------------------------------------------------------- an execution on test runs the registered code
+
+def git_out(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout
+
+
+@pytest.fixture
+def coded(repo):
+    """The repository with execution code and a .gitignore, registered at HEAD as `bench prereg` does."""
+    from bench.barrier import execution_code
+    (repo / ".gitignore").write_text("runs/\n")
+    (repo / "bench" / "agent").mkdir(parents=True)
+    (repo / "bench" / "agent" / "runner.py").write_text("x = 1\n")
+    (repo / "vendor" / "chess").mkdir(parents=True)
+    (repo / "vendor" / "chess" / "agent.py").write_text("y = 1\n")
+    (repo / "bench" / "judge").mkdir()
+    (repo / "bench" / "judge" / "j4.py").write_text("z = 1\n")  # analysis code: not the execution code's
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "code")
+    registered = {"commit": git_out(repo, "rev-parse", "HEAD").strip(), "execution_code": execution_code(repo)}
+    register(repo, **registered)
+    return repo, registered
+
+
+def test_the_execution_code_is_the_agent_chess_the_serving_plan_and_the_curation(coded):
+    from bench.barrier import EXECUTION_CODE
+    repo, registered = coded
+    assert sorted(registered["execution_code"]) == ["bench/agent/runner.py", "vendor/chess/agent.py"]
+    assert registered["execution_code"]["vendor/chess/agent.py"] == sha(repo / "vendor" / "chess" / "agent.py")
+    assert {"bench/agent", "vendor/chess", "bench/curate.py", "modal_apps/common.py", "runpod_apps"} <= set(EXECUTION_CODE)
+
+
+def test_a_clean_checkout_of_the_registered_code_runs_records_after_it_included(coded):
+    from bench.barrier import code_in_force, ensure_execution_allowed
+    repo, registered = coded
+    assert code_in_force(registered, repo) == ""
+    (repo / "registry" / "test").mkdir(parents=True)  # what test executions commit after the registration
+    (repo / "registry" / "test" / "a.intent.json").write_text("{}\n")
+    (repo / "prereg" / "DEVIATIONS.md").write_text("- a line\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "records")
+    (repo / "runs").mkdir()
+    (repo / "runs" / "out.json").write_text("{}\n")  # ignored: what executions write
+    assert code_in_force(registered, repo) == ""
+    git(repo, "push", "-q", "origin", "main")
+    assert ensure_execution_allowed(CONFIG, repo) == (repo / "prereg" / "HASH").read_text().strip()
+
+
+@pytest.mark.parametrize("change, expected", [
+    (lambda repo: (repo / "bench" / "agent" / "runner.py").write_text("x = 2\n"), "not clean \\(M bench/agent/runner.py\\)"),
+    (lambda repo: (repo / "notes.txt").write_text("n\n"), "not clean \\(\\?\\? notes.txt\\)"),
+    (lambda repo: ((repo / "judgments").mkdir(), (repo / "judgments" / "j.json").write_text("{}")),
+     "not clean \\(\\?\\? judgments/"),  # a judgment the registered commit does not hold
+])
+def test_a_dirty_tree_is_refused(coded, change, expected):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    change(repo)
+    assert re.search(expected, code_in_force(registered, repo))
+
+
+def test_code_committed_after_the_registration_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    (repo / "bench" / "judge" / "j4.py").write_text("z = 2\n")
+    git(repo, "commit", "-q", "-am", "a later fix")
+    assert "differs from the registered commit" in code_in_force(registered, repo)
+    assert "bench/judge/j4.py" in code_in_force(registered, repo)
+
+
+def test_a_commit_that_does_not_descend_from_the_registered_one_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    assert "is not in this repository" in code_in_force({**registered, "commit": "0" * 40}, repo)
+    assert "is not in this repository" in code_in_force({**registered, "commit": None}, repo)
+    git(repo, "checkout", "-q", "--orphan", "other")
+    git(repo, "commit", "-q", "-m", "same files, other history")
+    assert "does not descend" in code_in_force(registered, repo)
+
+
+def test_the_execution_code_must_be_registered_and_match(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    assert "records no execution code" in code_in_force({"commit": registered["commit"]}, repo)
+    tampered = {**registered["execution_code"], "vendor/chess/agent.py": "0" * 64}
+    assert "execution code differs" in code_in_force({**registered, "execution_code": tampered}, repo)
+    assert "vendor/chess/agent.py" in code_in_force({**registered, "execution_code": tampered}, repo)
+
+
+def test_python_that_gitignore_hides_under_the_execution_code_is_refused(coded):
+    from bench.barrier import code_in_force
+    repo, registered = coded
+    (repo / ".git" / "info" / "exclude").write_text("bench/agent/hidden.py\n")
+    (repo / "bench" / "agent" / "hidden.py").write_text("import os\n")
+    assert "ignored by git would run: bench/agent/hidden.py" in code_in_force(registered, repo)

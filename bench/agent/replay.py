@@ -23,6 +23,8 @@ output, so it is recorded (`workers`) but is not part of the configuration's ide
 `--resume-from <replay run_id>` makes a new replay that copies the invocations a replay stopped by an
 infrastructure failure had completed and sends only the others (`bench.agent.resume`): the same
 source, engine or arm, configuration, few-shot prefix, call sites and questions, else it is refused.
+On test it follows the rule of `bench run --resume-from` there (`resume.check_test_source`), and
+`--redo-reason` runs again from scratch a replay that has an earlier attempt (`runner.open_run`).
 """
 import hashlib
 import json
@@ -129,7 +131,7 @@ def new_outcome() -> Dict[str, Any]:
 
 def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, arm: Optional[str] = None,
            call_sites: Optional[List[str]] = None, ids: Optional[List[str]] = None, workers: int = 1,
-           resume_from: Optional[str] = None) -> Path:
+           resume_from: Optional[str] = None, redo_reason: Optional[str] = None) -> Path:
     config = load_config(config_path)
     hooks.configure(config)
     if (engine is None) == (arm is None):
@@ -188,7 +190,8 @@ def replay(config_path: str, source_run_id: str, engine: Optional[str] = None, a
                                   config["retries"]["parse_max_attempts"])  # before the run exists: a refusal leaves none
     label = arm or re.sub(r"[^A-Za-z0-9_.-]+", "_", engine)
     run_dir, manifest, allowed = open_run(config, config_path, "replay", label, split, fields,
-                                          used_key_envs(config, engines, retrieval=False))
+                                          used_key_envs(config, engines, retrieval=False), resume_source=failed,
+                                          redo_reason=redo_reason)
     outcome = new_outcome()
     copied: set = set()
     if failed is not None:

@@ -9,8 +9,12 @@ Test executions, in git (the history is the record, no ledger file):
   first question, whatever happens to the machine afterwards;
 - when it ends, whatever its status, its `manifest.json` is committed as
   `registry/test/<run_id>.manifest.json`.
-Only these two files are committed, never `calls.jsonl`, predictions or CHESS's outputs. A run that
-dies before it ends (a killed process, a lost machine) leaves an intent with no manifest.
+Only these two files are committed, never `calls.jsonl`, predictions or CHESS's outputs (the manifest
+records their sha256 when the execution ends, `predictions_sha256` and `calls_sha256`, and why it did
+not end `done`, `end_reason`). A run that dies before it ends (a killed process, a lost machine) leaves
+an intent with no manifest. Nothing is removed: every attempt of a configuration stays listed
+(`attempts_of`), and a later one either resumes the latest (its intent names it, `resumed_from`) or
+states the defect that makes it start again (`redo_reason`).
 
 Call sites: `registry/call_sites.json` is the union of the call sites seen by `done` runs on train
 and calib (`bench call-sites <run_id>...` adds runs to it). An execution on `test` only starts when
@@ -169,14 +173,59 @@ def done_runs_of(run_type: str, arm: Optional[str], engine: Optional[str], prere
     return sorted(found)
 
 
+def _show_json(ref: str, rel: str) -> Optional[Dict[str, Any]]:
+    shown = _git("show", f"{ref}:{rel}")
+    if shown.returncode != 0:
+        return None
+    try:
+        value = json.loads(shown.stdout)
+    except ValueError:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: {rel} at {ref} is not JSON") from None
+    return value if isinstance(value, dict) else None
+
+
+def published_manifest(run_id: str, ref: str) -> Optional[Dict[str, Any]]:
+    """The manifest the registry at `ref` holds for a test execution, or None when it holds none."""
+    return _show_json(ref, f"{TEST_DIR}/{run_id}.manifest.json")
+
+
+def attempts_of(run_type: str, arm: Optional[str], engine: Optional[str], prereg_hash: str, ref: str) -> List[Dict[str, Any]]:
+    """Every test execution of this configuration the registry at `ref` records, keyed as `done_runs_of`
+    keys one: [{"run_id", "started_at", "status"}] by start, `status` being its manifest's, or None for
+    an intent with no manifest (a run that died before it ended). Nothing is ever removed from the
+    registry: each attempt stays listed."""
+    listed = _git("ls-tree", "-r", "--name-only", ref, TEST_DIR)
+    if listed.returncode != 0:
+        raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot list {TEST_DIR} at {ref} "
+                                      f"({listed.stderr.strip()})")
+    found = []
+    for rel in listed.stdout.split():
+        if not rel.endswith(".intent.json"):
+            continue
+        intent = _show_json(ref, rel)
+        if intent is None:
+            raise barrier.TestSplitLocked(f"refusing to touch the test split: cannot read {rel} at {ref}")
+        if (intent.get("type"), intent.get("arm"), intent.get("engine"), intent.get("prereg_hash")) != \
+                (run_type, arm, engine, prereg_hash):
+            continue
+        run_id = intent.get("run_id") or Path(rel).name.rsplit(".", 2)[0]
+        ended = published_manifest(run_id, ref)
+        found.append({"run_id": run_id, "started_at": intent.get("started_at"),
+                      "status": None if ended is None else ended.get("status")})
+    return sorted(found, key=lambda a: (a["started_at"] or "", a["run_id"]))
+
+
 # ---------------------------------------------------------------- executions on test
 
-def commit_intent(manifest: Dict[str, Any]) -> str:
-    """Commit the intent and publish it: nothing runs on `test` until origin's main shows it.
-    Nothing in the intent comes from a model or a provider: no redaction needed."""
+INTENT_FIELDS = ("run_id", "type", "arm", "engine", "split", "source_run_id", "prereg_hash", "commit", "started_at")
+
+
+def commit_intent(manifest: Dict[str, Any], **extra: Any) -> str:
+    """Commit the intent and publish it: nothing runs on `test` until origin's main shows it. `extra`
+    (a resume's source, a redo's reason, the earlier attempts) is published with it, before the first
+    question. Nothing in the intent comes from a model or a provider: no redaction needed."""
     rel = f"{TEST_DIR}/{manifest['run_id']}.intent.json"
-    _write(rel, {key: manifest.get(key) for key in
-                 ("run_id", "type", "arm", "engine", "split", "source_run_id", "prereg_hash", "commit", "started_at")})
+    _write(rel, {**{key: manifest.get(key) for key in INTENT_FIELDS}, **extra})
     _commit(rel, f"registry: intent of test execution {manifest['run_id']}")
     _publish(_git("rev-parse", "HEAD").stdout.strip(), manifest["run_id"])
     return rel

@@ -122,7 +122,8 @@ def test_a_resume_is_refused_unless_it_is_the_same_run_on_a_resumable_source(fai
     source_id = source_dir.name
     before = runs_now()
 
-    with pytest.raises(DataError, match="refused on test"):
+    from bench.barrier import TestSplitLocked
+    with pytest.raises(TestSplitLocked):  # on test, the barrier first (the rule there: test_resume_on_test)
         runner.run_agent(str(config_path), "B0", "test", resume_from=source_id)
     with pytest.raises(DataError, match="arm is 'B0', this run's is 'B2'"):
         runner.run_agent(str(config_path), "B2", "train", engine="production_llm", resume_from=source_id)

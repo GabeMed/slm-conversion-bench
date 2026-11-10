@@ -17,7 +17,10 @@ A run is `failed` when the harness failed, a question raised, a C1 line is inval
 changed (it stops at the first question that fails: nothing after it could be `done`);
 `interrupted` when it stopped early for any other reason; `done` otherwise. On the test split, an
 intent is committed and published before anything runs and the manifest is committed when the run
-ends (`registry`), and a call site outside the one registered on train and calib aborts the run.
+ends (`registry`), and a call site outside the one registered on train and calib aborts the run. A
+test run starts only on a clean checkout of the registered code (`barrier.ensure_execution_allowed`),
+and a configuration with an earlier attempt only resumed (`--resume-from`) or redone for a stated
+defect (`--redo-reason`).
 
 `--workers N` answers the questions of one run in N processes (CHESS's `DatabaseManager` is a
 singleton per process that switches database, so questions cannot share a process): worker k takes
@@ -492,12 +495,21 @@ def used_key_envs(config: Dict[str, Any], engines: List[str], retrieval: bool) -
 
 
 def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str, split: str,
-             fields: Dict[str, Any], key_envs: List[str]) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
+             fields: Dict[str, Any], key_envs: List[str], resume_source: Optional[Dict[str, Any]] = None,
+             redo_reason: Optional[str] = None) -> Tuple[Path, Dict[str, Any], Optional[List[str]]]:
     """Create runs/<run_id>/ with its manifest and configuration snapshot, after every precondition.
     On the test split: the registered call sites are required, every key used is long enough to be
-    redacted, no completed run of the same configuration is in the published registry, and the intent
-    is committed and published first (a refusal there leaves no run).
-    Returns (run_dir, manifest, the call sites a test run may emit or None)."""
+    redacted, the checkout is the registered code (`barrier.ensure_execution_allowed`), no completed run
+    of the same configuration is in the published registry, an earlier attempt of it is either resumed
+    (`resume_source`, by the rule of `resume.check_test_source`) or run again from scratch for a stated
+    defect (`redo_reason`), and the intent is committed and published first (a refusal there leaves no
+    run). Returns (run_dir, manifest, the call sites a test run may emit or None)."""
+    redo_reason = " ".join((redo_reason or "").split()) or None
+    if redo_reason is not None and split != "test":
+        raise data.DataError("--redo-reason is for the test split, where running a configuration again needs a reason")
+    if redo_reason is not None and resume_source is not None:
+        raise data.DataError("--redo-reason runs a configuration again from its first question, --resume-from "
+                             "continues an attempt: choose one")
     if split == "test":
         registry.check_keys(key_envs)
     test = registry.registered_call_sites() if split == "test" else None
@@ -512,7 +524,8 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
         "started_at": started.isoformat(), "finished_at": None, "status": "running",
     }
     if test is not None:
-        manifest.update({"prereg_hash": barrier.prereg_hash_in_force(config), "call_sites_registry_sha256": test["sha256"]})
+        manifest.update({"prereg_hash": barrier.ensure_execution_allowed(config),
+                         "call_sites_registry_sha256": test["sha256"]})
         done = registry.done_runs_of(run_type, manifest.get("arm"), manifest.get("engine"), manifest["prereg_hash"],
                                      test["origin"])
         if done:  # before the intent: a refusal here leaves no record and spends nothing
@@ -521,7 +534,26 @@ def open_run(config: Dict[str, Any], config_path: str, run_type: str, label: str
                 f"on the test split: {', '.join(done)} already completed it under this pre-registration, and a second "
                 f"completed run leaves its comparisons without a verdict (SPEC 6.1). Go on with the next configuration; "
                 f"a defect that needs it run again needs `bench prereg --replace` first")
-        manifest["registry_intent"] = registry.commit_intent(manifest)
+        attempts = registry.attempts_of(run_type, manifest.get("arm"), manifest.get("engine"), manifest["prereg_hash"],
+                                        test["origin"])
+        what = f"{run_type} {manifest.get('arm')}{'' if manifest.get('engine') is None else ' ' + manifest['engine']}"
+        if resume_source is not None:
+            from bench.agent import resume
+            resume.check_test_source(resume_source, manifest["prereg_hash"], attempts,
+                                     registry.published_manifest(resume_source["run_id"], test["origin"]))
+        elif attempts and redo_reason is None:
+            raise barrier.TestSplitLocked(
+                f"refusing to run {what} on the test split: {', '.join(a['run_id'] for a in attempts)} already "
+                f"attempted it under this pre-registration. Resume the latest with --resume-from, or, for a defect "
+                f"that needs it run again from its first question, state the defect with --redo-reason")
+        elif redo_reason is not None and not attempts:
+            raise barrier.TestSplitLocked(f"refusing --redo-reason: no earlier attempt of {what} is in the registry "
+                                          f"under this pre-registration, so there is nothing to run again")
+        manifest["earlier_attempts"] = attempts
+        manifest["redo_reason"] = redo_reason
+        manifest["registry_intent"] = registry.commit_intent(
+            manifest, resumed_from=None if resume_source is None else resume_source["run_id"], redo_reason=redo_reason,
+            earlier_attempts=[a["run_id"] for a in attempts])
     run_dir = paths.RUNS / run_id
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "config.json", config)
@@ -557,9 +589,11 @@ def claude_code_version() -> str:
 
 def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] = None,
               limit: Optional[int] = None, engine: Optional[str] = None, workers: int = 1,
-              batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None) -> Path:
+              batch: bool = False, via_claude_code: bool = False, resume_from: Optional[str] = None,
+              redo_reason: Optional[str] = None) -> Path:
     """One agent run. With `resume_from`, a new run that copies what a failed or interrupted run
-    answered and answers only the questions left (`bench.agent.resume`)."""
+    answered and answers only the questions left (`bench.agent.resume`). On test, `redo_reason` runs a
+    configuration that has an earlier attempt again from its first question (`open_run`)."""
     config = load_config(config_path)
     from bench.agent import hooks
     hooks.configure(config)
@@ -623,7 +657,7 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
         complete = resume.complete_questions(source)
         source_calls = resume.read_calls_of(source)  # before the run exists: an invalid source leaves none
     run_dir, manifest, allowed = open_run(config, config_path, "agent", f"B2-{engine}" if arm == "B2" else arm,
-                                          split, fields, key_envs)
+                                          split, fields, key_envs, resume_source=source, redo_reason=redo_reason)
     outcome = new_outcome()
     remaining = selected
     if source is not None:
@@ -666,6 +700,40 @@ def run_agent(config_path: str, arm: str, split: str, ids: Optional[List[str]] =
     return run_dir
 
 
+def outputs_sha256(run_dir: Path) -> Dict[str, Optional[str]]:
+    """What an execution had produced when it ended, as its manifest (and on test, the registry) records
+    it: the sha256 of predictions.json (an agent run's; a replay has none) and of calls.jsonl, or None for
+    a file that does not exist. A resumed test execution copies only outputs that still hash to these."""
+    return {key: data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
+            for key, name in (("predictions_sha256", "predictions.json"), ("calls_sha256", "calls.jsonl"))}
+
+
+def end_reason(manifest: Dict[str, Any]) -> Optional[str]:
+    """Why an execution did not end `done`, in one line (None when it did): what stopped it, else the
+    first kind of failure its manifest records."""
+    if manifest.get("status") == "done":
+        return None
+    if manifest.get("stopped_by"):
+        return manifest["stopped_by"]
+    for key, label in (("harness_errors", "harness error on"), ("failures", "raised on")):
+        if manifest.get(key):
+            first = sorted(manifest[key], key=lambda q: (not str(q).isdigit(), int(q) if str(q).isdigit() else 0, str(q)))[0]
+            detail = manifest[key][first]
+            detail = detail[0] if isinstance(detail, list) and detail else detail
+            where = first if str(first).startswith("worker") else f"question {first}"
+            more = len(manifest[key]) - 1
+            return f"{label} {where}{f' (and {more} more)' if more else ''}: {str(detail)[:300]}"
+    if manifest.get("c1_errors"):
+        return f"{manifest['c1_errors']} invalid C1 line(s)"
+    if manifest.get("databases_changed"):
+        return f"database(s) changed: {', '.join(manifest['databases_changed'])}"
+    if manifest.get("unregistered_call_sites"):
+        return f"call site(s) outside the registered set: {', '.join(manifest['unregistered_call_sites'])}"
+    if manifest.get("problems"):
+        return manifest["problems"][0]
+    return "stopped before every question was answered"
+
+
 def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], databases: List[str],
            outcome: Dict[str, Any], stopped_by: Optional[str], status: Callable[[int, List[str]], str],
            fields: Dict[str, Any], problems: Optional[List[str]] = None) -> None:
@@ -698,10 +766,12 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
         "c1_errors": c1_errors, **fields, "harness_errors": outcome["harness_errors"],
         "databases_changed": changed,
     })
+    manifest.update(outputs_sha256(run_dir))
     if manifest.get("sessions"):  # a resumed run: this session ends with the run
         manifest["sessions"][-1]["finished_at"] = manifest["finished_at"]
     if manifest["split"] == "test":
         manifest["unregistered_call_sites"] = outcome.get("unregistered_call_sites", [])
+    manifest["end_reason"] = end_reason(manifest)
     _write_manifest(run_dir, manifest, config)
     if manifest["split"] == "test":
         try:
@@ -709,6 +779,7 @@ def finish(manifest: Dict[str, Any], run_dir: Path, config: Dict[str, Any], data
         except registry.RegistryError as e:  # never a `done` run the registry does not show
             manifest["status"] = "failed"
             manifest["problems"].append(scrub(f"the manifest could not be committed to the registry: {e}"))
+            manifest["end_reason"] = manifest["end_reason"] or manifest["problems"][-1]
             _write_manifest(run_dir, manifest, config)
             if stopped_by is None:  # otherwise the exception that stopped the run goes on
                 raise

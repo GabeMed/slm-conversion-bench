@@ -36,9 +36,14 @@ def main(argv=None) -> int:
                    help="answer the questions in this many processes: still one run and one manifest (default 1)")
     p.add_argument("--resume-from", metavar="RUN_ID",
                    help="resume an agent run that stopped on an infrastructure failure (status failed or "
-                        "interrupted; train or calib only): a new run that copies the questions it completed "
-                        "(C1 lines, predictions) and answers the others; arm, split, engine and configuration "
-                        "(by hash) must be the source's")
+                        "interrupted): a new run that copies the questions it completed (C1 lines, predictions) "
+                        "and answers the others; arm, split, engine and configuration (by hash) must be the "
+                        "source's. On test: only the latest attempt, under the same pre-registration, clean and at "
+                        "the registered code, both the source and this session")
+    p.add_argument("--redo-reason", metavar="DEFECT",
+                   help="test only: run again from the first question a configuration that has an earlier attempt "
+                        "in the registry, for this defect (recorded in the intent and the manifest; the earlier "
+                        "attempts stay listed)")
     teacher = p.add_mutually_exclusive_group()
     teacher.add_argument("--batch", action="store_true",
                          help="K1 only (B0 on train, Anthropic teacher): send the calls through the Message Batches "
@@ -62,7 +67,10 @@ def main(argv=None) -> int:
                    help="resume a replay that stopped on an infrastructure failure (status failed with harness "
                         "errors, or interrupted): a new replay that copies the invocations it completed (C1 lines) "
                         "and sends the others; source, engine or arm, call sites, ids and configuration (by hash) "
-                        "must be the failed replay's")
+                        "must be the failed replay's. On test, as `bench run --resume-from` there")
+    p.add_argument("--redo-reason", metavar="DEFECT",
+                   help="test only: replay again from scratch a replay that has an earlier attempt in the registry, "
+                        "for this defect (recorded in the intent and the manifest; the earlier attempts stay listed)")
 
     p = sub.add_parser("call-sites", help="add the call sites of done train/calib runs to registry/call_sites.json")
     p.add_argument("run_ids", nargs="+")
@@ -137,11 +145,13 @@ def main(argv=None) -> int:
             from bench.agent.runner import run_agent
             print(run_agent(args.config, args.arm, args.split, ids=args.ids, limit=args.limit, engine=args.engine,
                             workers=args.workers, batch=args.batch,
-                            via_claude_code=args.via_claude_code, resume_from=args.resume_from))
+                            via_claude_code=args.via_claude_code, resume_from=args.resume_from,
+                            redo_reason=args.redo_reason))
         elif args.command == "replay":
             from bench.agent.replay import replay
             print(replay(args.config, args.source_run_id, engine=args.engine, arm=args.arm, call_sites=args.call_sites,
-                         ids=args.ids, workers=args.workers, resume_from=args.resume_from))
+                         ids=args.ids, workers=args.workers, resume_from=args.resume_from,
+                         redo_reason=args.redo_reason))
         elif args.command == "call-sites":
             from bench.agent.registry import update_call_sites
             print(update_call_sites(args.run_ids))

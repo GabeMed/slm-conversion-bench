@@ -1,10 +1,18 @@
 """`bench run --resume-from <run_id>`: a new run that keeps what an agent run answered before it
 stopped on an infrastructure failure, and answers only the questions left.
 
-The source must be an agent run that ended `failed` or `interrupted`, on train or calib (resuming on
-test is a decision to take before pre-registration, so it is refused), with the same type, arm,
-split, engine, facts, few-shot prefix, batch mode and configuration (`config_sha256`, byte for byte;
-the commit may differ and both are recorded), on the same splits and data manifest.
+The source must be an agent run that ended `failed` or `interrupted`, with the same type, arm,
+split, engine, facts, few-shot prefix, batch mode and configuration (`config_sha256`, byte for byte),
+on the same splits and data manifest. On train and calib the commit may differ (both are recorded).
+
+On test the rule is fixed before the registration and stricter (`check_test_source`): the source is
+the latest attempt of its configuration in the published registry, whose manifest there is the one
+read here; it ran under the pre-registration in force, with the same configuration, on a clean tree
+at the registered code (its commit holds the registered commit's tree outside prereg/ and registry/);
+and the outputs it copies still hash to what its manifest recorded when it ended (`predictions_sha256`,
+`calls_sha256`). This session must itself be clean and at the registered code
+(`barrier.ensure_execution_allowed`). Anything else is refused: the configuration is then run again
+from its first question, which on test needs a stated defect (`--redo-reason`, `runner.open_run`).
 
 A question of the source is complete when it has a prediction and neither raised (`failures`) nor
 met a harness error (`harness_errors`): the runner removes the prediction of a question that was in
@@ -39,15 +47,41 @@ RESUMABLE = ("failed", "interrupted")
 USAGE_FIELDS = ("input", "cached_input", "output", "reasoning", "cache_write")
 
 
-def refuse_on_test(split: str) -> None:
-    if split == "test":
-        raise data.DataError("--resume-from is refused on test: resuming a test run is a decision to take "
-                             "before pre-registration, not after a failure")
+def check_test_source(source: Dict[str, Any], prereg_hash: str, attempts: List[Dict[str, Any]],
+                      published: Optional[Dict[str, Any]]) -> None:
+    """The rule for resuming on test (the module's docstring), once the barrier has found this session
+    clean and at the registered code. `attempts` are the configuration's attempts in the published
+    registry (`registry.attempts_of`), `published` the source's manifest there."""
+    from bench import barrier
+    run_id = source["run_id"]
+
+    def refuse(why: str) -> None:
+        raise barrier.TestSplitLocked(f"refusing to resume {run_id} on the test split: {why}; run the configuration "
+                                      f"again from its first question with --redo-reason instead")
+    if published is None:
+        refuse("the published registry holds no manifest of it")
+    differ = sorted(key for key in set(published) | set(source) if published.get(key) != source.get(key))
+    if differ:
+        refuse(f"its manifest differs from the one the registry published ({', '.join(differ[:5])})")
+    if source.get("prereg_hash") != prereg_hash:
+        refuse(f"it ran under pre-registration {source.get('prereg_hash')}, not the one in force ({prereg_hash})")
+    if source.get("dirty") is not False:
+        refuse("it ran on a working tree that was not clean")
+    registered = barrier.registered_commit()
+    if not isinstance(source.get("commit"), str) or registered is None or \
+            not barrier.same_code(source["commit"], registered):
+        refuse(f"it ran at commit {source.get('commit')!r}, not at the registered code")
+    if not attempts or attempts[-1]["run_id"] != run_id:
+        refuse(f"it is not the latest attempt of its configuration ({attempts[-1]['run_id'] if attempts else 'none'} is)")
+    run_dir = paths.RUNS / run_id
+    for key, name in (("predictions_sha256", "predictions.json"), ("calls_sha256", "calls.jsonl")):
+        now = data.sha256_file(run_dir / name) if (run_dir / name).is_file() else None
+        if key not in source or now != source[key]:
+            refuse(f"its {name} does not hash to what its manifest recorded when it ended ({key})")
 
 
 def load_source(source_run_id: str, split: str) -> Dict[str, Any]:
     """The source's manifest, after the checks that need nothing of the new run."""
-    refuse_on_test(split)
     path = paths.RUNS / source_run_id / "manifest.json"
     if not path.is_file():
         raise data.DataError(f"no run {source_run_id}")
@@ -57,9 +91,6 @@ def load_source(source_run_id: str, split: str) -> Dict[str, Any]:
     if source.get("status") not in RESUMABLE:
         raise data.DataError(f"{source_run_id} is {source.get('status')!r}: only a failed or interrupted run is "
                              f"resumed")
-    if source.get("split") == "test":
-        raise data.DataError(f"{source_run_id} is on test: resuming a test run is a decision to take before "
-                             f"pre-registration")
     return source
 
 
@@ -139,7 +170,8 @@ def copy_source(source: Dict[str, Any], source_calls: Tuple[List[str], List[Dict
 
 def _resumed_from(source: Dict[str, Any], **what: Any) -> Dict[str, Any]:
     return {**{key: source.get(key) for key in ("run_id", "commit", "dirty", "config_sha256", "status",
-                                               "started_at", "finished_at", "workers", "stopped_by")}, **what}
+                                               "started_at", "finished_at", "workers", "stopped_by", "prereg_hash",
+                                               "end_reason", "predictions_sha256", "calls_sha256")}, **what}
 
 
 def _sessions(source: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -187,8 +219,8 @@ def working_seconds(manifest: Dict[str, Any]) -> Optional[float]:
 # one more call, never a wrong copy). A complete invocation's C1 lines are copied unchanged, every
 # attempt, `run_id` included, as `bench run --resume-from` copies a question's; an incomplete one's
 # are not copied and are counted under `resumed_from.discarded` (calls and usage), so its cost stays
-# visible and no judgment reads a call twice. It is refused on test, as `bench run --resume-from` is
-# (the replay's split is its source run's).
+# visible and no judgment reads a call twice. On test it follows `bench run --resume-from`'s rule there
+# (`check_test_source`; the replay's split is its source run's).
 
 REPLAY_IDENTITY = ("split", "source_run_id", "source_config_sha256", "source_calls_sha256", "engine", "arm",
                    "call_sites", "question_ids", "n_invocations", "facts", "few_shot", "few_shot_k", "few_shot_sha256")
@@ -199,8 +231,8 @@ Identity = Tuple[str, str, str]
 
 
 def load_replay_source(failed_run_id: str, split: str) -> Dict[str, Any]:
-    """The failed replay's manifest, refused on test and unless it stopped on an infrastructure failure."""
-    refuse_on_test(split)
+    """The failed replay's manifest, refused unless it stopped on an infrastructure failure (on test, the
+    rule of `check_test_source` applies on top, in `runner.open_run`)."""
     path = paths.RUNS / failed_run_id / "manifest.json"
     if not path.is_file():
         raise data.DataError(f"no run {failed_run_id}")
@@ -209,7 +241,6 @@ def load_replay_source(failed_run_id: str, split: str) -> Dict[str, Any]:
         raise data.DataError(f"{failed_run_id} is a {source.get('type')!r} run: `bench replay --resume-from` resumes a replay")
     if source.get("status") not in RESUMABLE:
         raise data.DataError(f"{failed_run_id} is {source.get('status')!r}: only a failed or interrupted replay is resumed")
-    refuse_on_test(source.get("split"))
     if source["status"] == "failed" and not source.get("harness_errors"):
         raise data.DataError(f"{failed_run_id} failed without a harness error (c1_errors {source.get('c1_errors')}, "
                              f"problems {source.get('problems')}): only an infrastructure failure is resumed")

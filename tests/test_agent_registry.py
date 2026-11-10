@@ -40,16 +40,28 @@ def repo(tmp_path, monkeypatch):
     git(root, "remote", "add", "origin", str(origin))
     (root / ".gitignore").write_text("runs/\ndata/raw/\ndata/bird_dev/\n")
     (root / "SPEC.md").write_text("protocol\n")
-    (root / "prereg").mkdir()
-    prereg = {"spec_sha256": sha(root / "SPEC.md"), "config_sha256": config_sha256(config),
-              "splits_sha256": sha(paths.SPLITS), "data_manifest_sha256": sha(paths.DATA_MANIFEST), "commit": "c"}
-    (root / "prereg" / "manifest.json").write_text(json.dumps(prereg, sort_keys=True) + "\n")
-    (root / "prereg" / "HASH").write_text(sha(root / "prereg" / "manifest.json") + "\n")
+    (root / "bench" / "agent").mkdir(parents=True)
+    (root / "bench" / "agent" / "code.py").write_text("x = 1\n")  # execution code the registration hashes
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "init")
-    git(root, "push", "-q", "origin", "main")
+    publish_prereg(root, config)
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
     return root, config_path
+
+
+def publish_prereg(root, config, **override):
+    """Register HEAD as `bench prereg` does (the commit it records, then the commit of prereg/), and push."""
+    (root / "prereg").mkdir(exist_ok=True)
+    prereg = {"spec_sha256": sha(root / "SPEC.md"), "config_sha256": config_sha256(config),
+              "splits_sha256": sha(paths.SPLITS), "data_manifest_sha256": sha(paths.DATA_MANIFEST),
+              "commit": git(root, "rev-parse", "HEAD").strip(), "execution_code": barrier.execution_code(root),
+              **override}
+    (root / "prereg" / "manifest.json").write_text(json.dumps(prereg, sort_keys=True) + "\n")
+    (root / "prereg" / "HASH").write_text(sha(root / "prereg" / "manifest.json") + "\n")
+    git(root, "add", "prereg")
+    git(root, "commit", "-q", "-m", "register")
+    git(root, "push", "-q", "origin", "main")
+    return prereg
 
 
 def register(root, config_path, call_sites=None, commit=True):
@@ -146,8 +158,14 @@ def test_a_failed_push_of_the_intent_refuses_the_run_before_any_spend(repo, monk
         runner.run_agent(str(config_path), "B0", "test", ids=["9"])
     hook.unlink()
     git(root, "push", "-q", "origin", "main")
-    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
-    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+    # published now, the refused attempt is an earlier attempt: running again from scratch states why
+    with pytest.raises(barrier.TestSplitLocked, match="already attempted it"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="the intent could not be pushed")
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["status"] == "done" and manifest["redo_reason"] == "the intent could not be pushed"
+    assert [a["run_id"] for a in manifest["earlier_attempts"]] == [intent.rsplit("/", 1)[1].rsplit(".", 2)[0]]
+    assert manifest["earlier_attempts"][0]["status"] is None  # an intent with no manifest
     assert intent in git(origin, "ls-tree", "-r", "--name-only", "main", "registry/test").split()
 
 
@@ -217,20 +235,22 @@ def test_only_done_train_and_calib_runs_register_call_sites(repo):
 
 
 def test_the_registry_commits_its_file_and_nothing_else(repo):
+    """And a test execution starts only on a clean tree, so there is nothing else to leave alone but what
+    .gitignore ignores."""
     root, config_path = repo
     register(root, config_path)
-    (root / "notes.txt").write_text("tracked\n")
-    git(root, "add", "notes.txt")
-    git(root, "commit", "-q", "-m", "notes")
-    (root / "notes.txt").write_text("changed, not committed\n")
     (root / "staged.txt").write_text("staged, not committed\n")
     git(root, "add", "staged.txt")
+    with pytest.raises(barrier.TestSplitLocked, match="not clean \\(A staged.txt\\)"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    git(root, "rm", "-q", "--cached", "staged.txt")
+    (root / "staged.txt").unlink()
+    (root / "runs" / "scratch.txt").write_text("ignored output\n")
     before = git(root, "rev-parse", "HEAD").strip()
     run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"])
     assert git(root, "diff", "--name-only", before, "HEAD").split() == [
         f"registry/test/{run_dir.name}.intent.json", f"registry/test/{run_dir.name}.manifest.json"]
-    status = git(root, "status", "--porcelain", "--", "notes.txt", "staged.txt").splitlines()
-    assert sorted(status) == [" M notes.txt", "A  staged.txt"]  # left exactly as they were
+    assert (root / "runs" / "scratch.txt").read_text() == "ignored output\n"
 
 
 def test_a_manifest_the_registry_cannot_commit_fails_the_run(repo, monkeypatch):
@@ -356,6 +376,8 @@ def test_a_ctrl_c_commits_the_manifest_as_interrupted(repo, monkeypatch):
     (run_dir,) = [p for p in paths.RUNS.iterdir() if p.name.startswith("agent-B0-test")]
     committed = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))
     assert (committed["status"], committed["stopped_by"]) == ("interrupted", "KeyboardInterrupt: ")
+    assert committed["end_reason"] == "KeyboardInterrupt: "  # why, and what it had answered so far
+    assert committed["predictions_sha256"] == sha(run_dir / "predictions.json")
 
 
 def test_a_key_too_short_to_redact_keeps_a_test_run_from_starting(repo, monkeypatch):
@@ -366,12 +388,7 @@ def test_a_key_too_short_to_redact_keeps_a_test_run_from_starting(repo, monkeypa
     config["roles"]["production_llm"]["endpoint"]["api_key_env"] = "BENCH_TEST_PROVIDER_KEY"
     config_path.write_text(yaml.safe_dump(config))
     git(root, "commit", "-q", "-am", "the production LLM needs a key")  # (the barrier then refuses: re-register)
-    prereg = json.loads((root / "prereg" / "manifest.json").read_text())
-    prereg["config_sha256"] = runner.config_sha256(runner.load_config(config_path))
-    (root / "prereg" / "manifest.json").write_text(json.dumps(prereg, sort_keys=True) + "\n")
-    (root / "prereg" / "HASH").write_text(sha(root / "prereg" / "manifest.json") + "\n")
-    git(root, "commit", "-q", "-am", "re-register")
-    git(root, "push", "-q", "origin", "main")
+    publish_prereg(root, runner.load_config(config_path))
     monkeypatch.setenv("BENCH_TEST_PROVIDER_KEY", "abc12")  # a key, and too short to redact without damage
     with pytest.raises(barrier.TestSplitLocked, match="BENCH_TEST_PROVIDER_KEY is shorter than 8"):
         runner.run_agent(str(config_path), "B0", "test", ids=["9"])
@@ -397,7 +414,8 @@ def test_a_second_completed_run_of_one_configuration_is_refused_before_its_inten
     assert json.loads((failed / "manifest.json").read_text())["status"] == "failed"
     git(root, "push", "-q", "origin", "main")
     monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
-    done = runner.run_agent(str(config_path), "B0", "test", ids=["9"])  # after a failure: allowed
+    done = runner.run_agent(str(config_path), "B0", "test", ids=["9"],  # after a failure: allowed, with a reason
+                            redo_reason="the network went away")
     assert json.loads((done / "manifest.json").read_text())["status"] == "done"
     git(root, "push", "-q", "origin", "main")
     before = git(root, "rev-parse", "HEAD").strip()
@@ -479,3 +497,147 @@ def test_a_lock_at_the_end_of_a_test_run_leaves_it_done(repo, monkeypatch):
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert locked and manifest["status"] == "done" and manifest["problems"] == []
     assert json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))["status"] == "done"
+
+
+# ---------------------------------------------------------------- failures on test: resume, redo, the record
+
+class NetworkDown(ScriptedChess):
+    def invoke(self, messages):
+        raise OSError("the network went away")
+
+
+def failed_test_run(root, config_path, monkeypatch, **kwargs):
+    """A test run that fails (its harness: the network), committed and pushed as the RUNBOOK's loop does."""
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: NetworkDown())
+    run_dir = runner.run_agent(str(config_path), "B0", "test", ids=["9"], **kwargs)
+    git(root, "push", "-q", "origin", "main")
+    monkeypatch.setattr(hooks, "chat_model", lambda engine, temperature: ScriptedChess())
+    return run_dir
+
+
+def test_an_execution_that_did_not_end_records_why_and_what_it_had_produced(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    run_dir = failed_test_run(root, config_path, monkeypatch)
+    committed = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.manifest.json"))
+    assert committed["status"] == "failed" and "the network went away" in committed["end_reason"]
+    assert committed["predictions_sha256"] == sha(run_dir / "predictions.json")
+    assert committed["calls_sha256"] == sha(run_dir / "calls.jsonl")
+    assert committed["earlier_attempts"] == [] and committed["redo_reason"] is None
+    done = runner.run_agent(str(config_path), "B0", "train", ids=["1"])
+    assert json.loads((done / "manifest.json").read_text())["end_reason"] is None
+
+
+def test_a_failed_test_run_is_resumed_under_the_fixed_rule(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    source = failed_test_run(root, config_path, monkeypatch)
+    run_dir = runner.run_agent(str(config_path), "B0", "test", resume_from=source.name)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    source_manifest = json.loads((source / "manifest.json").read_text())
+    assert manifest["status"] == "done"
+    resumed = manifest["resumed_from"]
+    assert (resumed["run_id"], resumed["prereg_hash"], resumed["dirty"]) == (source.name, manifest["prereg_hash"], False)
+    assert resumed["predictions_sha256"] == source_manifest["predictions_sha256"]
+    assert resumed["end_reason"] == source_manifest["end_reason"]
+    assert [(a["run_id"], a["status"]) for a in manifest["earlier_attempts"]] == [(source.name, "failed")]
+    intent = json.loads(git(root, "show", f"HEAD:registry/test/{run_dir.name}.intent.json"))
+    assert (intent["resumed_from"], intent["earlier_attempts"], intent["redo_reason"]) == (source.name, [source.name], None)
+    assert len(manifest["sessions"]) == 2 and not manifest["dirty"]
+
+
+def refused_resume(root, config_path, source, match, **kwargs):
+    before = git(root, "rev-parse", "HEAD").strip()
+    runs_before = set(paths.RUNS.iterdir())
+    with pytest.raises(barrier.TestSplitLocked, match=match):
+        runner.run_agent(str(config_path), "B0", "test", resume_from=source, **kwargs)
+    assert git(root, "rev-parse", "HEAD").strip() == before and set(paths.RUNS.iterdir()) == runs_before  # no intent, no run
+
+
+def test_a_test_resume_is_refused_when_the_source_outputs_changed_after_it_ended(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    source = failed_test_run(root, config_path, monkeypatch)
+    (source / "predictions.json").write_text("{}")
+    refused_resume(root, config_path, source.name, "predictions.json does not hash")
+
+
+def test_a_test_resume_is_refused_when_the_local_manifest_is_not_the_published_one(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    source = failed_test_run(root, config_path, monkeypatch)
+    path = source / "manifest.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "dirty": False, "workers": 3}))
+    refused_resume(root, config_path, source.name, "differs from the one the registry published \\(workers\\)")
+
+
+def test_only_the_latest_attempt_is_resumed_and_a_redo_needs_a_reason(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    first = failed_test_run(root, config_path, monkeypatch)
+    with pytest.raises(barrier.TestSplitLocked, match=f"{first.name} already attempted it"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    second = failed_test_run(root, config_path, monkeypatch, redo_reason="  the endpoint\nwas misconfigured ")
+    manifest = json.loads((second / "manifest.json").read_text())
+    assert manifest["redo_reason"] == "the endpoint was misconfigured"  # one line
+    assert [a["run_id"] for a in manifest["earlier_attempts"]] == [first.name]
+    intent = json.loads(git(root, "show", f"origin/main:registry/test/{second.name}.intent.json"))
+    assert intent["redo_reason"] == "the endpoint was misconfigured"
+    refused_resume(root, config_path, first.name, f"not the latest attempt of its configuration \\({second.name} is\\)")
+    run_dir = runner.run_agent(str(config_path), "B0", "test", resume_from=second.name)
+    assert json.loads((run_dir / "manifest.json").read_text())["status"] == "done"
+    # both earlier attempts stay in the registry
+    listed = git(root, "ls-files", "registry/test").split()
+    assert {f"registry/test/{r.name}.manifest.json" for r in (first, second, run_dir)} <= set(listed)
+
+
+def test_a_redo_reason_needs_an_earlier_attempt_on_test_and_excludes_a_resume(repo, monkeypatch):
+    from bench.data import DataError
+    root, config_path = repo
+    register(root, config_path)
+    with pytest.raises(barrier.TestSplitLocked, match="nothing to run again"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"], redo_reason="a defect")
+    with pytest.raises(DataError, match="for the test split"):
+        runner.run_agent(str(config_path), "B0", "train", ids=["1"], redo_reason="a defect")
+    source = failed_test_run(root, config_path, monkeypatch)
+    with pytest.raises(DataError, match="choose one"):
+        runner.run_agent(str(config_path), "B0", "test", resume_from=source.name, redo_reason="a defect")
+    assert not (root / "registry" / "test" / "x").exists()
+
+
+def test_a_test_resume_is_refused_unless_the_source_ran_clean_at_the_registered_code(repo, monkeypatch):
+    """The source's own record decides: under another registration, on a dirty tree, or at other code."""
+    from bench.agent import resume
+    root, config_path = repo
+    register(root, config_path)
+    source_dir = failed_test_run(root, config_path, monkeypatch)
+    source = json.loads((source_dir / "manifest.json").read_text())
+    attempts = [{"run_id": source["run_id"], "started_at": source["started_at"], "status": "failed"}]
+    in_force = source["prereg_hash"]
+    resume.check_test_source(source, in_force, attempts, source)  # as it is: allowed
+    git(root, "checkout", "-q", "-b", "elsewhere")
+    (root / "bench" / "agent" / "code.py").write_text("x = 2\n")
+    git(root, "commit", "-q", "-am", "other code")
+    other_code = git(root, "rev-parse", "HEAD").strip()
+    git(root, "checkout", "-q", "main")
+    for changed, match in (({"prereg_hash": "h0"}, "under pre-registration h0"),
+                           ({"dirty": True}, "not clean"),
+                           ({"commit": other_code}, "not at the registered code")):
+        edited = {**source, **changed}
+        with pytest.raises(barrier.TestSplitLocked, match=match):
+            resume.check_test_source(edited, in_force, attempts, edited)
+    with pytest.raises(barrier.TestSplitLocked, match="holds no manifest"):
+        resume.check_test_source(source, in_force, attempts, None)
+
+
+def test_a_test_execution_is_refused_on_code_changed_after_the_registration(repo, monkeypatch):
+    root, config_path = repo
+    register(root, config_path)
+    (root / "bench" / "agent" / "code.py").write_text("x = 2\n")
+    with pytest.raises(barrier.TestSplitLocked, match="not clean \\(M bench/agent/code.py\\)"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    git(root, "commit", "-q", "-am", "a fix after the registration")
+    git(root, "push", "-q", "origin", "main")
+    with pytest.raises(barrier.TestSplitLocked, match="differs from the registered commit .* bench/agent/code.py"):
+        runner.run_agent(str(config_path), "B0", "test", ids=["9"])
+    assert not (root / "registry" / "test").exists()

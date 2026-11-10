@@ -174,19 +174,18 @@ def test_a_resume_is_refused_unless_it_is_the_same_replay_of_an_infrastructure_f
     refused("'done': only a failed or interrupted replay is resumed", resume_from=done.name)
 
 
-def test_a_resume_is_refused_on_test_as_bench_runs_is(failed):
-    """Resuming on test is a decision to take before pre-registration: refused before the barrier,
-    whatever the failed replay, with `bench run --resume-from`'s message."""
+def test_a_resume_on_test_goes_through_the_barrier(failed):
+    """On test a resumed replay is an execution on test like any other: refused without the registration
+    in force, before anything runs (the rule once it is: test_resume_on_test)."""
+    from bench.barrier import TestSplitLocked
     server, config_path, source, failed_dir = failed
     for manifest_path in (paths.RUNS / source / "manifest.json", failed_dir / "manifest.json"):
         manifest = json.loads(manifest_path.read_text())
         manifest_path.write_text(json.dumps({**manifest, "split": "test"}))
     before = runs_now()
-    with pytest.raises(DataError, match="--resume-from is refused on test"):
+    with pytest.raises(TestSplitLocked, match="refusing to touch the test split"):
         replay.replay(str(config_path), source, engine="production_llm", resume_from=failed_dir.name)
     assert runs_now() == before
-    with pytest.raises(DataError, match="--resume-from is refused on test"):  # the failed replay's own split
-        resume.load_replay_source(failed_dir.name, "train")
 
 
 def test_the_cli_resumes_a_replay(failed, capsys):

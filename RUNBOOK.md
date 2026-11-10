@@ -194,11 +194,11 @@ lines unchanged, every attempt, and their predictions), answers the others from 
 flight or failed included), and ends `done` like any run, so it is the run eval, replay and the
 judgments read. Its manifest records the source (`resumed_from`, with the calls the source spent on
 questions it did not complete under `discarded`), `resumed_question_ids`, and `sessions`, whose sum is
-the run's working time. It is refused on test.
+the run's working time. On test the rule is stricter (step 13).
 A replay stopped the same way (`failed` with `harness_errors`, or `interrupted`) is resumed with
 `bench replay <source> --engine <engine>|--arm <arm> [--call-sites ...] [--ids ...] --workers 8 --resume-from
 <replay run_id>`, with the same source, engine or arm, call sites, ids and configuration: it copies the
-invocations that ended (not the questions), sends the others, and records `resumed_from.copied` and `.discarded`. It is refused on test.
+invocations that ended (not the questions), sends the others, and records `resumed_from.copied` and `.discarded`. On test, as step 13 says.
 
 ### 6. K1: the teacher's logs on train
 
@@ -618,14 +618,33 @@ done
 - The loop stops at the first configuration that does not end `done`, or cannot be pushed, and prints
   where. Read why. If the run raised before its push (exit code not 0), publish what it committed with
   `git push origin main` (the next test run refuses to start while a registry commit is unpushed). Fix
-  the cause, and run the block again with `START` set to the configuration that stopped. The
-  configurations before it are done and are **not** run again.
+  the cause **outside this checkout** (the code is frozen here: see below), then finish the configuration
+  that stopped by hand, one of two ways, push, and run the block again with `START` set to the
+  configuration after it. The configurations before it are done and are **not** run again.
+  - **Resume** (an infrastructure failure: a network error, a dead pod, a Ctrl-C): add
+    `--resume-from <run_id>` to its command. Allowed only for the latest attempt of that configuration,
+    under the same pre-registration and configuration, with the source and this session both on a clean
+    tree at the registered code, and with the source's `predictions.json` and `calls.jsonl` still
+    hashing to what its manifest recorded when it ended. Anything else is refused before the intent.
+  - **Run again from the first question** (a defect that makes the earlier attempt's answers unusable):
+    add `--redo-reason "<the defect>"` to its command. The reason goes into the intent, published before
+    the first question, and into the manifest; the earlier attempts stay in the registry and are listed
+    in the new manifest (`earlier_attempts`). Without a reason, a configuration with an earlier attempt
+    is refused.
 - **One completed run per configuration** (type, arm, engine, pre-registration, as the report keys
-  it). A run that died is listed and may be run again; a second *completed* run of one configuration
-  would leave that arm's comparisons without a verdict, so `bench run` and `bench replay` refuse to open
-  it, before its intent and before any call. Rerunning the block from `B0` by mistake therefore stops at
-  once at B0, with the run id that already completed it.
-- `--resume-from` is refused on test: a configuration that failed is run again from its first question.
+  it). A second *completed* run of one configuration would leave that arm's comparisons without a
+  verdict, so `bench run` and `bench replay` refuse to open it, before its intent and before any call.
+  Rerunning the block from `B0` by mistake therefore stops at once at B0, with the run id that already
+  completed it.
+- **Only the registered code runs on test.** Every test execution refuses a working tree that `git
+  status --porcelain` shows anything in (an untracked `judgments/` file included; what `.gitignore`
+  ignores, such as `runs/`, does not count), a HEAD that differs from the commit `prereg/manifest.json`
+  records outside `prereg/` and `registry/`, and execution code (`bench/agent`, `vendor/chess`, the
+  serving plan, `bench/curate.py`) whose hashes differ from the registered ones. A fix to the code after
+  the registration is therefore a new registration (`bench prereg --replace`).
+- Every execution's manifest records, when it ends, `end_reason` (why it did not end `done`, or null)
+  and `predictions_sha256` and `calls_sha256` (what it had produced): an interrupted test execution is
+  in the registry with both.
 - Each run pushes its intent to `origin/main` before its first question; a run that cannot push
   does not start. When it ends it **commits** its manifest, and the `git push` after it publishes
   that.
