@@ -673,8 +673,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T15:49:52.610669+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T15:50:54.979220+00:00",
+  "status": "interrupted",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -689,5 +689,111 @@
       "status": "interrupted"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B5-test-20261111T154952.610669Z.intent.json",
+  "resumed_from": {
+    "run_id": "agent-B5-test-20261111T154810.767041Z",
+    "commit": "8db62a8a9db4ecfae07ed042cda5ab2038dbe2b7",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "interrupted",
+    "started_at": "2026-11-11T15:48:10.767041+00:00",
+    "finished_at": "2026-11-11T15:49:20.025631+00:00",
+    "workers": 3,
+    "stopped_by": "KeyboardInterrupt: SIGTERM",
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": "KeyboardInterrupt: SIGTERM",
+    "predictions_sha256": "7ddd2016f618a494917cf1426219da9edc454ad93a147b37225b95d8b7f3365c",
+    "calls_sha256": "2e0817b4b9212455d3bffa165592555af7dbd882f8dd5853fe6204c0d730fe4e",
+    "discarded": {
+      "n_calls": 12,
+      "usage": {
+        "input": 5362,
+        "cached_input": 1760,
+        "output": 367,
+        "reasoning": 0,
+        "cache_write": 2826
+      },
+      "question_ids": [
+        "50",
+        "62",
+        "72"
+      ]
+    },
+    "routes": {
+      "copied": 2184,
+      "missing": false
+    }
+  },
+  "resumed_question_ids": [
+    "5",
+    "11",
+    "12",
+    "17",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "31",
+    "32",
+    "36",
+    "37",
+    "39",
+    "40",
+    "41",
+    "45",
+    "46",
+    "47",
+    "48"
+  ],
+  "sessions": [
+    {
+      "started_at": "2026-11-11T08:11:02.410537+00:00",
+      "finished_at": "2026-11-11T08:18:40.684423+00:00",
+      "commit": "d7a3a9849ee930c9a0f383755d159ecba191dc2f",
+      "workers": 3
+    },
+    {
+      "started_at": "2026-11-11T15:48:10.767041+00:00",
+      "finished_at": "2026-11-11T15:49:20.025631+00:00",
+      "commit": "8db62a8a9db4ecfae07ed042cda5ab2038dbe2b7",
+      "workers": 3
+    },
+    {
+      "started_at": "2026-11-11T15:49:52.610669+00:00",
+      "finished_at": "2026-11-11T15:50:54.979220+00:00",
+      "commit": "02268a736a59b1eb953904c8dac4e005e1c533ac",
+      "workers": 3
+    }
+  ],
+  "stopped_by": "KeyboardInterrupt: SIGTERM",
+  "problems": [],
+  "n_calls": 2198,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "agent_cg": {
+      "APIConnectionError": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {},
+  "databases_changed": [],
+  "predictions_sha256": "7ddd2016f618a494917cf1426219da9edc454ad93a147b37225b95d8b7f3365c",
+  "calls_sha256": "24230744cd46686bc6391a609007b2b75f55151643c50cd9724663deb1b8f0a6",
+  "n_predictions": 21,
+  "unregistered_call_sites": [],
+  "end_reason": "KeyboardInterrupt: SIGTERM"
 }
