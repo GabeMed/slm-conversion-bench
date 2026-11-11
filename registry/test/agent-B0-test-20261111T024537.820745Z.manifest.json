@@ -533,10 +533,57 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T02:45:37.820745+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T02:45:53.502658+00:00",
+  "status": "failed",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B0-test-20261111T024537.820745Z.intent.json",
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 8,
+  "call_sites_seen": [
+    "agent_ir"
+  ],
+  "errors_by_call_site": {
+    "agent_ir": {
+      "BadRequestError": 8
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {
+    "5": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBWdT45F4shSTzs45'}"
+    ],
+    "11": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBfZ47BdQtMNbKN3P'}"
+    ],
+    "12": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBriZ6ToRXDFo8jrm'}"
+    ],
+    "17": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBnFGfjHZRuWsHzb7'}"
+    ],
+    "23": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBjmci2LFpAoD7K31'}"
+    ],
+    "24": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBcqJoJjwZ3JSY2up'}"
+    ],
+    "25": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBhHbiat9CVYGv3Er'}"
+    ],
+    "26": [
+      "agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, or use an API key that is scoped to a workspace.'}, 'request_id': 'req_011CgvNhBmGLiaAvwBvjnPZp'}"
+    ]
+  },
+  "databases_changed": [],
+  "predictions_sha256": "b0fdc29f06c1f816b1a7f9e8d7b1e00f494f150f99e3916a373f3a1cf2765f47",
+  "calls_sha256": "0dacfb811bbf87d922b5ff1dac4e088631fadfcaa03a63b0cd015f0216f847a3",
+  "n_predictions": 8,
+  "unregistered_call_sites": [],
+  "end_reason": "harness error on question 5 (and 7 more): agent_ir: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. Add the header, "
 }
