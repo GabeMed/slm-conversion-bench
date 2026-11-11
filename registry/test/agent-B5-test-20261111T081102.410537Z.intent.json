@@ -1,0 +1,16 @@
+{
+  "run_id": "agent-B5-test-20261111T081102.410537Z",
+  "type": "agent",
+  "arm": "B5",
+  "engine": null,
+  "split": "test",
+  "source_run_id": null,
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "commit": "d7a3a9849ee930c9a0f383755d159ecba191dc2f",
+  "started_at": "2026-11-11T08:11:02.410537+00:00",
+  "resumed_from": null,
+  "redo_reason": null,
+  "redo": null,
+  "earlier_attempts": [],
+  "unregistered_source_hashes": null
+}
