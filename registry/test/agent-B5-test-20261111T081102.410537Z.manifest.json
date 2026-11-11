@@ -672,10 +672,49 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T08:11:02.410537+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T08:18:40.684423+00:00",
+  "status": "failed",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B5-test-20261111T081102.410537Z.intent.json",
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 2194,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "extract_keywords": {
+      "BadRequestError": 2
+    },
+    "agent_cg": {
+      "APIConnectionError": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {
+    "62": [
+      "extract_keywords: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011Cgvp4UJvNkJDVkgNqCBud'}"
+    ],
+    "72": [
+      "extract_keywords: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011Cgvp4SR4raGoips9Vswmm'}"
+    ]
+  },
+  "databases_changed": [],
+  "predictions_sha256": "5dca5fa63feacff25661679dcc91734669c65dc43988f43ea7209165a5d500cd",
+  "calls_sha256": "a78143cba6b997dbd890c08fb955f324872b439d2f7223b732a239dd066c9e53",
+  "n_predictions": 23,
+  "unregistered_call_sites": [],
+  "end_reason": "harness error on question 62 (and 1 more): extract_keywords: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011Cgvp4"
 }
