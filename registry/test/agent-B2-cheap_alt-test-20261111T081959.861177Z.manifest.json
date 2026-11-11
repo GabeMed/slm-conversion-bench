@@ -535,10 +535,32 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T08:19:59.861177+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T08:52:54.417167+00:00",
+  "status": "done",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B2-cheap_alt-test-20261111T081959.861177Z.intent.json",
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 500,
+  "call_sites_seen": [
+    "generate_candidate"
+  ],
+  "errors_by_call_site": {
+    "generate_candidate": {
+      "empty output": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {},
+  "databases_changed": [],
+  "predictions_sha256": "7b78962c08adb38efaee9646214455957ce172e335278545239edc64cf3c3747",
+  "calls_sha256": "52b2a5c88ef3a8c9a4b4a257844ce461071d6830520df9a7e664f630967690c6",
+  "n_predictions": 498,
+  "unregistered_call_sites": [],
+  "end_reason": null
 }
