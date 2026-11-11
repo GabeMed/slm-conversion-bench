@@ -1,0 +1,38 @@
+{
+  "run_id": "agent-B0-test-20261111T054112.034753Z",
+  "type": "agent",
+  "arm": "B0",
+  "engine": null,
+  "split": "test",
+  "source_run_id": null,
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "commit": "294f41b06974da2f416a8175d29f853b8e746022",
+  "started_at": "2026-11-11T05:41:12.034753+00:00",
+  "resumed_from": "agent-B0-test-20261111T024701.507238Z",
+  "redo_reason": null,
+  "redo": null,
+  "earlier_attempts": [
+    "agent-B0-test-20261111T024537.820745Z",
+    "agent-B0-test-20261111T024701.507238Z"
+  ],
+  "unregistered_source_hashes": {
+    "answers.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "answers.w0.jsonl": "407a5c34a59efedd92e2aa9bf09bc7b623643cfc7940b168e677bfdf49286296",
+    "answers.w1.jsonl": "f6625789b716e8bdd97ef9592295969f2b107ccb9df826496736b75c0a537f98",
+    "answers.w2.jsonl": "fa55f657740850bc481821d31ae6d53fc5c9d823dd8cd5b9b8d726e6354175c7",
+    "answers.w3.jsonl": "fe853f5e9b25da1ab669e55e1a0658b2928dd412a0585194e0189d39281e589e",
+    "answers.w4.jsonl": "63da5a1295599d87a80826a23b57afd728fc51dcabdeae8b284e577a36a7769e",
+    "answers.w5.jsonl": "2f3f6fbe3ee47e5a33fa5dbe7ee5806e7e72fa947a797f92c3684c1ac29a2c4d",
+    "answers.w6.jsonl": "7bc2abd860f207e2225a7151c54dce95591995970da3ba5bb8ae163d66a9cfe6",
+    "answers.w7.jsonl": "4b4a85cbc4d7d5e2e09293bb6d52ee0543df3dde4a622b69d74d325d4afb33ef",
+    "calls.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "calls.w0.jsonl": "4dd6b4498b0f46293c487e06b52407fc5bbab3c1d7100cf98b1288725c813243",
+    "calls.w1.jsonl": "1694d6ba4c50c7e642bcc82373b28ae5b6c254246b76eb7149a25fa0a953f7df",
+    "calls.w2.jsonl": "dce71a04cec3714ff5d4e362a72f016cc73441ee832d57b0be8a59c69f1ce0ed",
+    "calls.w3.jsonl": "cbeffbbf6ce1d804cf4d4ad1e5d66ef3760c479023230e3da76e36eef5135309",
+    "calls.w4.jsonl": "d169801902907f5368968788b86cd11ad14f98ec606af8b8a81d3f7728a02424",
+    "calls.w5.jsonl": "79da8982b50100b053e94b970335456560dbe5038166291ba4780d3c90ac9bdb",
+    "calls.w6.jsonl": "b0e4dd28d0e620d32a3e61e2c0b258a859852cb2bafe60ba6668dac58109ebe5",
+    "calls.w7.jsonl": "ae606a960479f6892eb2d57cb4e60c41fb0543e17669cbe68ad3b989af515dda"
+  }
+}
