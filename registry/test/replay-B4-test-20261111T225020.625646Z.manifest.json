@@ -663,8 +663,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T22:50:20.625646+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T23:00:09.313275+00:00",
+  "status": "done",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -674,5 +674,108 @@
       "status": "interrupted"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/replay-B4-test-20261111T225020.625646Z.intent.json",
+  "resumed_from": {
+    "run_id": "replay-B4-test-20261111T203405.413565Z",
+    "commit": "23b5fdaf08c1a4876cdb954a23e64e5bfa3a011f",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "interrupted",
+    "started_at": "2026-11-11T20:34:05.413565+00:00",
+    "finished_at": "2026-11-11T22:49:03.051704+00:00",
+    "workers": 6,
+    "stopped_by": "KeyboardInterrupt: SIGHUP",
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": "KeyboardInterrupt: SIGHUP",
+    "predictions_sha256": null,
+    "calls_sha256": "e377cb4cc7b82078439b1e340c276ddbdae694c6361f39fd9e8a5ec3d3feb221",
+    "copied": {
+      "n_invocations": 43173,
+      "n_calls": 43619,
+      "usage": {
+        "input": 155297315,
+        "cached_input": 148430624,
+        "output": 3758157,
+        "reasoning": 0,
+        "cache_write": 0
+      }
+    },
+    "discarded": {
+      "n_invocations": 0,
+      "n_calls": 0,
+      "usage": {
+        "input": 0,
+        "cached_input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_write": 0
+      },
+      "question_ids": []
+    }
+  },
+  "sessions": [
+    {
+      "started_at": "2026-11-11T20:34:05.413565+00:00",
+      "finished_at": "2026-11-11T22:49:03.051704+00:00",
+      "commit": "23b5fdaf08c1a4876cdb954a23e64e5bfa3a011f",
+      "workers": 6
+    },
+    {
+      "started_at": "2026-11-11T22:50:20.625646+00:00",
+      "finished_at": "2026-11-11T23:00:09.313275+00:00",
+      "commit": "90fd36d7c0754c5c582515d742a6793bd0870f8d",
+      "workers": 6
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 46240,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "extract_keywords": {
+      "OutputParserException": 7
+    },
+    "filter_column": {
+      "APIConnectionError": 432,
+      "OutputParserException": 8
+    },
+    "agent_ss": {
+      "APIConnectionError": 7
+    },
+    "agent_cg": {
+      "APIConnectionError": 1
+    },
+    "select_columns": {
+      "OutputParserException": 2
+    },
+    "select_tables": {
+      "OutputParserException": 2
+    }
+  },
+  "c1_errors": 0,
+  "n_questions_replayed": 498,
+  "model_failures": {
+    "filter_column": 4,
+    "select_columns": 1,
+    "extract_keywords": 3,
+    "select_tables": 1
+  },
+  "harness_errors": {},
+  "databases_changed": [],
+  "predictions_sha256": null,
+  "calls_sha256": "7561c10b5508557255cbf1287134dec6422f09b398a9f07c807e580667dbf09b",
+  "n_predictions": null,
+  "unregistered_call_sites": [],
+  "end_reason": null
 }
