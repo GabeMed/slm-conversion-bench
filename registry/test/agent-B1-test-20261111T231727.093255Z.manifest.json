@@ -808,10 +808,40 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T23:17:27.093255+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T23:23:41.835473+00:00",
+  "status": "interrupted",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B1-test-20261111T231727.093255Z.intent.json",
+  "stopped_by": "KeyboardInterrupt: SIGTERM",
+  "problems": [],
+  "n_calls": 1138,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "agent_ss": {
+      "IndexError": 7
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {},
+  "databases_changed": [],
+  "predictions_sha256": "e135ff02abc9438c55adf1029df4699301c94db864e3e8ef567eee6fe9f3c44b",
+  "calls_sha256": "890120aac425db1d41994efc750edc955e33cc3183ad003333718899a2087c85",
+  "n_predictions": 19,
+  "unregistered_call_sites": [],
+  "end_reason": "KeyboardInterrupt: SIGTERM"
 }
