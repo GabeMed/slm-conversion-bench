@@ -692,8 +692,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T03:27:07.693347+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T05:31:29.961409+00:00",
+  "status": "done",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -708,5 +708,259 @@
       "status": "running"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B4-test-20261111T032707.693347Z.intent.json",
+  "resumed_from": {
+    "run_id": "agent-B4-test-20261111T031525.367031Z",
+    "commit": "347c36c07ad70d69ac1254f71cef728c9a9780b3",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "running",
+    "started_at": "2026-11-11T03:15:25.367031+00:00",
+    "finished_at": null,
+    "workers": 8,
+    "stopped_by": null,
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": null,
+    "predictions_sha256": null,
+    "calls_sha256": null,
+    "discarded": {
+      "n_calls": 24,
+      "usage": {
+        "input": 9268,
+        "cached_input": 8800,
+        "output": 649,
+        "reasoning": 0,
+        "cache_write": 0
+      },
+      "question_ids": [
+        "415",
+        "416",
+        "424",
+        "440",
+        "459",
+        "462",
+        "465",
+        "466"
+      ]
+    },
+    "routes": {
+      "copied": 9779,
+      "missing": false
+    }
+  },
+  "resumed_question_ids": [
+    "5",
+    "11",
+    "12",
+    "17",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "31",
+    "32",
+    "36",
+    "37",
+    "39",
+    "40",
+    "41",
+    "45",
+    "46",
+    "47",
+    "48",
+    "50",
+    "62",
+    "72",
+    "77",
+    "79",
+    "82",
+    "83",
+    "85",
+    "87",
+    "89",
+    "92",
+    "93",
+    "94",
+    "95",
+    "98",
+    "99",
+    "100",
+    "112",
+    "115",
+    "116",
+    "117",
+    "118",
+    "125",
+    "128",
+    "129",
+    "136",
+    "137",
+    "138",
+    "145",
+    "149",
+    "152",
+    "159",
+    "168",
+    "169",
+    "173",
+    "186",
+    "189",
+    "192",
+    "194",
+    "195",
+    "197",
+    "198",
+    "200",
+    "201",
+    "206",
+    "207",
+    "208",
+    "212",
+    "213",
+    "215",
+    "218",
+    "219",
+    "220",
+    "226",
+    "227",
+    "228",
+    "230",
+    "231",
+    "232",
+    "234",
+    "236",
+    "239",
+    "240",
+    "242",
+    "243",
+    "244",
+    "245",
+    "247",
+    "248",
+    "249",
+    "253",
+    "255",
+    "260",
+    "263",
+    "268",
+    "273",
+    "281",
+    "282",
+    "327",
+    "340",
+    "341",
+    "344",
+    "345",
+    "346",
+    "347",
+    "349",
+    "352",
+    "356",
+    "358",
+    "366",
+    "368",
+    "371",
+    "377",
+    "379",
+    "383",
+    "391",
+    "397",
+    "402",
+    "405",
+    "407",
+    "408",
+    "409",
+    "412",
+    "414",
+    "422",
+    "427"
+  ],
+  "sessions": [
+    {
+      "started_at": "2026-11-11T02:32:53.365624+00:00",
+      "finished_at": "2026-11-11T03:08:52.151760+00:00",
+      "commit": "187b9bcd59c58a9a0273f70475bc5672ebcc00be",
+      "workers": 8,
+      "killed": true
+    },
+    {
+      "started_at": "2026-11-11T03:15:25.367031+00:00",
+      "finished_at": "2026-11-11T03:15:45.109209+00:00",
+      "commit": "347c36c07ad70d69ac1254f71cef728c9a9780b3",
+      "workers": 8,
+      "killed": true
+    },
+    {
+      "started_at": "2026-11-11T03:27:07.693347+00:00",
+      "finished_at": "2026-11-11T05:31:29.961409+00:00",
+      "commit": "c0dcb82df42d457dfb47a3b0e5fd05cef04e85f3",
+      "workers": 3
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 46244,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "filter_column": {
+      "APIConnectionError": 368,
+      "OutputParserException": 11
+    },
+    "agent_ss": {
+      "APIConnectionError": 26
+    },
+    "agent_cg": {
+      "APIConnectionError": 5
+    },
+    "agent_ir": {
+      "APIConnectionError": 5
+    },
+    "extract_keywords": {
+      "OutputParserException": 5
+    },
+    "select_columns": {
+      "OutputParserException": 2
+    },
+    "select_tables": {
+      "OutputParserException": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {
+    "1227": {
+      "retrieve_entity": "<class 'TypeError'>: <'NoneType' object is not iterable>",
+      "retrieve_context": "<class 'TypeError'>: <'NoneType' object is not iterable>"
+    },
+    "1175": {
+      "retrieve_entity": "<class 'TypeError'>: <'NoneType' object is not iterable>",
+      "retrieve_context": "<class 'TypeError'>: <'NoneType' object is not iterable>"
+    },
+    "1091": {
+      "select_columns": "<class 'AttributeError'>: <'NoneType' object has no attribute 'items'>"
+    },
+    "1189": {
+      "select_tables": "<class 'AttributeError'>: <'NoneType' object has no attribute 'get'>"
+    }
+  },
+  "harness_errors": {},
+  "databases_changed": [],
+  "predictions_sha256": "5f70aabafac2e2e1a59e53952a4efc7accbdeaf5284bca80234fe12d7d7deaf8",
+  "calls_sha256": "0e2b97a8d25d06d107b9f074dd3435559bb01576ac31ef5ea68cd7e24ebcf93f",
+  "n_predictions": 498,
+  "unregistered_call_sites": [],
+  "end_reason": null
 }
