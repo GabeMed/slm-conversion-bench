@@ -658,10 +658,60 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T20:34:56.183437+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T22:49:00.058451+00:00",
+  "status": "interrupted",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/replay-slm_qwen3-8b-test-20261111T203456.183437Z.intent.json",
+  "stopped_by": "KeyboardInterrupt: SIGHUP",
+  "problems": [],
+  "n_calls": 37853,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "generate_candidate": {
+      "APIConnectionError": 1
+    },
+    "filter_column": {
+      "APIConnectionError": 548,
+      "OutputParserException": 606
+    },
+    "agent_cg": {
+      "APIConnectionError": 13
+    },
+    "agent_ss": {
+      "APIConnectionError": 13
+    },
+    "select_columns": {
+      "APIConnectionError": 4,
+      "OutputParserException": 2
+    },
+    "select_tables": {
+      "APIConnectionError": 3
+    }
+  },
+  "c1_errors": 0,
+  "n_questions_replayed": 364,
+  "model_failures": {
+    "filter_column": 298,
+    "select_columns": 1
+  },
+  "harness_errors": {},
+  "databases_changed": [],
+  "predictions_sha256": null,
+  "calls_sha256": "fc2e731d627567d1c419d1cfae3aa9f4c27dfa26636116c9a37ec88e95f6c8bd",
+  "n_predictions": null,
+  "unregistered_call_sites": [],
+  "end_reason": "KeyboardInterrupt: SIGHUP"
 }
