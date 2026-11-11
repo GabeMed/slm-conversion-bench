@@ -534,8 +534,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T05:55:22.766677+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T06:07:31.994623+00:00",
+  "status": "failed",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -555,5 +555,211 @@
       "status": "failed"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B0-test-20261111T055522.766677Z.intent.json",
+  "resumed_from": {
+    "run_id": "agent-B0-test-20261111T054112.034753Z",
+    "commit": "294f41b06974da2f416a8175d29f853b8e746022",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "failed",
+    "started_at": "2026-11-11T05:41:12.034753+00:00",
+    "finished_at": "2026-11-11T05:44:25.971939+00:00",
+    "workers": 5,
+    "stopped_by": null,
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": "harness error on question 340: extract_keywords: engine production_llm: BadRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CgvcF",
+    "predictions_sha256": "a3e1aef90289867df449f60aa5b405a1fe1628916722be408d25275d18da1ab5",
+    "calls_sha256": "2cfcb11c73a26626646c65b19e8fbcbeeaf61a57590ca14cb5961f2fb4cf5721",
+    "discarded": {
+      "n_calls": 16,
+      "usage": {
+        "input": 7989,
+        "cached_input": 3768,
+        "output": 578,
+        "reasoning": 0,
+        "cache_write": 0
+      },
+      "question_ids": [
+        "340",
+        "341",
+        "344",
+        "345",
+        "346"
+      ]
+    },
+    "routes": null
+  },
+  "resumed_question_ids": [
+    "5",
+    "11",
+    "12",
+    "17",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "31",
+    "32",
+    "36",
+    "37",
+    "39",
+    "40",
+    "41",
+    "45",
+    "46",
+    "47",
+    "48",
+    "50",
+    "62",
+    "72",
+    "77",
+    "79",
+    "82",
+    "83",
+    "85",
+    "87",
+    "89",
+    "92",
+    "93",
+    "94",
+    "95",
+    "98",
+    "99",
+    "100",
+    "112",
+    "115",
+    "116",
+    "117",
+    "118",
+    "125",
+    "128",
+    "129",
+    "136",
+    "137",
+    "138",
+    "145",
+    "149",
+    "152",
+    "159",
+    "168",
+    "169",
+    "173",
+    "186",
+    "189",
+    "192",
+    "194",
+    "195",
+    "197",
+    "198",
+    "200",
+    "201",
+    "206",
+    "207",
+    "208",
+    "212",
+    "213",
+    "215",
+    "218",
+    "219",
+    "220",
+    "226",
+    "227",
+    "228",
+    "230",
+    "231",
+    "232",
+    "234",
+    "236",
+    "239",
+    "240",
+    "242",
+    "243",
+    "244",
+    "245",
+    "247",
+    "248",
+    "249",
+    "253",
+    "255",
+    "260",
+    "263",
+    "268",
+    "273",
+    "281",
+    "282",
+    "327"
+  ],
+  "sessions": [
+    {
+      "started_at": "2026-11-11T02:45:37.820745+00:00",
+      "finished_at": "2026-11-11T02:45:53.502658+00:00",
+      "commit": "ff3911b11e809e1f146fdc7cda59d101678d050c",
+      "workers": 8
+    },
+    {
+      "started_at": "2026-11-11T02:47:01.507238+00:00",
+      "finished_at": "2026-11-11T03:08:46.580331+00:00",
+      "commit": "9bb4d6884bbd014c6fa6c7487a8e74425a50be01",
+      "workers": 8,
+      "killed": true
+    },
+    {
+      "started_at": "2026-11-11T05:41:12.034753+00:00",
+      "finished_at": "2026-11-11T05:44:25.971939+00:00",
+      "commit": "294f41b06974da2f416a8175d29f853b8e746022",
+      "workers": 5
+    },
+    {
+      "started_at": "2026-11-11T05:55:22.766677+00:00",
+      "finished_at": "2026-11-11T06:07:31.994623+00:00",
+      "commit": "c92c53b2b1897b0a8fb38319937b76f19410d9a0",
+      "workers": 3
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 10177,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "filter_column": {
+      "APIConnectionError": 10
+    },
+    "extract_keywords": {
+      "OutputParserException": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {
+    "349": {
+      "retrieve_entity": "<class 'TypeError'>: <'NoneType' object is not iterable>",
+      "retrieve_context": "<class 'TypeError'>: <'NoneType' object is not iterable>"
+    },
+    "415": {
+      "retrieve_context": "<class 'bench.agent.hooks.HarnessError'>: <embeddings: APIConnectionError: Connection error.>"
+    }
+  },
+  "harness_errors": {
+    "415": [
+      "embeddings: APIConnectionError: Connection error."
+    ]
+  },
+  "databases_changed": [],
+  "predictions_sha256": "828a77e26d4646d8e077fb57b61579d76f8e158457c7ed59ce11671d75846549",
+  "calls_sha256": "e66841e82e642ddce96212e26ee85ed62f9d8ae0f4be70d9b2e13b2c9a1ee33e",
+  "n_predictions": 130,
+  "unregistered_call_sites": [],
+  "end_reason": "harness error on question 415: embeddings: APIConnectionError: Connection error."
 }
