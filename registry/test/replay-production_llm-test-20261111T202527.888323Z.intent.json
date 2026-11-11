@@ -1,0 +1,16 @@
+{
+  "run_id": "replay-production_llm-test-20261111T202527.888323Z",
+  "type": "replay",
+  "arm": null,
+  "engine": "production_llm",
+  "split": "test",
+  "source_run_id": "agent-B0-test-20261111T060814.371294Z",
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "commit": "b678e2d78019b10be95b4ea07a9247d799894374",
+  "started_at": "2026-11-11T20:25:27.888323+00:00",
+  "resumed_from": null,
+  "redo_reason": null,
+  "redo": null,
+  "earlier_attempts": [],
+  "unregistered_source_hashes": null
+}
