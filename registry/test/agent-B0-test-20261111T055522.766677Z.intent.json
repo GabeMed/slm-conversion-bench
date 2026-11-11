@@ -1,0 +1,20 @@
+{
+  "run_id": "agent-B0-test-20261111T055522.766677Z",
+  "type": "agent",
+  "arm": "B0",
+  "engine": null,
+  "split": "test",
+  "source_run_id": null,
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "commit": "c92c53b2b1897b0a8fb38319937b76f19410d9a0",
+  "started_at": "2026-11-11T05:55:22.766677+00:00",
+  "resumed_from": "agent-B0-test-20261111T054112.034753Z",
+  "redo_reason": null,
+  "redo": null,
+  "earlier_attempts": [
+    "agent-B0-test-20261111T024537.820745Z",
+    "agent-B0-test-20261111T024701.507238Z",
+    "agent-B0-test-20261111T054112.034753Z"
+  ],
+  "unregistered_source_hashes": null
+}
