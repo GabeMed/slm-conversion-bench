@@ -1,0 +1,18 @@
+{
+  "run_id": "replay-B4-test-20261111T225020.625646Z",
+  "type": "replay",
+  "arm": "B4",
+  "engine": null,
+  "split": "test",
+  "source_run_id": "agent-B0-test-20261111T060814.371294Z",
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "commit": "90fd36d7c0754c5c582515d742a6793bd0870f8d",
+  "started_at": "2026-11-11T22:50:20.625646+00:00",
+  "resumed_from": "replay-B4-test-20261111T203405.413565Z",
+  "redo_reason": null,
+  "redo": null,
+  "earlier_attempts": [
+    "replay-B4-test-20261111T203405.413565Z"
+  ],
+  "unregistered_source_hashes": null
+}
