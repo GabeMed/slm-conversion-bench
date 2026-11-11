@@ -673,8 +673,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-11T16:49:24.731378+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-11T17:29:58.848546+00:00",
+  "status": "failed",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -699,5 +699,141 @@
       "status": "interrupted"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B5-test-20261111T164924.731378Z.intent.json",
+  "resumed_from": {
+    "run_id": "agent-B5-test-20261111T155136.103490Z",
+    "commit": "61e7514aa94b9c171bb085d274bc6de797e53b81",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "interrupted",
+    "started_at": "2026-11-11T15:51:36.103490+00:00",
+    "finished_at": "2026-11-11T15:54:05.173145+00:00",
+    "workers": 3,
+    "stopped_by": "KeyboardInterrupt: SIGTERM",
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": "KeyboardInterrupt: SIGTERM",
+    "predictions_sha256": "7ddd2016f618a494917cf1426219da9edc454ad93a147b37225b95d8b7f3365c",
+    "calls_sha256": "019f442e07f3523c1e876bf4e7677eb099c3a2f928a46f84a1601adaf6a0c9e8",
+    "discarded": {
+      "n_calls": 428,
+      "usage": {
+        "input": 1124832,
+        "cached_input": 1058726,
+        "output": 30050,
+        "reasoning": 0,
+        "cache_write": 0
+      },
+      "question_ids": [
+        "50",
+        "62",
+        "72"
+      ]
+    },
+    "routes": {
+      "copied": 2184,
+      "missing": false
+    }
+  },
+  "resumed_question_ids": [
+    "5",
+    "11",
+    "12",
+    "17",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "31",
+    "32",
+    "36",
+    "37",
+    "39",
+    "40",
+    "41",
+    "45",
+    "46",
+    "47",
+    "48"
+  ],
+  "sessions": [
+    {
+      "started_at": "2026-11-11T08:11:02.410537+00:00",
+      "finished_at": "2026-11-11T08:18:40.684423+00:00",
+      "commit": "d7a3a9849ee930c9a0f383755d159ecba191dc2f",
+      "workers": 3
+    },
+    {
+      "started_at": "2026-11-11T15:48:10.767041+00:00",
+      "finished_at": "2026-11-11T15:49:20.025631+00:00",
+      "commit": "8db62a8a9db4ecfae07ed042cda5ab2038dbe2b7",
+      "workers": 3
+    },
+    {
+      "started_at": "2026-11-11T15:49:52.610669+00:00",
+      "finished_at": "2026-11-11T15:50:54.979220+00:00",
+      "commit": "02268a736a59b1eb953904c8dac4e005e1c533ac",
+      "workers": 3
+    },
+    {
+      "started_at": "2026-11-11T15:51:36.103490+00:00",
+      "finished_at": "2026-11-11T15:54:05.173145+00:00",
+      "commit": "61e7514aa94b9c171bb085d274bc6de797e53b81",
+      "workers": 3
+    },
+    {
+      "started_at": "2026-11-11T16:49:24.731378+00:00",
+      "finished_at": "2026-11-11T17:29:58.848546+00:00",
+      "commit": "da533c2847472adf7f50fbe34c9b6e010482d65f",
+      "workers": 3
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 13115,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "agent_cg": {
+      "APIConnectionError": 16
+    },
+    "agent_ir": {
+      "APIConnectionError": 10
+    },
+    "agent_ss": {
+      "APIConnectionError": 5
+    },
+    "filter_column": {
+      "APIConnectionError": 181,
+      "InternalServerError": 1
+    },
+    "select_tables": {
+      "InternalServerError": 1
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {
+    "worker 1": [
+      "the worker did not end cleanly (exit code -11, no outcome reported)"
+    ]
+  },
+  "databases_changed": [],
+  "predictions_sha256": "10830f1e7f8d354f79c5d9ed69f2c3cbe7d43b7f1745ca6135f0739f85e2ed3f",
+  "calls_sha256": "ec8ad6db0fb5a29a09a99fad722a64bba76c5cec4bb14edbc6078022717279d9",
+  "n_predictions": 107,
+  "unregistered_call_sites": [],
+  "end_reason": "harness error on worker 1: the worker did not end cleanly (exit code -11, no outcome reported)"
 }
