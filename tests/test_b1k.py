@@ -76,7 +76,7 @@ def world(tmp_path, monkeypatch, right_k0, right_k3):
                                                        "arms": {"B3": {"choice": None},
                                                                 "B4": {"choice": None, "centroids": None},
                                                                 "B5": {"choice": None, "centroids": None,
-                                                                       "exploratory_allocation": None}}})
+                                                                       "allocation": None, "exploratory_allocation": None}}})
     monkeypatch.setattr(data, "pilot_ids", lambda config: list(PILOT))  # D's accessor (design §6.2)
     k0 = agent_run("agent-k0", 0, right_k0, no_sql=PILOT[40:])
     k3 = agent_run("agent-k3", 3, right_k3)

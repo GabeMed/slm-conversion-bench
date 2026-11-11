@@ -25,7 +25,7 @@ PRICES = {"as_of": "2026-09-30", "table": {
 # the arms' facts before RUNBOOK step 8: the shipped configuration names J5's centroids for B4 and B5,
 # which these worlds do not hold; a test that wants an arm's fact sets it
 NO_CENTROIDS = {"B3": {"choice": None}, "B4": {"choice": None, "centroids": None},
-                "B5": {"choice": None, "centroids": None, "exploratory_allocation": None}}  # before J6 and J5: the world writes its own facts
+                "B5": {"choice": None, "centroids": None, "allocation": None, "exploratory_allocation": None}}  # before J6, J5 and J7: the world writes its own facts
 
 
 def without_centroids(config):

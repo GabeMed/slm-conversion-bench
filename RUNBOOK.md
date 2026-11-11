@@ -660,7 +660,10 @@ keys' length and the registry):
 
   with `<h>` covering B3, B4, B5 and the B4 replay with a margin (step 5's time projection). A pod brought up
   before the registration runs the code of then (its plan, and its environment: dev mode reaches vLLM only
-  from a pod brought up by the code that passes it to the jobs, #52), so it is replaced, never reused. Every
+  from a pod brought up by the code that passes it to the jobs, #52), so it is replaced, never reused, unless no GPU of
+  `serving.gpu` is available in the volume's data center: then, after the pull at the registered commit, the
+  pod's code is synced and the server restarted from it (`restart_serving`), and the checks below refuse any
+  execution whose code, plan or server differs from the registration's (declared in `prereg/DEVIATIONS.md`). Every
   `bench run` and `bench replay` that can reach the SLM then reads the server before it opens the run (no
   intent, no call): the pod this machine recorded, its `plan.json`, the state its server wrote on the volume,
   `/v1/models` and vLLM's `/version` through the tunnel. It records them in the manifest (`served`) and

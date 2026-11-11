@@ -410,3 +410,16 @@ Changes after Stage 0 that can change a result or its interpretation.
   that leaves it out, and lists its n, EX and cost outside every J4 comparison and the SPEC §5 map. The registered B5
   still follows J7's allocation alone. Direction: none on any verdict. Frozen code changed: bench/contracts/router.py,
   bench/report.py; config.yaml: arms.B5.exploratory_allocation
+- 2026-11-10 · the serving pod brought up before the registration is reused for the test, not replaced (RUNBOOK,
+  test-split served check: "a pod brought up before the registration … is replaced, never reused"). Why: the pod
+  must be created in the network volume's data center (CA-MTL-3), and the A100 80GB PCIe there was the only one
+  available; RunPod's availability for that type in CA-MTL-3 alternated between LOW and none during the day
+  (19:16–19:47Z) and showed none beside this pod at 23:06Z, so a `down` could leave the test without a GPU of the
+  registered type. What keeps the test's execution what the registration names: after the pull at the registered
+  commit the pod's code is made this checkout's (`Provider.sync_code`) and the server is started again from it
+  (`restart_serving`), and on the test split every SLM execution is refused unless the pod's recorded code and the
+  code the server started from are this checkout's by sha256 (#63), its plan is `serve_plan(config)`, its vLLM is
+  `serving.vllm_version`, `/v1/models` lists every routed model, and dev mode reaches vLLM through `/bench/env`
+  (#52). Not checked: the container image and the environment variables set when the pod was created, which no
+  measured value reads. The test's SLM arms run on the same physical GPU as the six load-test sweeps and P-4.
+  Direction: none on any verdict. Frozen code changed: none; RUNBOOK.md: one sentence.
