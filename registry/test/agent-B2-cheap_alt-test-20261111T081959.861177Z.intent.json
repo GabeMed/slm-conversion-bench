@@ -1,0 +1,16 @@
+{
+  "run_id": "agent-B2-cheap_alt-test-20261111T081959.861177Z",
+  "type": "agent",
+  "arm": "B2",
+  "engine": "cheap_alt",
+  "split": "test",
+  "source_run_id": null,
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "commit": "fcbac1a1eebb23b366b40fc95a05438b654bbbd2",
+  "started_at": "2026-11-11T08:19:59.861177+00:00",
+  "resumed_from": null,
+  "redo_reason": null,
+  "redo": null,
+  "earlier_attempts": [],
+  "unregistered_source_hashes": null
+}
