@@ -94,7 +94,8 @@ Three things a reader should know before quoting this:
   the paper's rule of thumb of ten thousand; this says nothing about larger training sets.
 - **For this task the agent itself is optional with a large model.** One call to Claude Sonnet 5.5, with no agent,
   scores 83.5% at $0.028 per correct answer, less than the hybrid. The 81–89% saving is against the agent it replaces.
-- **It was not faster.** On one rented GPU the small model answered slower than the hosted LLM.
+- **Latency depends on sizing.** Within its GPU's capacity the fine-tuned small model answers its tasks as fast as
+  the large LLM or faster; in the test one GPU was overloaded and it was slower. Time per question was the same.
 
 <details>
 <summary>Every configuration tested, and the registered verdicts</summary>
@@ -131,7 +132,9 @@ One execution per configuration.
 - The full report, with every test and the SPEC §5 map: [`results/report/report.md`](results/report/report.md). It was
   produced with a small declared patch of the analysis code ([`results/report/analysis-patch.diff`](results/report/analysis-patch.diff)),
   explained in [`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md); no verdict rule changed.
-- Per-task results, learning curves, cost and latency: [`docs/preliminary-results.md`](docs/preliminary-results.md),
+- **Results, axis by axis** (accuracy, per task, cost of running, cost of building, latency, data volume, limits):
+  [`docs/results.md`](docs/results.md).
+- Working notes behind it: [`docs/preliminary-results.md`](docs/preliminary-results.md),
   [`docs/preliminary-cost-latency.md`](docs/preliminary-cost-latency.md).
 - The data behind every table: [`results/`](results/README.md). Raw call logs, adapters and training sets: the
   [`data-2026-11-12`](https://github.com/nest-ai-org/slm-conversion-bench/releases/tag/data-2026-11-12) release.

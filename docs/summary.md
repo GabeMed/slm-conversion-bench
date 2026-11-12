@@ -41,8 +41,12 @@ Small-model costs run from a fully used rented GPU to one used 20% of the time; 
    least as high as the agent for Sonnet (+1.8) and level for gpt-oss-120b (+0.6), at a fraction of the cost.
    Against that baseline the hybrid is not cheaper, and the registered cost claim is refuted. The agent did help
    the small model: on calibration, a single call to Qwen3-8B was 9 points below the agent on Qwen3-8B.
-4. **Latency did not favour the small model.** Served on one rented A100, its calls had a p95 of 8 to 22 s,
-   against about 3 s for the hosted LLM, and outside the latency limit its price assumes.
+4. **Latency depends on sizing.** Within its GPU's capacity (up to 16 simultaneous calls on one A100) the
+   fine-tuned small model answers the column filter at a p95 of 1.6 to 2.6 s, against 2.9 s for the hosted LLM,
+   and the agent's steps ten times faster. In the test one GPU served 14 to 33 calls at a time and the p95 rose
+   to 8 to 22 s. Time per question was the same as the agent on the LLM (median 53 s against 56 s).
+5. **Building it cost about US$ 281**: US$ 226 to collect the large model's outputs and US$ 56 to train the four
+   adapters, paid back in about 1,200 questions at the hybrid's saving.
 
 ## What this does and does not show
 
@@ -74,4 +78,4 @@ Protocol and registration: [`SPEC.md`](../SPEC.md), [`prereg/`](../prereg). Repo
 [`results/`](../results/README.md). Per-task results, learning curves, cost and latency:
 [`preliminary-results.md`](preliminary-results.md), [`preliminary-cost-latency.md`](preliminary-cost-latency.md).
 Every prompt and response of every run, the adapters and the training sets: the `data-2026-11-12` release.
-Reproducing the study costs roughly US$ 620 at list prices, before fine-tuning.
+The results axis by axis, each with its source: [`results.md`](results.md).

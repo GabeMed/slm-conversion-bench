@@ -4,7 +4,8 @@
 already logged by the five finished arms of the test (B0, B2 on two engines, B3, B4, B5; 498 questions).
 No execution was made for it. B1 finished after this page was computed and is not in it (382 / 498 =
 76.7%; computed with a one-line patch of the cost judgment, which otherwise refuses three empty calls, its
-API cost is about US$ 0.025 per question, a lower bound). The registered cost comparisons come only from
+API cost is about US$ 0.025 per question, a lower bound; its latency, and the load-test latency per task, are in
+[`results.md`](results.md), section 6). The registered cost comparisons come only from
 `bench report`; nothing below is a verdict, and every table
 is labelled exploratory. Accuracy and its intervals are in
 [`preliminary-results.md`](preliminary-results.md); the limits listed there (one execution per arm,
