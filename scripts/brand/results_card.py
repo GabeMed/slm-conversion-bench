@@ -61,6 +61,8 @@ def slm_of(config: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
              ((config.get("arms") or {}).get("B3") or {}).get("choice")
     if not choice:
         return None, None
+    if choice.endswith(".json") and (ROOT / choice).is_file():   # the registered form: J6's judgment names the SLM
+        choice = json.loads((ROOT / choice).read_text()).get("slm") or choice
     roles = config.get("roles") or {}
     for c in roles.get("slm_candidates") or []:
         if choice in (c.get("name"), c.get("base")):
