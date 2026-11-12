@@ -2,8 +2,10 @@
 
 **Status: exploratory, not the registered report.** Everything on this page is recomputed from data
 already logged by the five finished arms of the test (B0, B2 on two engines, B3, B4, B5; 498 questions).
-No execution was made for it. B1 has not finished and none of its directories was read. The registered
-cost comparisons need B1 and come only from `bench report`; nothing below is a verdict, and every table
+No execution was made for it. B1 finished after this page was computed and is not in it (382 / 498 =
+76.7%; computed with a one-line patch of the cost judgment, which otherwise refuses three empty calls, its
+API cost is about US$ 0.025 per question, a lower bound). The registered cost comparisons come only from
+`bench report`; nothing below is a verdict, and every table
 is labelled exploratory. Accuracy and its intervals are in
 [`preliminary-results.md`](preliminary-results.md); the limits listed there (one execution per arm,
 resumed sessions, the single call scoring at least as high as the agent) apply to every number here.
