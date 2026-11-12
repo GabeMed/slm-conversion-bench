@@ -15,6 +15,8 @@ after test results were seen.
 - `test/eval-<run id>-<time>/`: the evaluation of that run: `manifest.json` and `results.jsonl`, one line per
   question (predicted SQL, gold SQL, whether the results match). `eval-per-call-…` scores each SQL-generation
   call of a run or replay.
+- `test/partial/`: the partial evaluations (`bench eval --partial`) of the test attempts that were abandoned
+  and resumed, on the questions each had completed. Descriptive only, never read for a verdict.
 - `calibration/`: the same for the calibration split (200 questions).
 - `calibration/post-hoc/`: runs made on 2026-11-12 from a scratch checkout: the learning-curve replays
   (adapters trained on 25% and 50% of a cluster's rows, and the registered adapters), the base model replayed
@@ -26,9 +28,9 @@ after test results were seen.
 
 ## Not here
 
-- The call logs (`calls.jsonl`, every prompt and response; tens of gigabytes) and the routing logs.
-- The LoRA adapters and their training sets.
-- B1 (the agent on the cheaper LLM): unfinished when this directory was written.
+- The call logs (`calls.jsonl`, every prompt and response; tens of gigabytes), the routing logs, the LoRA
+  adapters and their training sets: they are the assets of the repository's release `data-2026-11-12`,
+  byte-exact, so the hashes in `registry/test/` verify against them.
 
 ## Licences and sources
 

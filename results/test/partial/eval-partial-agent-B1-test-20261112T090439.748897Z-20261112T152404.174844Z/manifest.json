@@ -1,0 +1,69 @@
+{
+  "run_id": "eval-partial-agent-B1-test-20261112T090439.748897Z-20261112T152404.174844Z",
+  "type": "eval",
+  "partial": true,
+  "predictions_sha256": "62de61c25f2c917e55e4c23b24315d729672be3013f704d7ea135cc2c28bd1f7",
+  "of_questions": 498,
+  "source_run_id": "agent-B1-test-20261112T090439.748897Z",
+  "source_type": "agent",
+  "arm": "B1",
+  "engine": null,
+  "mode": null,
+  "split": "test",
+  "commit": "64272a0ee7489fe6367f444e2b863eae83be5e2d",
+  "dirty": true,
+  "dirty_paths": [
+    {
+      "status": "??",
+      "path": "judgments/J2/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/01b2b98db61d42dd45ed26b938edfaafe4fa7a681410691707a1ca78c8e6e6ac/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/3f4468f6ba5c00738d130190b44b5d357ac73b83d6768abad48d94c8706df211/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/75fb204cc40cfbae5ed7d00e1da9c50cc5614822951f4626397729eda5af73aa/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/b44c8d9790f1dd97ee37efa6e685a2a1802d063855aaf5001b7ca5824e98d923/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/ba48cfe7ddf54f3bcd65c303519fe8365b0f9f412c8ee42e2f0e25a8a9ea14e4/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/e5b1edd5e23cc02d488081f81c09afcbd2d2d8ce8a688642721e94d9f2de9d17/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/e5df8f709518996001a61c0b17936bc7e40257f56c0e25d59d8ad30af1668671/"
+    }
+  ],
+  "dirty_paths_total": 8,
+  "source_commit": "48ff78a2d619550b7e07b83af58910845fa20738",
+  "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "fixed_date": "2026-09-30",
+  "timeout_s": 60,
+  "sqlite_version": "3.53.1",
+  "databases": {
+    "california_schools": "986817d793479801ed55133e55aa27e335422c0cd3866b54a3d6317b7c5f09c1",
+    "card_games": "c98bdb57fe7474da798b407785544b9af0daaad5d61fd21e2a73309493bc1227",
+    "codebase_community": "92101be6d2a9f6adceea59d38f6d1c556087f9eea1432432a21268cb1348036d",
+    "financial": "d15d89cdb068a202b6f2b99342af44dffc1d52545b39ceaf62efdc0ba570101e",
+    "superhero": "75e94a2c3236ee3bb2c01fb97a1c4b4c1c269bcefd4eab1d04be323d2d0825b1",
+    "toxicology": "f5fa7f21af1ad878ff8fef1b0582b8cb2d7ed63dbac65ff16d2ba05667650c5b"
+  },
+  "started_at": "2026-11-12T15:24:04.174844+00:00",
+  "finished_at": "2026-11-12T15:25:42.807544+00:00",
+  "n": 206,
+  "correct": 155,
+  "gold_errors": 1
+}
