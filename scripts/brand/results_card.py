@@ -29,6 +29,10 @@ TITLE = "Which LLM calls of a real agent can a fine-tuned SLM take over?"
 SOURCE = "CHESS on BIRD · arXiv 2506.02153"
 FOOT = "Pre-registered. Every number from report.json."
 URL = "nest.technology/benchmarks"
+# --plain: what each bar's model answers, in words (the same agent and the same questions in every bar)
+PLAIN = {"B0": "every call", "B1": "every call, few-shot", "B2-production": "one call, no agent",
+         "B2-cheap": "one call, no agent", "B3": "every call, zero-shot", "B4": "every call, fine-tuned",
+         "B5": "fine-tuned, 95% of calls"}
 
 
 # ---------------------------------------------------------------- names
@@ -205,7 +209,7 @@ def draw(bars: List[Dict[str, Any]], theme: str, title: str = "", metric: str = 
                                    f'fill="none" stroke="{P["gEdge"] if b["green"] else P["kEdge"]}" stroke-width="1"'))
             vs = 26 if n > 4 else 30 if n > 3 else 34
             body.append(nest.text(cx, base - h - 12, b["txt"], vs, ink, 500, mono=True, anchor="middle", tracking=-0.8))
-            body.append(nest.text(cx, base - h - 12 - vs - 2, b["arm"], 13, P["dim"], 500, mono=True, anchor="middle",
+            body.append(nest.text(cx, base - h - 12 - vs - 2, b.get("code", b["arm"]), 13, P["dim"], 500, mono=True, anchor="middle",
                                   tracking=1))
         s = 36 if n > 4 else 42
         body.append(_chip(P, theme, b["maker"], (b["name"] or "?")[0].upper(), cx - s / 2, base + 14, s))
@@ -260,6 +264,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--out", help="where to write results-{light,dark}.svg (default: the report's directory)")
     ap.add_argument("--title", default="", help="a headline over the chart (the finding, once there is one); none by default")
     ap.add_argument("--arms", nargs="+", choices=ARMS, help="the arms to draw, in order (default: every arm reported)")
+    ap.add_argument("--plain", action="store_true",
+                    help="for a reader who has not read the protocol: no arm codes, and each bar says which of the "
+                         "agent's calls its model answers")
     args = ap.parse_args(argv)
     config = load_config(args.config)
     if args.pending:
@@ -275,6 +282,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         bars = bars_of(report, config, args.arms)
         if not bars:
             ap.error(f"{path} reports no arm with an EX")
+        if args.plain:
+            for b in bars:
+                b["code"] = ""
+                b["variant"] = PLAIN.get(b["arm"], b["variant"])
         n = {(report["arms"][b["arm"]] or {}).get("n") for b in bars}
         metric = f"Execution accuracy · {report.get('split', '')} split" + (f" · {n.pop()} questions" if len(n) == 1 else "")
         out = Path(args.out) if args.out else path.parent
