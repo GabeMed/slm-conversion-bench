@@ -125,6 +125,7 @@ columns are missing, and the column filter is shown as raw agreement.
 - Training cost is not recorded in the adapters' manifests and is not included.
 
 The registered cost comparisons need B1 and are produced by `bench report`.
+The full exploratory analysis of cost, latency and capacity is in [`preliminary-cost-latency.md`](preliminary-cost-latency.md).
 
 ## 4. What is still missing
 
