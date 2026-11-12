@@ -1,0 +1,613 @@
+{
+  "run_id": "replay-cheap_alt-calib-20261110T160847.505204Z",
+  "type": "replay",
+  "split": "calib",
+  "source_run_id": "agent-B0-calib-20261109T151141.039667Z",
+  "source_config_sha256": "117f67e4706f407ecefcc7747b7bc50add4e6a07560d2d76f8075f84febc05fc",
+  "source_calls_sha256": "5873f39bc5129d3278f9cd497768281a1641afd795fea5cfd1035c01b9ed6bc5",
+  "engine": "cheap_alt",
+  "arm": null,
+  "call_sites": null,
+  "question_ids": [
+    "0",
+    "2",
+    "3",
+    "8",
+    "18",
+    "38",
+    "53",
+    "56",
+    "60",
+    "64",
+    "70",
+    "91",
+    "113",
+    "123",
+    "127",
+    "139",
+    "144",
+    "147",
+    "148",
+    "155",
+    "161",
+    "162",
+    "166",
+    "170",
+    "182",
+    "190",
+    "191",
+    "196",
+    "210",
+    "217",
+    "225",
+    "229",
+    "235",
+    "259",
+    "266",
+    "274",
+    "276",
+    "279",
+    "295",
+    "297",
+    "299",
+    "300",
+    "304",
+    "308",
+    "314",
+    "317",
+    "320",
+    "322",
+    "325",
+    "329",
+    "354",
+    "357",
+    "372",
+    "376",
+    "387",
+    "395",
+    "399",
+    "419",
+    "420",
+    "430",
+    "431",
+    "435",
+    "438",
+    "439",
+    "452",
+    "467",
+    "475",
+    "476",
+    "515",
+    "517",
+    "519",
+    "523",
+    "525",
+    "535",
+    "540",
+    "546",
+    "583",
+    "591",
+    "593",
+    "599",
+    "600",
+    "601",
+    "603",
+    "612",
+    "614",
+    "616",
+    "627",
+    "630",
+    "635",
+    "638",
+    "641",
+    "643",
+    "646",
+    "649",
+    "661",
+    "668",
+    "689",
+    "693",
+    "695",
+    "711",
+    "722",
+    "727",
+    "735",
+    "746",
+    "748",
+    "754",
+    "757",
+    "768",
+    "770",
+    "777",
+    "787",
+    "803",
+    "809",
+    "817",
+    "821",
+    "835",
+    "842",
+    "843",
+    "844",
+    "852",
+    "855",
+    "870",
+    "874",
+    "885",
+    "888",
+    "890",
+    "911",
+    "917",
+    "924",
+    "932",
+    "938",
+    "946",
+    "952",
+    "953",
+    "992",
+    "996",
+    "1007",
+    "1026",
+    "1060",
+    "1072",
+    "1106",
+    "1120",
+    "1151",
+    "1160",
+    "1174",
+    "1177",
+    "1181",
+    "1183",
+    "1202",
+    "1203",
+    "1213",
+    "1215",
+    "1216",
+    "1222",
+    "1223",
+    "1224",
+    "1228",
+    "1234",
+    "1245",
+    "1248",
+    "1249",
+    "1264",
+    "1268",
+    "1269",
+    "1276",
+    "1278",
+    "1279",
+    "1282",
+    "1285",
+    "1286",
+    "1290",
+    "1295",
+    "1301",
+    "1304",
+    "1320",
+    "1336",
+    "1349",
+    "1355",
+    "1363",
+    "1364",
+    "1372",
+    "1374",
+    "1379",
+    "1385",
+    "1388",
+    "1395",
+    "1407",
+    "1413",
+    "1414",
+    "1437",
+    "1441",
+    "1451",
+    "1455",
+    "1463",
+    "1465",
+    "1469",
+    "1494",
+    "1499",
+    "1518",
+    "1520"
+  ],
+  "n_invocations": 16140,
+  "facts": {},
+  "few_shot": {
+    "k": 3,
+    "seed": 20260933,
+    "source_run": "agent-B0-train-20261109T214533.609401Z",
+    "source_calls_sha256": "a9029a2928f7726a330d796cb4d5a3d740dcb8b7f267aa6d866b0f4d997e7649",
+    "source_splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
+    "sampling": "agent call sites: per step (invocation key), nearest steps fill a shortfall; tool call sites: per call site",
+    "examples": {
+      "agent_ir": {
+        "ir:0": [
+          [
+            "725",
+            "ir:0"
+          ],
+          [
+            "860",
+            "ir:0"
+          ],
+          [
+            "199",
+            "ir:0"
+          ]
+        ],
+        "ir:1": [
+          [
+            "645",
+            "ir:1"
+          ],
+          [
+            "1516",
+            "ir:1"
+          ],
+          [
+            "504",
+            "ir:1"
+          ]
+        ],
+        "ir:2": [
+          [
+            "1468",
+            "ir:2"
+          ],
+          [
+            "1365",
+            "ir:2"
+          ],
+          [
+            "692",
+            "ir:2"
+          ]
+        ],
+        "ir:3": [
+          [
+            "1300",
+            "ir:3"
+          ],
+          [
+            "331",
+            "ir:3"
+          ],
+          [
+            "814",
+            "ir:3"
+          ]
+        ]
+      },
+      "agent_ss": {
+        "ss:0": [
+          [
+            "666",
+            "ss:0"
+          ],
+          [
+            "799",
+            "ss:0"
+          ],
+          [
+            "674",
+            "ss:0"
+          ]
+        ],
+        "ss:1": [
+          [
+            "1358",
+            "ss:1"
+          ],
+          [
+            "165",
+            "ss:1"
+          ],
+          [
+            "920",
+            "ss:1"
+          ]
+        ],
+        "ss:2": [
+          [
+            "1052",
+            "ss:2"
+          ],
+          [
+            "313",
+            "ss:2"
+          ],
+          [
+            "984",
+            "ss:2"
+          ]
+        ],
+        "ss:3": [
+          [
+            "1005",
+            "ss:3"
+          ],
+          [
+            "6",
+            "ss:3"
+          ],
+          [
+            "1309",
+            "ss:3"
+          ]
+        ]
+      },
+      "agent_cg": {
+        "cg:0": [
+          [
+            "290",
+            "cg:0"
+          ],
+          [
+            "1495",
+            "cg:0"
+          ],
+          [
+            "413",
+            "cg:0"
+          ]
+        ],
+        "cg:1": [
+          [
+            "644",
+            "cg:1"
+          ],
+          [
+            "625",
+            "cg:1"
+          ],
+          [
+            "29",
+            "cg:1"
+          ]
+        ],
+        "cg:2": [
+          [
+            "1447",
+            "cg:2"
+          ],
+          [
+            "1210",
+            "cg:2"
+          ],
+          [
+            "1391",
+            "cg:2"
+          ]
+        ]
+      },
+      "extract_keywords": {
+        "*": [
+          [
+            "658",
+            "single"
+          ],
+          [
+            "980",
+            "single"
+          ],
+          [
+            "335",
+            "single"
+          ]
+        ]
+      },
+      "filter_column": {
+        "*": [
+          [
+            "1071",
+            "Match.away_player_Y3"
+          ],
+          [
+            "388",
+            "sets.releaseDate"
+          ],
+          [
+            "943",
+            "constructorStandings.points"
+          ]
+        ]
+      },
+      "select_tables": {
+        "*": [
+          [
+            "1467",
+            "single"
+          ],
+          [
+            "1445",
+            "single"
+          ],
+          [
+            "1188",
+            "single"
+          ]
+        ]
+      },
+      "select_columns": {
+        "*": [
+          [
+            "1425",
+            "single"
+          ],
+          [
+            "759",
+            "single"
+          ],
+          [
+            "939",
+            "single"
+          ]
+        ]
+      },
+      "generate_candidate": {
+        "*": [
+          [
+            "306",
+            "generate_candidate_one:0"
+          ],
+          [
+            "157",
+            "generate_candidate_one:0"
+          ],
+          [
+            "9",
+            "generate_candidate_one:0"
+          ]
+        ]
+      },
+      "revise": {
+        "*": [
+          [
+            "411",
+            "revise_1:0"
+          ],
+          [
+            "520",
+            "revise_1:0"
+          ],
+          [
+            "428",
+            "revise_1:0"
+          ]
+        ]
+      }
+    }
+  },
+  "few_shot_k": 3,
+  "few_shot_sha256": {
+    "agent_ir": "dfa1ca7581c31738fad69a77735ff75b5e601f8a7f93d4b7bc555dea4b7e1a56",
+    "agent_ss": "6ec03f1f1d812e3db56019e55a1f24f7e131cd619586c39da9eddd87598e3f77",
+    "agent_cg": "c30800a383b05da2cc8cb3dc7a0f34b8901e0c8bc549ee3c559c078e2a58d6b6",
+    "extract_keywords": "f2fb7343841eb9a58d0977bf3b84e517fa0ac50b8b936345c880fe25e69a306d",
+    "filter_column": "c8b04480d083855fd0cbec4adfe55270c9cfe7b7e70094cc55dda986466f2a11",
+    "select_tables": "eb0730c10f52b460d3ce4014ec357e7ce98ccb6cedf1cb7b6c4828bcaec268df",
+    "select_columns": "69b10afc5d2be65c4b3e0e7d758896f65fc729cf9dc0605d39831aee547fba66",
+    "generate_candidate": "7b9066535b724a162776ce353dee85cc1836a289c35e9b30393b63b84cfb975f",
+    "revise": "a0313ada33fa0d77a0936d2673661f46c1b93c9a94eb8980690a6a69e8a40a94"
+  },
+  "workers": 2,
+  "commit": "684aafcecd09809b7d51f907c3b2057937c80aea",
+  "dirty": true,
+  "dirty_paths": [
+    {
+      "status": "??",
+      "path": "judgments/"
+    }
+  ],
+  "dirty_paths_total": 1,
+  "config_path": "config.yaml",
+  "config_sha256": "98389ff2240bd6f55662ca988cfb546a4a9b5850393e65e0d2a5f7034231b154",
+  "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
+  "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
+  "started_at": "2026-11-10T16:08:47.505204+00:00",
+  "finished_at": "2026-11-10T16:23:36.822277+00:00",
+  "status": "done",
+  "resumed_from": {
+    "run_id": "replay-cheap_alt-calib-20261110T053739.550540Z",
+    "commit": "261c6457acf5a530d9d42c7a0650f819232486c0",
+    "dirty": true,
+    "config_sha256": "98389ff2240bd6f55662ca988cfb546a4a9b5850393e65e0d2a5f7034231b154",
+    "status": "failed",
+    "started_at": "2026-11-10T05:37:39.550540+00:00",
+    "finished_at": "2026-11-10T05:42:02.435063+00:00",
+    "workers": 8,
+    "stopped_by": null,
+    "copied": {
+      "n_invocations": 3849,
+      "n_calls": 5689,
+      "usage": {
+        "input": 52007836,
+        "cached_input": 51039776,
+        "output": 928591,
+        "reasoning": 663726,
+        "cache_write": 0
+      }
+    },
+    "discarded": {
+      "n_invocations": 72,
+      "n_calls": 316,
+      "usage": {
+        "input": 0,
+        "cached_input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_write": 0
+      },
+      "question_ids": [
+        "372",
+        "376",
+        "387",
+        "395",
+        "399",
+        "430",
+        "467"
+      ]
+    }
+  },
+  "sessions": [
+    {
+      "started_at": "2026-11-10T05:37:39.550540+00:00",
+      "finished_at": "2026-11-10T05:42:02.435063+00:00",
+      "commit": "261c6457acf5a530d9d42c7a0650f819232486c0",
+      "workers": 8
+    },
+    {
+      "started_at": "2026-11-10T16:08:47.505204+00:00",
+      "finished_at": "2026-11-10T16:23:36.822277+00:00",
+      "commit": "684aafcecd09809b7d51f907c3b2057937c80aea",
+      "workers": 2
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 18529,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "agent_ss": {
+      "IndexError": 31,
+      "RateLimitError": 115
+    },
+    "agent_ir": {
+      "RateLimitError": 82,
+      "IndexError": 8
+    },
+    "extract_keywords": {
+      "RateLimitError": 19
+    },
+    "filter_column": {
+      "RateLimitError": 1993
+    },
+    "select_columns": {
+      "RateLimitError": 30
+    },
+    "agent_cg": {
+      "RateLimitError": 97
+    },
+    "generate_candidate": {
+      "RateLimitError": 25
+    },
+    "select_tables": {
+      "RateLimitError": 28
+    }
+  },
+  "c1_errors": 0,
+  "n_questions_replayed": 200,
+  "model_failures": {},
+  "harness_errors": {},
+  "databases_changed": []
+}

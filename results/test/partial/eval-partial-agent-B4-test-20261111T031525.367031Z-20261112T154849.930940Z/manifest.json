@@ -1,0 +1,90 @@
+{
+  "run_id": "eval-partial-agent-B4-test-20261111T031525.367031Z-20261112T154849.930940Z",
+  "type": "eval",
+  "partial": true,
+  "predictions_sha256": null,
+  "of_questions": 498,
+  "source_status": "running",
+  "source_hashes": {
+    "answers.jsonl": "c1bef2d718aafbd2227543d82738eedf0a43bfe5f1d7c5935934bbe76861d801",
+    "calls.jsonl": "aa7c1886e3cdcba5e864f4edb73a857646fb4a5b80b5ef26ae5ef1decda1fdc8",
+    "calls.w0.jsonl": "2632bde46c57909b743c4703a9f44d7601ccbfdfd960da1c28a848563d4dc922",
+    "calls.w1.jsonl": "a9bae530d63ebcb5e2e6c6e09c1777ae3296cbc6954d4e264209a48d0b9d1a86",
+    "calls.w2.jsonl": "cc05c2b871b102a3bf51b18beb4503ed2e3d61e575442eec7141495b9fdf4aca",
+    "calls.w3.jsonl": "2f6b112e4d17a7c33fa99b208769c13328d10ca206b546778ca6108ff2137fb1",
+    "calls.w4.jsonl": "a8531d91519224db8ae0bd3505481f380d6bc0f1b8106e73acbd7ee70e1e67f2",
+    "calls.w5.jsonl": "88e5ab4027e0f72240245ce5a5033ff75ca0c6c696f95a47e3d263782bd87249",
+    "calls.w6.jsonl": "cee87dad2e36550ef066596415397d578c0e34f04ecbf5f3254e0f77eda0a590",
+    "calls.w7.jsonl": "2b490f6ea7256634f2962c266ac95fb670899371d12689244c23760c67d00d48",
+    "routes.jsonl": "d34b94a3ce603cdcb4730400bc6ec8874f57c0580b0d63d08a310fb5f0a28792",
+    "routes.w0.jsonl": "18a737812b5ab93873c58b2541a5799ab30f5d979ff6be0a070719428a2847b0",
+    "routes.w1.jsonl": "9f2cce17d364755fc9483347da73d57cea759d5c3a9a115ffa46bd7730dcd4d0",
+    "routes.w2.jsonl": "7c8136d10fec5994a890ddbee5f14082452b1926b149452c0d04f8688afb0a64",
+    "routes.w3.jsonl": "8c675479dc1552a2d4c5435914bbb47197b6c877c55a7b1caec6375b3ce3b961",
+    "routes.w4.jsonl": "c4b1caf1d1e17b21f674789dfce6208c1d01c7094adc4084b57a28d4b81b9132",
+    "routes.w5.jsonl": "49fcbd808f2422f4f561a653dfdea15d626023305e56846fbde92e3a2f84c481",
+    "routes.w6.jsonl": "766ede033f2baa385d3dc9ec2b902fa7dc733fc9af22a2a9017baad8241e6a3d",
+    "routes.w7.jsonl": "0d6099160a8d7cb8b961a4e70c10c305e7b11c8a488e3b3fc9544b8accd83bed"
+  },
+  "source_hashes_recorded_by": "agent-B4-test-20261111T032707.693347Z",
+  "source_run_id": "agent-B4-test-20261111T031525.367031Z",
+  "source_type": "agent",
+  "arm": "B4",
+  "engine": null,
+  "mode": null,
+  "split": "test",
+  "commit": "64272a0ee7489fe6367f444e2b863eae83be5e2d",
+  "dirty": true,
+  "dirty_paths": [
+    {
+      "status": "??",
+      "path": "judgments/J2/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/01b2b98db61d42dd45ed26b938edfaafe4fa7a681410691707a1ca78c8e6e6ac/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/3f4468f6ba5c00738d130190b44b5d357ac73b83d6768abad48d94c8706df211/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/75fb204cc40cfbae5ed7d00e1da9c50cc5614822951f4626397729eda5af73aa/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/b44c8d9790f1dd97ee37efa6e685a2a1802d063855aaf5001b7ca5824e98d923/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/ba48cfe7ddf54f3bcd65c303519fe8365b0f9f412c8ee42e2f0e25a8a9ea14e4/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/e5b1edd5e23cc02d488081f81c09afcbd2d2d8ce8a688642721e94d9f2de9d17/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/e5df8f709518996001a61c0b17936bc7e40257f56c0e25d59d8ad30af1668671/"
+    }
+  ],
+  "dirty_paths_total": 8,
+  "source_commit": "347c36c07ad70d69ac1254f71cef728c9a9780b3",
+  "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "fixed_date": "2026-09-30",
+  "timeout_s": 60,
+  "sqlite_version": "3.53.1",
+  "databases": {
+    "california_schools": "986817d793479801ed55133e55aa27e335422c0cd3866b54a3d6317b7c5f09c1",
+    "card_games": "c98bdb57fe7474da798b407785544b9af0daaad5d61fd21e2a73309493bc1227",
+    "financial": "d15d89cdb068a202b6f2b99342af44dffc1d52545b39ceaf62efdc0ba570101e",
+    "toxicology": "f5fa7f21af1ad878ff8fef1b0582b8cb2d7ed63dbac65ff16d2ba05667650c5b"
+  },
+  "started_at": "2026-11-12T15:48:49.930940+00:00",
+  "finished_at": "2026-11-12T15:48:56.343176+00:00",
+  "n": 127,
+  "correct": 63,
+  "gold_errors": 0
+}

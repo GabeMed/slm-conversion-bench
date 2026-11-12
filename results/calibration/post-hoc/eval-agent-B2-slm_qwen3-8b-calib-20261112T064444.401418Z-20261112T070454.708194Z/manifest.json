@@ -1,0 +1,55 @@
+{
+  "run_id": "eval-agent-B2-slm:qwen3-8b-calib-20261112T064444.401418Z-20261112T070454.708194Z",
+  "type": "eval",
+  "source_run_id": "agent-B2-slm:qwen3-8b-calib-20261112T064444.401418Z",
+  "source_type": "agent",
+  "arm": "B2",
+  "engine": "slm:qwen3-8b",
+  "mode": "single_call",
+  "split": "calib",
+  "commit": "c4f1f5e7cbc0e96835945021e71ddb64d328c6de",
+  "dirty": true,
+  "dirty_paths": [
+    {
+      "status": "??",
+      "path": ".runpod"
+    },
+    {
+      "status": " M",
+      "path": "bench/agent/runner.py"
+    },
+    {
+      "status": " M",
+      "path": "bench/cli.py"
+    },
+    {
+      "status": "??",
+      "path": "judgments/"
+    }
+  ],
+  "dirty_paths_total": 4,
+  "source_commit": "c4f1f5e7cbc0e96835945021e71ddb64d328c6de",
+  "config_sha256": "4f8f3dc7e16443716724675ad10a2fb963478ce5405ecec5b46944b161c3c9a3",
+  "prereg_hash": null,
+  "fixed_date": "2026-09-30",
+  "timeout_s": 60,
+  "sqlite_version": "3.53.1",
+  "databases": {
+    "california_schools": "986817d793479801ed55133e55aa27e335422c0cd3866b54a3d6317b7c5f09c1",
+    "card_games": "c98bdb57fe7474da798b407785544b9af0daaad5d61fd21e2a73309493bc1227",
+    "codebase_community": "92101be6d2a9f6adceea59d38f6d1c556087f9eea1432432a21268cb1348036d",
+    "debit_card_specializing": "b3d149ad05746dbbe5116e229e17e18f09c39db43cf117d9ef3441753608b691",
+    "european_football_2": "e4d361dbeec6591a4b315877c0c481da05c8ff5a3d389b34d6e17b6f15bee4e0",
+    "financial": "d15d89cdb068a202b6f2b99342af44dffc1d52545b39ceaf62efdc0ba570101e",
+    "formula_1": "17185981cd747f6cdc374cb02a6096db3130e6ec2ddc582fe1686a28fb4c4c8a",
+    "student_club": "eb89bcfe97eefa386a27904ec5aa15159811a7eac894ec659a36e48fa9f76b77",
+    "superhero": "75e94a2c3236ee3bb2c01fb97a1c4b4c1c269bcefd4eab1d04be323d2d0825b1",
+    "thrombosis_prediction": "e7e16d74b4731b4b8d33fdbe8c29cd5622620788ce8d1f335631f65fc7cf1db9",
+    "toxicology": "f5fa7f21af1ad878ff8fef1b0582b8cb2d7ed63dbac65ff16d2ba05667650c5b"
+  },
+  "started_at": "2026-11-12T07:04:54.708194+00:00",
+  "finished_at": "2026-11-12T07:05:09.963888+00:00",
+  "n": 200,
+  "correct": 96,
+  "gold_errors": 0
+}

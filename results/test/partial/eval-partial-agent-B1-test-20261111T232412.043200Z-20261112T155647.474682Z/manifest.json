@@ -1,0 +1,81 @@
+{
+  "run_id": "eval-partial-agent-B1-test-20261111T232412.043200Z-20261112T155647.474682Z",
+  "type": "eval",
+  "partial": true,
+  "predictions_sha256": null,
+  "of_questions": 498,
+  "source_status": "running",
+  "source_hashes": {
+    "answers.jsonl": "2392c96f09889044a92a2bc5c120ce3362fe741269c0753997228344cbd9e956",
+    "answers.w0.jsonl": "6b290fd3b6ef8f02122aa729d287d5c6a3cb63cdeabb3706102384392dd3caec",
+    "answers.w1.jsonl": "e7d523416c3a62b7f327bad2d8aea70d75bc68ff0c79a3485cd436a040c1b90c",
+    "answers.w2.jsonl": "7aceb3990b12163b8a528c9f59207b24a1217354959d764a30a967b93e223362",
+    "calls.jsonl": "7c2cd762d7887ca15b513a40fc4579934aa55acd1d2a4a84b8e992fd7f715584",
+    "calls.w0.jsonl": "d0b6e1d1dcd5b2409d092363703d6fd671c17dee88921fb73b832e1f898511fc",
+    "calls.w1.jsonl": "74284e538fad0367d601eb6fb1609435a1c9faf5028948f54bac4f8c4305c335",
+    "calls.w2.jsonl": "bf86777c69fb29dcba822f6ba70935a20582aad03a13e65fcedb8a492e9e73e5"
+  },
+  "source_hashes_recorded_by": "agent-B1-test-20261112T030533.745720Z",
+  "source_run_id": "agent-B1-test-20261111T232412.043200Z",
+  "source_type": "agent",
+  "arm": "B1",
+  "engine": null,
+  "mode": null,
+  "split": "test",
+  "commit": "64272a0ee7489fe6367f444e2b863eae83be5e2d",
+  "dirty": true,
+  "dirty_paths": [
+    {
+      "status": "??",
+      "path": "judgments/J2/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/01b2b98db61d42dd45ed26b938edfaafe4fa7a681410691707a1ca78c8e6e6ac/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/3f4468f6ba5c00738d130190b44b5d357ac73b83d6768abad48d94c8706df211/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/75fb204cc40cfbae5ed7d00e1da9c50cc5614822951f4626397729eda5af73aa/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/b44c8d9790f1dd97ee37efa6e685a2a1802d063855aaf5001b7ca5824e98d923/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/ba48cfe7ddf54f3bcd65c303519fe8365b0f9f412c8ee42e2f0e25a8a9ea14e4/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/e5b1edd5e23cc02d488081f81c09afcbd2d2d8ce8a688642721e94d9f2de9d17/"
+    },
+    {
+      "status": "??",
+      "path": "judgments/J3/e5df8f709518996001a61c0b17936bc7e40257f56c0e25d59d8ad30af1668671/"
+    }
+  ],
+  "dirty_paths_total": 8,
+  "source_commit": "7515b6fa6308fa9c8eba154050f3995aebedebf9",
+  "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+  "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+  "fixed_date": "2026-09-30",
+  "timeout_s": 60,
+  "sqlite_version": "3.53.1",
+  "databases": {
+    "california_schools": "986817d793479801ed55133e55aa27e335422c0cd3866b54a3d6317b7c5f09c1",
+    "card_games": "c98bdb57fe7474da798b407785544b9af0daaad5d61fd21e2a73309493bc1227",
+    "codebase_community": "92101be6d2a9f6adceea59d38f6d1c556087f9eea1432432a21268cb1348036d",
+    "financial": "d15d89cdb068a202b6f2b99342af44dffc1d52545b39ceaf62efdc0ba570101e",
+    "superhero": "75e94a2c3236ee3bb2c01fb97a1c4b4c1c269bcefd4eab1d04be323d2d0825b1",
+    "toxicology": "f5fa7f21af1ad878ff8fef1b0582b8cb2d7ed63dbac65ff16d2ba05667650c5b"
+  },
+  "started_at": "2026-11-12T15:56:47.474682+00:00",
+  "finished_at": "2026-11-12T15:57:23.553810+00:00",
+  "n": 145,
+  "correct": 101,
+  "gold_errors": 0
+}

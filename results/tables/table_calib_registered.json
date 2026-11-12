@@ -1,0 +1,3380 @@
+{
+ "label": "EXPLORATORY, no verdict. Per call site, on the teacher's inputs (calib split): each engine answers the calls of the teacher's registered run `agent-B0-calib-20261109T151141.039667Z`. Descriptive only; unadjusted 95% intervals; these numbers allocate nothing and enter no decision rule.",
+ "split": "calib",
+ "inputs": {
+  "teacher": [
+   "agent-B0-calib-20261109T151141.039667Z",
+   "eval-per-call-agent-B0-calib-20261109T151141.039667Z-20261109T153122.727095Z"
+  ],
+  "base": [
+   "replay-slm_qwen3-8b-calib-20261110T025007.659032Z",
+   "eval-per-call-replay-slm_qwen3-8b-calib-20261110T025007.659032Z-20261110T031423.931711Z"
+  ],
+  "adapter": [
+   "replay-B4-calib-20261110T174825.799047Z",
+   "eval-per-call-replay-B4-calib-20261110T174825.799047Z-20261110T181832.677536Z"
+  ],
+  "cheap": [
+   "replay-cheap_alt-calib-20261110T160847.505204Z",
+   "eval-per-call-replay-cheap_alt-calib-20261110T160847.505204Z-20261110T162517.048684Z"
+  ],
+  "self": [
+   "replay-production_llm-calib-20261110T021304.240338Z",
+   null
+  ]
+ },
+ "seed": 20261112,
+ "n_boot": 2000,
+ "interval": "percentile bootstrap that resamples questions, all of a question's calls together",
+ "trivial_rule_stats": {
+  "lookup_hit": 2198,
+  "lookup_not_unanimous": 0
+ },
+ "unclassified_train_rows": 0,
+ "cluster_train_rows": {
+  "c0": 11982,
+  "c1": 2517,
+  "c2": 833,
+  "c3": 9164
+ },
+ "self_replay_questions": 50,
+ "rows": {
+  "filter_column": {
+   "cluster": "c0",
+   "routed_by_b4_replay": {
+    "c0": 13128,
+    "c1": 10
+   },
+   "n_questions": 200,
+   "n_calls": 13138,
+   "distinct_prompts": 13138,
+   "teacher_unparsed": 0,
+   "train_rows_site": 12000,
+   "train_rows_site_by_cluster": {
+    "c0": 11982,
+    "c1": 18
+   },
+   "train_rows_cluster": 11982,
+   "primary_metric": "recall of the columns the teacher kept; agreement on the columns it dropped; Cohen's kappa",
+   "columns": {
+    "trivial": {
+     "n_calls": 13138,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 13138,
+      "ok": 13138,
+      "n_agree": 13138,
+      "agree": 11509,
+      "tp": 0,
+      "fn": 1629,
+      "tn": 11509,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.8760085248896331,
+     "recall_kept": 0.0,
+     "agreement_dropped": 1.0,
+     "kappa": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.8576945907012495,
+       0.8918402033207333
+      ],
+      "recall_kept": [
+       0.0,
+       0.0
+      ],
+      "agreement_dropped": [
+       1.0,
+       1.0
+      ],
+      "kappa": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "base": {
+     "n_calls": 13138,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 13138,
+      "ok": 13138,
+      "n_agree": 13138,
+      "agree": 11672,
+      "tp": 1399,
+      "fn": 230,
+      "tn": 10273,
+      "fp": 1236,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.8884152839092708,
+     "recall_kept": 0.8588090853284224,
+     "agreement_dropped": 0.8926057867755669,
+     "kappa": 0.5939693566026633,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.8772079924940371,
+       0.899755045637668
+      ],
+      "recall_kept": [
+       0.8355286075712905,
+       0.8802592635913808
+      ],
+      "agreement_dropped": [
+       0.8785054430274708,
+       0.906354943183044
+      ],
+      "kappa": [
+       0.5641748369372525,
+       0.6234827247862079
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 13138,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 13138,
+      "ok": 13138,
+      "n_agree": 13138,
+      "agree": 12771,
+      "tp": 1416,
+      "fn": 213,
+      "tn": 11355,
+      "fp": 154,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.9720657634343127,
+     "recall_kept": 0.8692449355432781,
+     "agreement_dropped": 0.986619167607959,
+     "kappa": 0.869379527793185,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.9667951184160759,
+       0.9772494909604198
+      ],
+      "recall_kept": [
+       0.8470410786422538,
+       0.8905855154196596
+      ],
+      "agreement_dropped": [
+       0.9831606941740897,
+       0.9898687350797886
+      ],
+      "kappa": [
+       0.8518602899502091,
+       0.8865605511799698
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 13138,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 13138,
+      "ok": 13138,
+      "n_agree": 13138,
+      "agree": 12368,
+      "tp": 1454,
+      "fn": 175,
+      "tn": 10914,
+      "fp": 595,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.9413913837722636,
+     "recall_kept": 0.892572130141191,
+     "agreement_dropped": 0.948301329394387,
+     "kappa": 0.7570888213256508,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.9333716302215104,
+       0.9490416467883478
+      ],
+      "recall_kept": [
+       0.8734253017406441,
+       0.9122436372621695
+      ],
+      "agreement_dropped": [
+       0.9395450823191818,
+       0.9563869971646332
+      ],
+      "kappa": [
+       0.7307222717885999,
+       0.7843550413365094
+      ]
+     }
+    },
+    "self": {
+     "n_calls": 3311,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 3311,
+      "ok": 3311,
+      "n_agree": 3311,
+      "agree": 3280,
+      "tp": 525,
+      "fn": 15,
+      "tn": 2755,
+      "fp": 16,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.9906372697070371,
+     "recall_kept": 0.9722222222222222,
+     "agreement_dropped": 0.9942259112233851,
+     "kappa": 0.9657281969313946,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.9864742327097354,
+       0.9941559328162743
+      ],
+      "recall_kept": [
+       0.9576910681399632,
+       0.9852706508135168
+      ],
+      "agreement_dropped": [
+       0.9907987326953062,
+       0.9967961267152443
+      ],
+      "kappa": [
+       0.9545251066675551,
+       0.9764250520779965
+      ]
+     }
+    }
+   }
+  },
+  "select_tables": {
+   "cluster": "c1",
+   "routed_by_b4_replay": {
+    "c1": 200
+   },
+   "n_questions": 200,
+   "n_calls": 200,
+   "distinct_prompts": 200,
+   "teacher_unparsed": 0,
+   "train_rows_site": 833,
+   "train_rows_site_by_cluster": {
+    "c1": 833
+   },
+   "train_rows_cluster": 2517,
+   "primary_metric": "recall of the teacher's set; exact-set agreement beside it",
+   "columns": {
+    "trivial": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 6,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 200.0,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.03,
+     "set_recall": 1.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.01,
+       0.055
+      ],
+      "set_recall": [
+       1.0,
+       1.0
+      ]
+     }
+    },
+    "base": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 164,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 193.88095238095232,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.82,
+     "set_recall": 0.9694047619047617,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.77,
+       0.87
+      ],
+      "set_recall": [
+       0.9542247023809524,
+       0.9827380952380952
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 178,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 194.5238095238095,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.89,
+     "set_recall": 0.9726190476190475,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.845,
+       0.93
+      ],
+      "set_recall": [
+       0.9567857142857145,
+       0.9866666666666667
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 187,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 198.24999999999997,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.935,
+     "set_recall": 0.9912499999999999,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.9,
+       0.97
+      ],
+      "set_recall": [
+       0.9829166666666665,
+       0.9979166666666666
+      ]
+     }
+    },
+    "self": {
+     "n_calls": 50,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 50,
+      "ok": 50,
+      "n_agree": 50,
+      "agree": 49,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 49.83333333333333,
+      "recall_n": 50,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.98,
+     "set_recall": 0.9966666666666666,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.94,
+       1.0
+      ],
+      "set_recall": [
+       0.99,
+       1.0
+      ]
+     }
+    }
+   }
+  },
+  "select_columns": {
+   "cluster": "c1",
+   "routed_by_b4_replay": {
+    "c1": 200
+   },
+   "n_questions": 200,
+   "n_calls": 200,
+   "distinct_prompts": 200,
+   "teacher_unparsed": 0,
+   "train_rows_site": 833,
+   "train_rows_site_by_cluster": {
+    "c1": 833
+   },
+   "train_rows_cluster": 2517,
+   "primary_metric": "recall of the teacher's set; exact-set agreement beside it",
+   "columns": {
+    "trivial": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 17,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 200.0,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.085,
+     "set_recall": 1.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.05,
+       0.125
+      ],
+      "set_recall": [
+       1.0,
+       1.0
+      ]
+     }
+    },
+    "base": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 79,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 162.58128156430251,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.395,
+     "set_recall": 0.8129064078215126,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.33,
+       0.46
+      ],
+      "set_recall": [
+       0.7861363965656295,
+       0.8392947296803832
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 146,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 189.15519596136502,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.73,
+     "set_recall": 0.9457759798068252,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.67,
+       0.795
+      ],
+      "set_recall": [
+       0.9273949580302306,
+       0.9629546604953597
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 149,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 188.9516714466267,
+      "recall_n": 200,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.745,
+     "set_recall": 0.9447583572331335,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.685,
+       0.8
+      ],
+      "set_recall": [
+       0.9276674624624097,
+       0.9617022351276707
+      ]
+     }
+    },
+    "self": {
+     "n_calls": 50,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 50,
+      "ok": 50,
+      "n_agree": 50,
+      "agree": 43,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 49.70021978021978,
+      "recall_n": 50,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.86,
+     "set_recall": 0.9940043956043957,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.76,
+       0.94
+      ],
+      "set_recall": [
+       0.9864703296703297,
+       1.0
+      ]
+     }
+    }
+   }
+  },
+  "generate_candidate": {
+   "cluster": "c1",
+   "routed_by_b4_replay": {
+    "c1": 199
+   },
+   "n_questions": 199,
+   "n_calls": 199,
+   "distinct_prompts": 199,
+   "teacher_unparsed": 0,
+   "train_rows_site": 826,
+   "train_rows_site_by_cluster": {
+    "c1": 826
+   },
+   "train_rows_cluster": 2517,
+   "primary_metric": "EX against the gold",
+   "columns": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 199,
+     "n_questions": 199,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 199,
+      "ok": 199,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 199,
+      "ex": 108,
+      "ex_teacher": 137
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.542713567839196,
+     "ex_teacher": 0.6884422110552764,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.4723618090452261,
+       0.6131909547738686
+      ],
+      "ex_teacher": [
+       0.6231155778894473,
+       0.7487437185929648
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 199,
+     "n_questions": 199,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 199,
+      "ok": 199,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 199,
+      "ex": 123,
+      "ex_teacher": 137
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.6180904522613065,
+     "ex_teacher": 0.6884422110552764,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.5527638190954773,
+       0.6834170854271356
+      ],
+      "ex_teacher": [
+       0.6231155778894473,
+       0.7487437185929648
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 199,
+     "n_questions": 199,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 199,
+      "ok": 199,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 199,
+      "ex": 130,
+      "ex_teacher": 137
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.6532663316582915,
+     "ex_teacher": 0.6884422110552764,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.5879396984924623,
+       0.7185929648241206
+      ],
+      "ex_teacher": [
+       0.6231155778894473,
+       0.7487437185929648
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)"
+   },
+   "teacher_registered_run_ex": {
+    "n_calls": 199,
+    "n_questions": 199,
+    "missing_in_replay": 0,
+    "counts": {
+     "n": 199,
+     "ok": 199,
+     "n_agree": 0,
+     "agree": 0,
+     "tp": 0,
+     "fn": 0,
+     "tn": 0,
+     "fp": 0,
+     "recall_sum": 0.0,
+     "recall_n": 0,
+     "jac_sum": 0.0,
+     "jac_n": 0,
+     "n_gold": 199,
+     "ex": 137,
+     "ex_teacher": 137
+    },
+    "teacher_unparsed": 0,
+    "parsed_ok": 1.0,
+    "ex": 0.6884422110552764,
+    "ex_teacher": 0.6884422110552764,
+    "ci95": {
+     "parsed_ok": [
+      1.0,
+      1.0
+     ],
+     "ex": [
+      0.6231155778894473,
+      0.7487437185929648
+     ],
+     "ex_teacher": [
+      0.6231155778894473,
+      0.7487437185929648
+     ]
+    }
+   }
+  },
+  "revise": {
+   "cluster": "c1",
+   "routed_by_b4_replay": {
+    "c1": 5
+   },
+   "n_questions": 5,
+   "n_calls": 5,
+   "distinct_prompts": 5,
+   "teacher_unparsed": 0,
+   "train_rows_site": 6,
+   "train_rows_site_by_cluster": {
+    "c1": 6
+   },
+   "train_rows_cluster": 2517,
+   "primary_metric": "EX against the gold",
+   "columns": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 5,
+     "n_questions": 5,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 5,
+      "ok": 5,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 5,
+      "ex": 0,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.4,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.8
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 5,
+     "n_questions": 5,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 5,
+      "ok": 5,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 5,
+      "ex": 2,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.4,
+     "ex_teacher": 0.4,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.8
+      ],
+      "ex_teacher": [
+       0.0,
+       0.8
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 5,
+     "n_questions": 5,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 5,
+      "ok": 5,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 5,
+      "ex": 0,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.4,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.8
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)"
+   },
+   "teacher_registered_run_ex": {
+    "n_calls": 5,
+    "n_questions": 5,
+    "missing_in_replay": 0,
+    "counts": {
+     "n": 5,
+     "ok": 5,
+     "n_agree": 0,
+     "agree": 0,
+     "tp": 0,
+     "fn": 0,
+     "tn": 0,
+     "fp": 0,
+     "recall_sum": 0.0,
+     "recall_n": 0,
+     "jac_sum": 0.0,
+     "jac_n": 0,
+     "n_gold": 5,
+     "ex": 2,
+     "ex_teacher": 2
+    },
+    "teacher_unparsed": 0,
+    "parsed_ok": 1.0,
+    "ex": 0.4,
+    "ex_teacher": 0.4,
+    "ci95": {
+     "parsed_ok": [
+      1.0,
+      1.0
+     ],
+     "ex": [
+      0.0,
+      0.8
+     ],
+     "ex_teacher": [
+      0.0,
+      0.8
+     ]
+    }
+   }
+  },
+  "extract_keywords": {
+   "cluster": "c2",
+   "routed_by_b4_replay": {
+    "c2": 200
+   },
+   "n_questions": 200,
+   "n_calls": 200,
+   "distinct_prompts": 200,
+   "teacher_unparsed": 0,
+   "train_rows_site": 834,
+   "train_rows_site_by_cluster": {
+    "c1": 1,
+    "c2": 833
+   },
+   "train_rows_cluster": 833,
+   "primary_metric": "mean Jaccard against the teacher's set; exact-set agreement beside it",
+   "columns": {
+    "trivial": "not defined in SPEC (the stop-word list and the tokenisation of \"the question's words\" are not fixed)",
+    "base": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 199,
+      "n_agree": 200,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 97.42874698303632,
+      "jac_n": 200,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 0.995,
+     "raw_agreement": 0.0,
+     "jaccard": 0.4871437349151816,
+     "ci95": {
+      "parsed_ok": [
+       0.985,
+       1.0
+      ],
+      "raw_agreement": [
+       0.0,
+       0.0
+      ],
+      "jaccard": [
+       0.4640208920031019,
+       0.5103890140552374
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 25,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 146.13669957881896,
+      "jac_n": 200,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.125,
+     "jaccard": 0.7306834978940948,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.08,
+       0.17
+      ],
+      "jaccard": [
+       0.7067847631032078,
+       0.7520472674538372
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 200,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 4,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 120.96879982563564,
+      "jac_n": 200,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.02,
+     "jaccard": 0.6048439991281782,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.005,
+       0.04
+      ],
+      "jaccard": [
+       0.5826846661099093,
+       0.62737401017781
+      ]
+     }
+    },
+    "self": {
+     "n_calls": 50,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 50,
+      "ok": 50,
+      "n_agree": 50,
+      "agree": 22,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 44.936325290364,
+      "jac_n": 50,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.44,
+     "jaccard": 0.8987265058072801,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "raw_agreement": [
+       0.3,
+       0.58
+      ],
+      "jaccard": [
+       0.8641475060644718,
+       0.930754653578829
+      ]
+     }
+    }
+   }
+  },
+  "agent_ir": {
+   "cluster": "c3",
+   "routed_by_b4_replay": {
+    "c3": 800
+   },
+   "n_questions": 200,
+   "n_calls": 800,
+   "distinct_prompts": 4,
+   "teacher_unparsed": 0,
+   "train_rows_site": 3336,
+   "train_rows_site_by_cluster": {
+    "c3": 3336
+   },
+   "train_rows_cluster": 9164,
+   "primary_metric": "agreement per distinct prompt (no rate over calls)",
+   "columns": {
+    "trivial": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 800,
+      "n_agree": 800,
+      "agree": 800,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ]
+     ]
+    },
+    "base": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 800,
+      "n_agree": 800,
+      "agree": 800,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ]
+     ]
+    },
+    "adapter": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 800,
+      "n_agree": 800,
+      "agree": 800,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ]
+     ]
+    },
+    "cheap": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 792,
+      "n_agree": 800,
+      "agree": 702,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 0.99,
+     "raw_agreement": 0.8775,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 0.8775000000000001,
+     "prompts_fully_agreeing": 0,
+     "per_prompt": [
+      [
+       200,
+       199
+      ],
+      [
+       200,
+       186
+      ],
+      [
+       200,
+       185
+      ],
+      [
+       200,
+       132
+      ]
+     ]
+    },
+    "self": {
+     "n_calls": 200,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 200,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ]
+     ]
+    }
+   }
+  },
+  "agent_ss": {
+   "cluster": "c3",
+   "routed_by_b4_replay": {
+    "c3": 800
+   },
+   "n_questions": 200,
+   "n_calls": 800,
+   "distinct_prompts": 4,
+   "teacher_unparsed": 0,
+   "train_rows_site": 3332,
+   "train_rows_site_by_cluster": {
+    "c3": 3332
+   },
+   "train_rows_cluster": 9164,
+   "primary_metric": "agreement per distinct prompt (no rate over calls)",
+   "columns": {
+    "trivial": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 800,
+      "n_agree": 800,
+      "agree": 800,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ]
+     ]
+    },
+    "base": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 800,
+      "n_agree": 800,
+      "agree": 600,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.75,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 0.75,
+     "prompts_fully_agreeing": 3,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       0
+      ]
+     ]
+    },
+    "adapter": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 800,
+      "n_agree": 800,
+      "agree": 800,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ]
+     ]
+    },
+    "cheap": {
+     "n_calls": 800,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 800,
+      "ok": 769,
+      "n_agree": 800,
+      "agree": 667,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 0.96125,
+     "raw_agreement": 0.83375,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 0.83375,
+     "prompts_fully_agreeing": 2,
+     "per_prompt": [
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       200
+      ],
+      [
+       200,
+       155
+      ],
+      [
+       200,
+       112
+      ]
+     ]
+    },
+    "self": {
+     "n_calls": 200,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 200,
+      "ok": 200,
+      "n_agree": 200,
+      "agree": 200,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 4,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 4,
+     "per_prompt": [
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ]
+     ]
+    }
+   }
+  },
+  "agent_cg": {
+   "cluster": "c3",
+   "routed_by_b4_replay": {
+    "c3": 598
+   },
+   "n_questions": 200,
+   "n_calls": 598,
+   "distinct_prompts": 3,
+   "teacher_unparsed": 1,
+   "train_rows_site": 2496,
+   "train_rows_site_by_cluster": {
+    "c3": 2496
+   },
+   "train_rows_cluster": 9164,
+   "primary_metric": "agreement per distinct prompt (no rate over calls)",
+   "columns": {
+    "trivial": {
+     "n_calls": 598,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 598,
+      "ok": 598,
+      "n_agree": 597,
+      "agree": 597,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 1,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 3,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 3,
+     "per_prompt": [
+      [
+       199,
+       199
+      ],
+      [
+       199,
+       199
+      ],
+      [
+       199,
+       199
+      ]
+     ]
+    },
+    "base": {
+     "n_calls": 598,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 598,
+      "ok": 598,
+      "n_agree": 597,
+      "agree": 597,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 1,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 3,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 3,
+     "per_prompt": [
+      [
+       199,
+       199
+      ],
+      [
+       199,
+       199
+      ],
+      [
+       199,
+       199
+      ]
+     ]
+    },
+    "adapter": {
+     "n_calls": 598,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 598,
+      "ok": 598,
+      "n_agree": 597,
+      "agree": 597,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 1,
+     "parsed_ok": 1.0,
+     "raw_agreement": 1.0,
+     "distinct_prompts": 3,
+     "agreement_per_prompt": 1.0,
+     "prompts_fully_agreeing": 3,
+     "per_prompt": [
+      [
+       199,
+       199
+      ],
+      [
+       199,
+       199
+      ],
+      [
+       199,
+       199
+      ]
+     ]
+    },
+    "cheap": {
+     "n_calls": 598,
+     "n_questions": 200,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 598,
+      "ok": 598,
+      "n_agree": 597,
+      "agree": 590,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 1,
+     "parsed_ok": 1.0,
+     "raw_agreement": 0.9882747068676717,
+     "distinct_prompts": 3,
+     "agreement_per_prompt": 0.9882747068676717,
+     "prompts_fully_agreeing": 0,
+     "per_prompt": [
+      [
+       199,
+       198
+      ],
+      [
+       199,
+       196
+      ],
+      [
+       199,
+       196
+      ]
+     ]
+    },
+    "self": {
+     "n_calls": 150,
+     "n_questions": 50,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 150,
+      "ok": 149,
+      "n_agree": 150,
+      "agree": 149,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 0,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 0.9933333333333333,
+     "raw_agreement": 0.9933333333333333,
+     "distinct_prompts": 3,
+     "agreement_per_prompt": 0.9933333333333333,
+     "prompts_fully_agreeing": 2,
+     "per_prompt": [
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       50
+      ],
+      [
+       50,
+       49
+      ]
+     ]
+    }
+   }
+  }
+ },
+ "sql_by_difficulty": {
+  "simple": {
+   "generate_candidate": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 133,
+     "n_questions": 133,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 133,
+      "ok": 133,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 133,
+      "ex": 95,
+      "ex_teacher": 108
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.7142857142857143,
+     "ex_teacher": 0.8120300751879699,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.6390977443609023,
+       0.7894736842105263
+      ],
+      "ex_teacher": [
+       0.7443609022556391,
+       0.8796992481203008
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 133,
+     "n_questions": 133,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 133,
+      "ok": 133,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 133,
+      "ex": 101,
+      "ex_teacher": 108
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.7593984962406015,
+     "ex_teacher": 0.8120300751879699,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.6842105263157895,
+       0.8345864661654135
+      ],
+      "ex_teacher": [
+       0.7443609022556391,
+       0.8796992481203008
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 133,
+     "n_questions": 133,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 133,
+      "ok": 133,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 133,
+      "ex": 102,
+      "ex_teacher": 108
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.7669172932330827,
+     "ex_teacher": 0.8120300751879699,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.6917293233082706,
+       0.8421052631578947
+      ],
+      "ex_teacher": [
+       0.7443609022556391,
+       0.8796992481203008
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)",
+    "teacher_registered_run_ex": {
+     "n_calls": 133,
+     "n_questions": 133,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 133,
+      "ok": 133,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 133,
+      "ex": 108,
+      "ex_teacher": 108
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.8120300751879699,
+     "ex_teacher": 0.8120300751879699,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.7443609022556391,
+       0.8796992481203008
+      ],
+      "ex_teacher": [
+       0.7443609022556391,
+       0.8796992481203008
+      ]
+     }
+    }
+   },
+   "revise": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 3,
+     "n_questions": 3,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 3,
+      "ok": 3,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 3,
+      "ex": 0,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.6666666666666666,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       1.0
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 3,
+     "n_questions": 3,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 3,
+      "ok": 3,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 3,
+      "ex": 1,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.3333333333333333,
+     "ex_teacher": 0.6666666666666666,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       1.0
+      ],
+      "ex_teacher": [
+       0.0,
+       1.0
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 3,
+     "n_questions": 3,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 3,
+      "ok": 3,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 3,
+      "ex": 0,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.6666666666666666,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       1.0
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)",
+    "teacher_registered_run_ex": {
+     "n_calls": 3,
+     "n_questions": 3,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 3,
+      "ok": 3,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 3,
+      "ex": 2,
+      "ex_teacher": 2
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.6666666666666666,
+     "ex_teacher": 0.6666666666666666,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       1.0
+      ],
+      "ex_teacher": [
+       0.0,
+       1.0
+      ]
+     }
+    }
+   }
+  },
+  "moderate": {
+   "generate_candidate": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 34,
+     "n_questions": 34,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 34,
+      "ok": 34,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 34,
+      "ex": 10,
+      "ex_teacher": 22
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.29411764705882354,
+     "ex_teacher": 0.6470588235294118,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.14705882352941177,
+       0.4411764705882353
+      ],
+      "ex_teacher": [
+       0.47058823529411764,
+       0.7941176470588235
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 34,
+     "n_questions": 34,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 34,
+      "ok": 34,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 34,
+      "ex": 16,
+      "ex_teacher": 22
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.47058823529411764,
+     "ex_teacher": 0.6470588235294118,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.29411764705882354,
+       0.6470588235294118
+      ],
+      "ex_teacher": [
+       0.47058823529411764,
+       0.7941176470588235
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 34,
+     "n_questions": 34,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 34,
+      "ok": 34,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 34,
+      "ex": 21,
+      "ex_teacher": 22
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.6176470588235294,
+     "ex_teacher": 0.6470588235294118,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.4411764705882353,
+       0.7647058823529411
+      ],
+      "ex_teacher": [
+       0.47058823529411764,
+       0.7941176470588235
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)",
+    "teacher_registered_run_ex": {
+     "n_calls": 34,
+     "n_questions": 34,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 34,
+      "ok": 34,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 34,
+      "ex": 22,
+      "ex_teacher": 22
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.6470588235294118,
+     "ex_teacher": 0.6470588235294118,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.47058823529411764,
+       0.7941176470588235
+      ],
+      "ex_teacher": [
+       0.47058823529411764,
+       0.7941176470588235
+      ]
+     }
+    }
+   },
+   "revise": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 1,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 1.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       1.0,
+       1.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)",
+    "teacher_registered_run_ex": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    }
+   }
+  },
+  "challenging": {
+   "generate_candidate": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 32,
+     "n_questions": 32,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 32,
+      "ok": 32,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 32,
+      "ex": 3,
+      "ex_teacher": 7
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.09375,
+     "ex_teacher": 0.21875,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.1875
+      ],
+      "ex_teacher": [
+       0.09375,
+       0.375
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 32,
+     "n_questions": 32,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 32,
+      "ok": 32,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 32,
+      "ex": 6,
+      "ex_teacher": 7
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.1875,
+     "ex_teacher": 0.21875,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0625,
+       0.3125
+      ],
+      "ex_teacher": [
+       0.09375,
+       0.375
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 32,
+     "n_questions": 32,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 32,
+      "ok": 32,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 32,
+      "ex": 7,
+      "ex_teacher": 7
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.21875,
+     "ex_teacher": 0.21875,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.09375,
+       0.375
+      ],
+      "ex_teacher": [
+       0.09375,
+       0.375
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)",
+    "teacher_registered_run_ex": {
+     "n_calls": 32,
+     "n_questions": 32,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 32,
+      "ok": 32,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 32,
+      "ex": 7,
+      "ex_teacher": 7
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.21875,
+     "ex_teacher": 0.21875,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.09375,
+       0.375
+      ],
+      "ex_teacher": [
+       0.09375,
+       0.375
+      ]
+     }
+    }
+   },
+   "revise": {
+    "trivial": "not defined in SPEC (the distance behind \"nearest training question\" is not fixed; its EX would also need a gold evaluation that does not exist)",
+    "base": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "adapter": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "cheap": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "self": "not run at this call site (the replay covered agent_cg, agent_ir, agent_ss, extract_keywords, filter_column, select_columns, select_tables)",
+    "teacher_registered_run_ex": {
+     "n_calls": 1,
+     "n_questions": 1,
+     "missing_in_replay": 0,
+     "counts": {
+      "n": 1,
+      "ok": 1,
+      "n_agree": 0,
+      "agree": 0,
+      "tp": 0,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "recall_sum": 0.0,
+      "recall_n": 0,
+      "jac_sum": 0.0,
+      "jac_n": 0,
+      "n_gold": 1,
+      "ex": 0,
+      "ex_teacher": 0
+     },
+     "teacher_unparsed": 0,
+     "parsed_ok": 1.0,
+     "ex": 0.0,
+     "ex_teacher": 0.0,
+     "ci95": {
+      "parsed_ok": [
+       1.0,
+       1.0
+      ],
+      "ex": [
+       0.0,
+       0.0
+      ],
+      "ex_teacher": [
+       0.0,
+       0.0
+      ]
+     }
+    }
+   }
+  }
+ },
+ "latency_and_tokens": {
+  "filter_column": {
+   "teacher (registered B0 run)": {
+    "n_calls": 13138,
+    "latency_ms_p50": 2008,
+    "latency_ms_p95": 3566,
+    "tokens_in_mean": 5879.252930430812,
+    "tokens_out_mean": 136.1394428375704,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 13138,
+    "latency_ms_p50": 7465,
+    "latency_ms_p95": 18325,
+    "tokens_in_mean": 4052.33231846552,
+    "tokens_out_mean": 83.8242502664028,
+    "attempts_per_invocation": 1.00015223017202
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 13138,
+    "latency_ms_p50": 12186,
+    "latency_ms_p95": 24217,
+    "tokens_in_mean": 4052.33231846552,
+    "tokens_out_mean": 90.96118130613488,
+    "attempts_per_invocation": 1.0004566905160603
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 13138,
+    "latency_ms_p50": 3066,
+    "latency_ms_p95": 6772,
+    "tokens_in_mean": 16142.153676358654,
+    "tokens_out_mean": 205.80940782463085,
+    "attempts_per_invocation": 1.1516973664180241
+   },
+   "teacher's own repetition": {
+    "n_calls": 3311,
+    "latency_ms_p50": 1957,
+    "latency_ms_p95": 3060,
+    "tokens_in_mean": 5891.288130474177,
+    "tokens_out_mean": 139.421926910299,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  },
+  "select_tables": {
+   "teacher (registered B0 run)": {
+    "n_calls": 200,
+    "latency_ms_p50": 2439,
+    "latency_ms_p95": 3979,
+    "tokens_in_mean": 1872.405,
+    "tokens_out_mean": 211.085,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 200,
+    "latency_ms_p50": 10115,
+    "latency_ms_p95": 19782,
+    "tokens_in_mean": 1241.35,
+    "tokens_out_mean": 154.25,
+    "attempts_per_invocation": 1.0
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 200,
+    "latency_ms_p50": 12495,
+    "latency_ms_p95": 26964,
+    "tokens_in_mean": 1241.35,
+    "tokens_out_mean": 136.1,
+    "attempts_per_invocation": 1.0
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 200,
+    "latency_ms_p50": 2822,
+    "latency_ms_p95": 6561,
+    "tokens_in_mean": 4535.26,
+    "tokens_out_mean": 321.345,
+    "attempts_per_invocation": 1.14
+   },
+   "teacher's own repetition": {
+    "n_calls": 50,
+    "latency_ms_p50": 2510,
+    "latency_ms_p95": 4105,
+    "tokens_in_mean": 2009.52,
+    "tokens_out_mean": 239.12,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  },
+  "select_columns": {
+   "teacher (registered B0 run)": {
+    "n_calls": 200,
+    "latency_ms_p50": 2219,
+    "latency_ms_p95": 3681,
+    "tokens_in_mean": 1636.57,
+    "tokens_out_mean": 220.825,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 200,
+    "latency_ms_p50": 10387,
+    "latency_ms_p95": 21140,
+    "tokens_in_mean": 1125.285,
+    "tokens_out_mean": 165.35,
+    "attempts_per_invocation": 1.0
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 200,
+    "latency_ms_p50": 12331,
+    "latency_ms_p95": 28648,
+    "tokens_in_mean": 1125.285,
+    "tokens_out_mean": 146.935,
+    "attempts_per_invocation": 1.0
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 200,
+    "latency_ms_p50": 2928,
+    "latency_ms_p95": 6752,
+    "tokens_in_mean": 3913.055,
+    "tokens_out_mean": 343.44,
+    "attempts_per_invocation": 1.15
+   },
+   "teacher's own repetition": {
+    "n_calls": 50,
+    "latency_ms_p50": 2221,
+    "latency_ms_p95": 3620,
+    "tokens_in_mean": 1797.4,
+    "tokens_out_mean": 247.2,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  },
+  "generate_candidate": {
+   "teacher (registered B0 run)": {
+    "n_calls": 199,
+    "latency_ms_p50": 4822,
+    "latency_ms_p95": 12794,
+    "tokens_in_mean": 15620.989949748744,
+    "tokens_out_mean": 832.5376884422111,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 199,
+    "latency_ms_p50": 32295,
+    "latency_ms_p95": 94110,
+    "tokens_in_mean": 9929.055276381909,
+    "tokens_out_mean": 685.321608040201,
+    "attempts_per_invocation": 1.0
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 199,
+    "latency_ms_p50": 34424,
+    "latency_ms_p95": 71127,
+    "tokens_in_mean": 9929.055276381909,
+    "tokens_out_mean": 476.30150753768845,
+    "attempts_per_invocation": 1.0
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 199,
+    "latency_ms_p50": 3874,
+    "latency_ms_p95": 17444,
+    "tokens_in_mean": 39997.01507537688,
+    "tokens_out_mean": 413.7889447236181,
+    "attempts_per_invocation": 1.1256281407035176
+   },
+   "teacher's own repetition": null,
+   "trivial rule (no language model)": "no model call"
+  },
+  "revise": {
+   "teacher (registered B0 run)": {
+    "n_calls": 5,
+    "latency_ms_p50": 11469,
+    "latency_ms_p95": 12519,
+    "tokens_in_mean": 6096.6,
+    "tokens_out_mean": 1448.4,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 5,
+    "latency_ms_p50": 58217,
+    "latency_ms_p95": 66739,
+    "tokens_in_mean": 3901.4,
+    "tokens_out_mean": 802.0,
+    "attempts_per_invocation": 1.0
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 5,
+    "latency_ms_p50": 27174,
+    "latency_ms_p95": 37663,
+    "tokens_in_mean": 3901.4,
+    "tokens_out_mean": 373.8,
+    "attempts_per_invocation": 1.0
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 5,
+    "latency_ms_p50": 6951,
+    "latency_ms_p95": 14735,
+    "tokens_in_mean": 15052.2,
+    "tokens_out_mean": 980.8,
+    "attempts_per_invocation": 1.0
+   },
+   "teacher's own repetition": null,
+   "trivial rule (no language model)": "no model call"
+  },
+  "extract_keywords": {
+   "teacher (registered B0 run)": {
+    "n_calls": 200,
+    "latency_ms_p50": 1765,
+    "latency_ms_p95": 4491,
+    "tokens_in_mean": 1070.505,
+    "tokens_out_mean": 82.695,
+    "attempts_per_invocation": 1.005
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 200,
+    "latency_ms_p50": 3494,
+    "latency_ms_p95": 11008,
+    "tokens_in_mean": 707.03,
+    "tokens_out_mean": 40.935,
+    "attempts_per_invocation": 1.005
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 200,
+    "latency_ms_p50": 5259,
+    "latency_ms_p95": 15432,
+    "tokens_in_mean": 707.03,
+    "tokens_out_mean": 61.095,
+    "attempts_per_invocation": 1.0
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 200,
+    "latency_ms_p50": 3817,
+    "latency_ms_p95": 8755,
+    "tokens_in_mean": 2959.25,
+    "tokens_out_mean": 419.8,
+    "attempts_per_invocation": 1.095
+   },
+   "teacher's own repetition": {
+    "n_calls": 50,
+    "latency_ms_p50": 1741,
+    "latency_ms_p95": 5114,
+    "tokens_in_mean": 1082.42,
+    "tokens_out_mean": 98.32,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  },
+  "agent_ir": {
+   "teacher (registered B0 run)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1312,
+    "latency_ms_p95": 1804,
+    "tokens_in_mean": 377.0,
+    "tokens_out_mean": 16.635,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1276,
+    "latency_ms_p95": 2435,
+    "tokens_in_mean": 245.5,
+    "tokens_out_mean": 4.75,
+    "attempts_per_invocation": 1.0025
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 800,
+    "latency_ms_p50": 935,
+    "latency_ms_p95": 2099,
+    "tokens_in_mean": 245.5,
+    "tokens_out_mean": 4.25,
+    "attempts_per_invocation": 1.0
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1774,
+    "latency_ms_p95": 3969,
+    "tokens_in_mean": 1080.25,
+    "tokens_out_mean": 160.71375,
+    "attempts_per_invocation": 1.1025
+   },
+   "teacher's own repetition": {
+    "n_calls": 200,
+    "latency_ms_p50": 1245,
+    "latency_ms_p95": 1549,
+    "tokens_in_mean": 377.0,
+    "tokens_out_mean": 16.67,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  },
+  "agent_ss": {
+   "teacher (registered B0 run)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1449,
+    "latency_ms_p95": 2393,
+    "tokens_in_mean": 345.0,
+    "tokens_out_mean": 42.39,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1095,
+    "latency_ms_p95": 2633,
+    "tokens_in_mean": 231.5,
+    "tokens_out_mean": 4.75,
+    "attempts_per_invocation": 1.0
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1261,
+    "latency_ms_p95": 2492,
+    "tokens_in_mean": 231.5,
+    "tokens_out_mean": 4.75,
+    "attempts_per_invocation": 1.00625
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 800,
+    "latency_ms_p50": 1699,
+    "latency_ms_p95": 4894,
+    "tokens_in_mean": 1033.0,
+    "tokens_out_mean": 189.7975,
+    "attempts_per_invocation": 1.14375
+   },
+   "teacher's own repetition": {
+    "n_calls": 200,
+    "latency_ms_p50": 1246,
+    "latency_ms_p95": 2076,
+    "tokens_in_mean": 345.0,
+    "tokens_out_mean": 47.485,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  },
+  "agent_cg": {
+   "teacher (registered B0 run)": {
+    "n_calls": 598,
+    "latency_ms_p50": 1947,
+    "latency_ms_p95": 2595,
+    "tokens_in_mean": 337.24080267558526,
+    "tokens_out_mean": 74.7876254180602,
+    "attempts_per_invocation": 1.0
+   },
+   "base SLM (Qwen3-8B, no adapter)": {
+    "n_calls": 598,
+    "latency_ms_p50": 1093,
+    "latency_ms_p95": 7812,
+    "tokens_in_mean": 229.62541806020067,
+    "tokens_out_mean": 22.959866220735787,
+    "attempts_per_invocation": 1.0
+   },
+   "SLM + adapters (B4's replay)": {
+    "n_calls": 598,
+    "latency_ms_p50": 1187,
+    "latency_ms_p95": 2625,
+    "tokens_in_mean": 229.62541806020067,
+    "tokens_out_mean": 4.670568561872909,
+    "attempts_per_invocation": 1.0016722408026757
+   },
+   "cheaper LLM (gpt-oss)": {
+    "n_calls": 598,
+    "latency_ms_p50": 1543,
+    "latency_ms_p95": 2975,
+    "tokens_in_mean": 1013.1521739130435,
+    "tokens_out_mean": 128.14046822742475,
+    "attempts_per_invocation": 1.1622073578595318
+   },
+   "teacher's own repetition": {
+    "n_calls": 150,
+    "latency_ms_p50": 1343,
+    "latency_ms_p95": 2428,
+    "tokens_in_mean": 337.3333333333333,
+    "tokens_out_mean": 67.24666666666667,
+    "attempts_per_invocation": 1.0
+   },
+   "trivial rule (no language model)": "no model call"
+  }
+ }
+}
