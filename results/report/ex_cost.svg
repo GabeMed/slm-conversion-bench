@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" width="640" height="420" font-family="system-ui, sans-serif" font-size="12" role="img" aria-label="EX against cost per correct query">
+<style>:root{--surface:#fcfcfb;--ink:#1f1f1e;--muted:#6b6a64;--grid:#e4e3dd;--no-slm:#2a78d6;--slm:#eb6834}@media (prefers-color-scheme: dark){:root{--surface:#1a1a19;--ink:#ffffff;--muted:#c3c2b7;--grid:#34342f;--no-slm:#3987e5;--slm:#d95926}}text{fill:var(--muted)} .label{fill:var(--ink)} .grid{stroke:var(--grid);stroke-width:1}.no-slm{fill:var(--no-slm)} .slm{fill:var(--slm)} .line{stroke:var(--slm);stroke-width:2;fill:none}circle{stroke:var(--surface);stroke-width:2}</style>
+<rect width="640" height="420" style="fill:var(--surface)"/>
+<line class="grid" x1="64" x2="616" y1="372.0" y2="372.0"/><text x="56" y="376.0" text-anchor="end">0%</text>
+<line class="grid" x1="64" x2="616" y1="305.6" y2="305.6"/><text x="56" y="309.6" text-anchor="end">20%</text>
+<line class="grid" x1="64" x2="616" y1="239.2" y2="239.2"/><text x="56" y="243.2" text-anchor="end">40%</text>
+<line class="grid" x1="64" x2="616" y1="172.8" y2="172.8"/><text x="56" y="176.8" text-anchor="end">60%</text>
+<line class="grid" x1="64" x2="616" y1="106.4" y2="106.4"/><text x="56" y="110.4" text-anchor="end">80%</text>
+<line class="grid" x1="64" x2="616" y1="40.0" y2="40.0"/><text x="56" y="44.0" text-anchor="end">100%</text>
+<line class="grid" x1="145.5" x2="145.5" y1="40" y2="372"/><text x="145.5" y="388" text-anchor="middle">$0.001</text>
+<line class="grid" x1="313.3" x2="313.3" y1="40" y2="372"/><text x="313.3" y="388" text-anchor="middle">$0.01</text>
+<line class="grid" x1="481.2" x2="481.2" y1="40" y2="372"/><text x="481.2" y="388" text-anchor="middle">$0.1</text>
+<text x="340.0" y="412" text-anchor="middle">cost per correct query (USD, log scale)</text><text x="14" y="206.0" text-anchor="middle" transform="rotate(-90 14 206.0)">EX</text>
+<polyline class="line" points="305.6,195.3 356.2,195.3 423.0,195.3"/>
+<polyline class="line" points="342.4,150.7 392.9,150.7 459.7,150.7"/>
+<polyline class="line" points="409.8,98.0 421.3,98.0 447.7,98.0"/>
+<circle class="no-slm" cx="570.0" cy="100.7" r="5"><title>B0: EX 81.7%, $0.3383 per correct query</title></circle>
+<circle class="no-slm" cx="400.3" cy="117.3" r="5"><title>B1: EX 76.7%, $0.03298 per correct query</title></circle>
+<circle class="no-slm" cx="387.1" cy="94.7" r="5"><title>B2-production: EX 83.5%, $0.0275 per correct query</title></circle>
+<circle class="no-slm" cx="110.0" cy="115.3" r="5"><title>B2-cheap: EX 77.3%, $0.0006144 per correct query</title></circle>
+<circle class="slm" cx="305.6" cy="195.3" r="5"><title>B3 at 100% utilization: EX 53.2%, $0.008999 per correct query</title></circle>
+<circle class="slm" cx="356.2" cy="195.3" r="5"><title>B3 at 50% utilization: EX 53.2%, $0.018 per correct query</title></circle>
+<circle class="slm" cx="423.0" cy="195.3" r="5"><title>B3 at 20% utilization: EX 53.2%, $0.045 per correct query</title></circle>
+<circle class="slm" cx="342.4" cy="150.7" r="5"><title>B4 at 100% utilization: EX 66.7%, $0.01489 per correct query</title></circle>
+<circle class="slm" cx="392.9" cy="150.7" r="5"><title>B4 at 50% utilization: EX 66.7%, $0.02979 per correct query</title></circle>
+<circle class="slm" cx="459.7" cy="150.7" r="5"><title>B4 at 20% utilization: EX 66.7%, $0.07447 per correct query</title></circle>
+<circle class="slm" cx="409.8" cy="98.0" r="5"><title>B5 at 100% utilization: EX 82.5%, $0.03756 per correct query</title></circle>
+<circle class="slm" cx="421.3" cy="98.0" r="5"><title>B5 at 50% utilization: EX 82.5%, $0.04396 per correct query</title></circle>
+<circle class="slm" cx="447.7" cy="98.0" r="5"><title>B5 at 20% utilization: EX 82.5%, $0.06314 per correct query</title></circle>
+<text class="label" x="395.1" y="86.7">B2-production</text>
+<text class="label" x="429.3" y="104.0">B5</text>
+<text class="label" x="578.0" y="92.7">B0</text>
+<text class="label" x="118.0" y="107.3">B2-cheap</text>
+<text class="label" x="408.3" y="109.3">B1</text>
+<text class="label" x="400.9" y="142.7">B4</text>
+<text class="label" x="364.2" y="187.3">B3</text>
+<circle class="no-slm" cx="70" cy="12" r="5"/><text class="label" x="80" y="16">no SLM</text><circle class="slm" cx="150" cy="12" r="5"/><text class="label" x="160" y="16">SLM: one point per utilization, 20% (right) to 100% (left)</text>
+</svg>
