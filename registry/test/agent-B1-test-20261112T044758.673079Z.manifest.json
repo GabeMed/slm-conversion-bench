@@ -809,8 +809,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-12T04:47:58.673079+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-12T04:50:12.409217+00:00",
+  "status": "failed",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -885,5 +885,86 @@
       "status": "failed"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B1-test-20261112T044758.673079Z.intent.json",
+  "resumed_from": {
+    "run_id": "agent-B1-test-20261112T044237.569427Z",
+    "commit": "baa282ae62c5af6832523e246ebde1eb821eecf2",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "failed",
+    "started_at": "2026-11-12T04:42:37.569427+00:00",
+    "finished_at": "2026-11-12T04:45:33.431511+00:00",
+    "workers": 2,
+    "stopped_by": null,
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": "harness error on question 5 (and 1 more): agent_ir: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}",
+    "predictions_sha256": "96f0a1e1d53f981de96aa070317422840f206cf890cd74f6da3feb2c21c316e4",
+    "calls_sha256": "9a1b4a29b6556a5fbcb1d749014991fbf11326257bc71c508bedb68c975c0fea",
+    "discarded": {
+      "n_calls": 7,
+      "usage": {
+        "input": 6935,
+        "cached_input": 224,
+        "output": 1097,
+        "reasoning": 999,
+        "cache_write": 0
+      },
+      "question_ids": [
+        "5",
+        "11"
+      ]
+    },
+    "routes": null
+  },
+  "resumed_question_ids": [],
+  "sessions": [
+    {
+      "started_at": "2026-11-12T04:17:39.999205+00:00",
+      "finished_at": "2026-11-12T04:17:51.356018+00:00",
+      "commit": "3e60b380fa7a6cdc27fb539bbc073219dc7a812c",
+      "workers": 2,
+      "killed": true
+    },
+    {
+      "started_at": "2026-11-12T04:42:37.569427+00:00",
+      "finished_at": "2026-11-12T04:45:33.431511+00:00",
+      "commit": "baa282ae62c5af6832523e246ebde1eb821eecf2",
+      "workers": 2
+    },
+    {
+      "started_at": "2026-11-12T04:47:58.673079+00:00",
+      "finished_at": "2026-11-12T04:50:12.409217+00:00",
+      "commit": "6710afefb2b01495ff25796c4c203290a7747585",
+      "workers": 2
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 2,
+  "call_sites_seen": [
+    "agent_ir"
+  ],
+  "errors_by_call_site": {
+    "agent_ir": {
+      "ValueError": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {},
+  "harness_errors": {
+    "5": [
+      "agent_ir: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}"
+    ],
+    "11": [
+      "agent_ir: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}"
+    ]
+  },
+  "databases_changed": [],
+  "predictions_sha256": "96f0a1e1d53f981de96aa070317422840f206cf890cd74f6da3feb2c21c316e4",
+  "calls_sha256": "c2feb825c75a346861df400dade4d20d20ae5f4086e8ee299212bfe5cdbbdf8a",
+  "n_predictions": 2,
+  "unregistered_call_sites": [],
+  "end_reason": "harness error on question 5 (and 1 more): agent_ir: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}"
 }
