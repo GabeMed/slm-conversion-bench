@@ -423,3 +423,154 @@ Changes after Stage 0 that can change a result or its interpretation.
   (#52). Not checked: the container image and the environment variables set when the pod was created, which no
   measured value reads. The test's SLM arms run on the same physical GPU as the six load-test sweeps and P-4.
   Direction: none on any verdict. Frozen code changed: none; RUNBOOK.md: one sentence.
+- 2026-11-12 · execution conditions of the registered test executions. SPEC 6.1 allows an unfinished execution
+  to be resumed from its most recent attempt; it does not foresee a change of worker count or of GPU pod
+  between attempts, and both happened. (1) Attempts and workers, every attempt in `registry/test/`: B3 one
+  attempt, 8 workers (agent-B3-test-20261111T012223.392984Z). B4 three attempts, 8, 8 and 3 workers
+  (…023253.365624Z and …031525.367031Z, both killed with the manifest never closed; …032707.693347Z, done):
+  127 of its 498 answers were carried over from the 8-worker attempts, 371 were answered at 3 workers. B0
+  five attempts, 8, 8, 5, 3 and 3 workers (…024537.820745Z, …024701.507238Z, …054112.034753Z,
+  …055522.766677Z; …060814.371294Z, done): 90 answers carried from 8 workers, 10 more at 5, 398 at 3. B5
+  eleven attempts, 3 workers in all (…081102.410537Z to …200809.693765Z, done). B2 one attempt per
+  configuration, one worker. B1 is the line below. B4's first attempt and B0's second ran at the same time, 8 workers each
+  (02:47–03:08Z), and were killed within 6 s of each other. (2) How attempts ended: six were killed without
+  closing their manifest (B4 1 and 2, B0 2, B5 9, B1 2 and 13; the registry records no cause: B1's second
+  was stopped by the operator after two hours without progress on hung connections, its thirteenth by an
+  operator error, and the others were stopped by the operator to change the worker count or to free memory
+  on a 16 GB client machine), four by
+  SIGTERM, two on an exhausted credit balance at the production LLM's provider (B0 3, B5 1), one on an API key
+  not scoped to a workspace (B0 1), two on an embeddings connection error, three on the SLM endpoint
+  unreachable, one on a worker that exited with code −11, and, among B1's first sixteen attempts, thirteen at the cheaper LLM's router (ten 504 timeouts, three 429
+  rate limits). Every one was resumed from the latest attempt and none was declared a redo; B1's restarts
+  are the line below. (3) GPU pods: five pod ids appear in `served`, all with the registered
+  plan (e200d8c6…), the same pod code (11c1194b…), GPU type, image and vLLM. B3 and B4 ran on 86ovr3x89eh3bx,
+  the pod of the load-test sweeps. B5 did not: 21 of its answers come from sg5e07uhpcomz6 (attempt 1), none
+  from ejuv1ctuz0z2lw (attempts 2 to 4), 477 from 92e3cqaubrafmj (attempts 5 to 11). The replays ran on
+  5z556nr7hs2ql2. The line of 2026-11-10 that says the test's SLM arms run on the same physical GPU as the six
+  load-test sweeps therefore holds for B3 and B4 only. (4) API accounts: from its seventeenth attempt B1 ran on another account at the same router, with the
+  same model, provider route and configuration hash. Direction: unknown. For B4 it cannot be excluded that the 127 answers given
+  at 8 workers, with B0 running beside it, differ from what 3 workers would have given (a slower server times
+  out more calls): on those 127 questions B4 is 26.0 points below B0, on the other 371 it is 11.3 below,
+  and the two groups are also different databases, so the cause is not identified
+  (`docs/preliminary-results.md`, exploratory). For B0 the worker count changes only its pace against a hosted API, and no effect is
+  expected, but none was measured. For B5 the pods are of one type and plan and no measured value reads the
+  pod, yet its SLM latency and J8's price were not measured on the same machine. Frozen code changed: none.
+- 2026-11-12 · B1 was restarted twice from its first questions without the declaration SPEC 6.1 requires,
+  and one empty attempt was withdrawn from the registry. What the SPEC requires: an unfinished execution is
+  resumed from its most recent attempt; redoing from the start "is not an alternative to resuming" and is
+  valid only when resuming is impossible or a declared defect affects completed questions, the defect is
+  published in the intent before the first question, and before that this table gains a line that names the
+  abandoned attempt (D22). The registry's own rule is that nothing is ever removed from it. What was done:
+  B1 took 48 registered attempts (agent-B1-test-20261111T231727.093255Z to
+  agent-B1-test-20261112T145512.826159Z, done), against a router that returned timeouts and rate limits for
+  hours. (1) First restart. Attempts 1 to 12 (3 workers in attempts 1 to 9, 2 from attempt 10) formed one
+  chain that held 190 resumable answers; its last attempt (…040944.899722Z) records 192 predictions, two of
+  them harness errors. The thirteenth (…041739.999205Z) was killed by an operator error 11 s after it
+  started and never closed its manifest. Because only the most recent attempt may be resumed, the fourteenth
+  (…044237.569427Z) resumed that one, carried over no question and left 190 answers and 9,549 calls out of
+  the chain. Its intent records a resume and no line was added here before it started; this line is that
+  declaration, made after the fact. (2) Second restart, and the withdrawal. Attempts 14 to 35 rebuilt a chain
+  of 206 resumable answers (…091005.336864Z records 208 predictions). Each resume copies its source's call
+  log, and the client machine's disk filled: the next attempt (agent-B1-test-20261112T091540.281592Z) died
+  while copying, with no call made and no answer, and as the most recent attempt it would again have forced a
+  restart from the first question. Instead its intent and manifest were removed from `registry/test/` in a
+  public commit (6fcb68c, which names the attempt and the cause), and attempt 36 (…132239.397430Z) resumed
+  …091005.336864Z. The withdrawn attempt's files are in the data release (`data-2026-11-12`,
+  `test-B1-withdrawn-attempt.tar.zst`). This breaks the registry's rule; it was preferred to discarding 206
+  answers a second time, and no answer of the withdrawn attempt exists to be hidden. (3) Workers: 3
+  (attempts 1 to 9), 2 (10 to 38), 4 (39 to 41), 6 (42 to 44), 8 (45 to 48), raised on the last morning to
+  finish the arm; attempts 38, 41 and 44 were stopped by the operator (SIGHUP, SIGTERM) to change the count.
+  Of the 498 final answers, about 206 were given at 2 workers and the rest at 4 to 8. (4) What is reported:
+  every attempt stays in the registry except the withdrawn one; the abandoned chain's last attempt
+  (…040944.899722Z) and every other attempt that left scorable predictions has a partial evaluation
+  (`results/test/partial/`), descriptive, never read for a verdict. Neither restart was chosen on B1's own
+  result (no B1 attempt had been evaluated before the arm finished); both were made after the results of B0,
+  B2, B3, B4 and B5 were known (line below). Direction: unknown. The first restart replaced 190 answers with
+  new draws from the same configuration; the two sets can be compared through the partial evaluation. The
+  worker count changes only the pace against a hosted API, and no effect is expected, but none was measured.
+  Frozen code changed: none.
+- 2026-11-12 · operational decisions on unfinished arms were taken with other arms' results known. The
+  registered executions did not run blind to one another. B3 and B4 were evaluated at 05:45Z and 05:48Z on
+  11-11, before B0's last two attempts (05:55Z and 06:08Z, when its workers went from 5 to 3). B0 was
+  evaluated at 08:03Z, before B5's first intent (08:11Z), so each of B5's ten resumes was decided with the
+  EX of B0, B3 and B4 known, and from 08:53Z and 15:49Z with B2's. B1's first intent (23:17Z) came after
+  every other arm had been evaluated (B5 at 20:20Z); its changes of worker count and
+  its restarts were decided with all of those results known, and the per-call evaluations of the
+  replays were run between its attempts (03:29Z to 04:35Z). The evaluation of B2 on the production LLM was
+  run twice (15:49Z and 20:22Z) and the per-call evaluation of B4's replay twice (03:29Z and 04:18Z on 11-12),
+  each pair with the same n and the same number correct. What limits the damage: every attempt is in the registry with its hashes, no completed execution was
+  discarded or repeated, each configuration has at most one completed execution, and every resume kept the
+  answers already given, except B1's first restart. Direction: unknown. A decision to stop, resume or change the
+  worker count cannot choose an answer, but it was not blind, and for B1 it decided which 190 answers count.
+  Frozen code changed: none.
+- 2026-11-12 · exploratory replays ran before the last registered execution. SPEC 6.1 places the replays of
+  B0's test calls "after the registered test executions". They ran between 20:25Z and 23:08Z on 11-11, after
+  B5 finished and before B1's first intent (23:17Z), so B1 ran with them and their per-call evaluations
+  already made. (1) The production LLM on its own calls (replay-production_llm-test-20261111T202527.888323Z):
+  100 questions, 9,092 invocations, 3 workers, one attempt. SPEC 6.1 asks that a sample's size be published
+  in the intent before the replay starts; the intent carries no size and no question list, and only the
+  manifest shows the 100. The replay started five minutes after B5's evaluation. (2) B4's adapters
+  (replay-B4-test-20261111T203405.413565Z, interrupted by SIGHUP at 438 questions; resumed and finished as
+  replay-B4-test-20261111T225020.625646Z) and the base SLM
+  (replay-slm_qwen3-8b-test-20261111T203456.183437Z, interrupted by SIGHUP at 364 questions; resumed and
+  finished as replay-slm_qwen3-8b-test-20261111T225111.186203Z): 6 workers each, both at the same time on one
+  pod (5z556nr7hs2ql2), which is not the pod of B3, B4 or B5, and overlapping the production-LLM replay. (3)
+  The replay with the cheaper LLM that SPEC 6.1 names was not run. Direction: none on a registered verdict, by construction (no replay and no per-call
+  evaluation enters one). On the exploratory readings: unknown. The size of the teacher's sample cannot be
+  shown to have been fixed before results were seen, and the replays' latencies were measured with two
+  replays sharing a server. On B1: unknown (same reason as the line above). Frozen code changed: none.
+- 2026-11-12 · the SLM calls of the test ran outside the latency limit that prices them. J8 prices an SLM
+  request at the throughput the server sustains within a p95 limit: 3,135 ms for the base model and 2,933 ms
+  for the adapters as deployed, both at a sustained concurrency of 8, and 2,801 ms for c0 at 16. In the test
+  the p95 of the SLM calls was 11.31 s in B3, 21.66 s in B4 and 8.00 s in B5 (8.23 s at the column filter),
+  with a mean of 26.3, 32.8 and 14.1 calls in flight and peaks of 203, 256 and 96; B0's calls had a p95 of
+  3.18 s. Per question, the p95 wall time was 98.5 s (B3), 136.6 s (B4) and 97.2 s (B5) against 83.3 s for B0
+  (figures: `docs/preliminary-cost-latency.md`, exploratory, recomputed from the logged calls). The registered workers and CHESS's 32 calls in flight per step drove the server past the load
+  at which it was priced. EX is read from the answers and does not depend on the price; the cost does.
+  Direction: in the SLM's favour for any reading of cost at equal latency: the accuracy of B3, B4 and B5 was
+  obtained from a service three to seven times slower at p95 than the limit its price assumes, and J8's price
+  is the price of a service the test did not deliver. Not in its favour in dollars spent: at 100% utilisation
+  J8 charges B3 and B4 slightly more than the GPU time their sessions used ($2.38 against $2.01, $4.95
+  against $4.79); for B5 it charges less ($2.63 against $5.75 of pod time over eleven sessions, which
+  includes waiting on the production LLM), and B5's pods are not the load-tested one. Whether the overload
+  cost accuracy is unknown: the SLM arms record 424 to 523 failed calls each and their cause was not
+  separated. V3 and A6 are reported with this beside them. Frozen code changed: none.
+- 2026-11-12 · learning curves beyond the registered one. SPEC 6.1 registers one curve, c1 on calibration, to
+  be reported after the test verdicts. Curves for c0 and c2 were added on 11-11 at 23:06Z, after the test
+  results of B0, B2, B3, B4 and B5 were known and before B1 started; a c3 curve was prepared at the same time
+  and dropped without training an adapter (the cluster's calls are a handful of distinct prompts with fixed
+  outputs). The single call on the small model (base, and with the c1 adapter) was also run on calibration,
+  post hoc, from a scratch checkout with a local patch that lets arm B2 take an SLM engine off the test
+  split; `docs/post-hoc-analysis-plan.md` fixes these readings. They run on calibration, not on the test. All are exploratory
+  and post hoc, and are labelled so wherever they are shown. Direction: none on a registered verdict (no
+  curve feeds one). As evidence: unknown; they were chosen with the test results in view, and the registered
+  reading rule of the c1 curve does not cover them. Frozen code changed: none.
+- 2026-11-12 · a presentation-only merge was on `main` during two test executions and was reverted twice. PR
+  #65 (README.md, the two results-card images under .github/assets/ and scripts/brand/results_card.py; no
+  file under bench/ or vendor/) was merged at 04:30:54Z on 11-11, while B4's last attempt was running, and
+  reverted at 05:39:01Z (294f41b); the same change was merged again as PR #67 at 03:07:01Z on 11-12, while
+  B1's third attempt was running, and reverted at 03:31:25Z (1ab215d). No attempt started while either merge
+  was on `main`: the test-split check refuses a commit whose content differs from the registered one, which
+  is why each was reverted; B0's third attempt and B1's fourth started on the revert commits. The
+  registration commit is ffc562f (01:21:13Z on 11-11) and the first test intent 6e6b421 (01:22:25Z).
+  Direction: none: each revert restored the registered content before any attempt started, and the
+  check compares the whole tree outside `prereg/` and `registry/`. Frozen code changed: none.
+- 2026-11-12 · the registered `bench report` cannot be produced for this test; the report is produced with a
+  declared patch of two analysis files. Two defects of the registered code lock each other. (1) J3 refuses
+  B1: three `filter_column` calls of question 894, of 29,513 calls, came back from the router empty and with
+  no token count, and were logged with an empty response text and an error; J3 prices no call that "has a
+  response but no usage", and the report refuses a plan that leaves out an arm the test completed. (2) The
+  report requires a `bench eval --partial` of every abandoned attempt that left predictions, and four such
+  attempts (B0's first, B1's 14 to 16) hold only harness errors, which `bench eval --partial` leaves out and
+  then refuses with "completed no question". A corrected registration would supersede every test execution
+  (SPEC 6.1), so none was made. What was done: `bench verify` recomputed the fifteen judgments that the
+  registered code produces to the stored bytes (0 divergences); B1's J3 and the report were produced from a
+  scratch checkout of the registered commit with a patch of `bench/judge/j3.py` (an empty response with an
+  error and no usage counts as failed and unbilled, so B1's cost carries the label "lower bound") and of
+  `bench/report.py` (an abandoned attempt whose every prediction is a failure or a harness error is listed
+  with no score; the check of the analysis code accepts a difference in exactly these two files; a notice
+  is printed at the top of the report). The patch is published with the report. No verdict rule, threshold,
+  margin, seed or test changes, and B1's J3 is not among the judgments `bench verify` can recompute.
+  Direction: on B1's cost, in B1's favour by at most the price of three column-filter calls (under US$ 0.01
+  of about US$ 12.60); on every other number, none. Frozen code changed: none on `main`; the patched files
+  are analysis code and exist only in the published patch.
