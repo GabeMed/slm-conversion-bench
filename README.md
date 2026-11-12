@@ -108,6 +108,7 @@ What the registered verdicts say, for this workload only:
 One execution per arm; the exploratory analyses (per task, learning curves, the single call on the small model) say
 more about where the small model is close and where it is not.
 
+- A two-page summary: [`docs/summary.md`](docs/summary.md).
 - The full report, with every test and the SPEC §5 map: [`results/report/report.md`](results/report/report.md). It was
   produced with a small declared patch of the analysis code ([`results/report/analysis-patch.diff`](results/report/analysis-patch.diff)),
   explained in [`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md); no verdict rule changed.
