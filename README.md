@@ -59,8 +59,7 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B4** | the SLM fine-tuned with LoRA, one adapter per cluster, in every call site | the paper's V1 in its strongest form |
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
-The SLM is **Qwen3-8B** ([`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B), revision `b968826`), chosen by
-S4's desk triage (J6) from the two candidates, Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
+The SLM candidates are Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
 trained with TRL and PEFT on Modal's GPUs (the registered configuration; the reference GPU is an A100 80GB) or on
 [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API (`bench train --on tinker`, Qwen3-8B
 only), and served with vLLM on Modal or on RunPod (`bench serve --on runpod up`, behind an SSH tunnel). Both backends write the same adapter and a manifest that pairs runs of the same plan, so
@@ -70,7 +69,7 @@ a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="Results: pending. The arms: Claude Sonnet 5.5, gpt-oss-120b, and Qwen3-8B zero-shot, fine-tuned and routed with the LLM. The protocol is registered at Stage 0.">
+  <img src=".github/assets/results-light.svg" width="100%" alt="Results: pending. The protocol is registered at Stage 0.">
 </picture>
 
 No test result exists yet, so there are no numbers here. When there are, `bench report` writes `reports/<sha256>/`, and
@@ -174,7 +173,7 @@ their publishers. Geist and Geist Mono, embedded in the README's images, are OFL
 ([`scripts/brand/fonts/OFL.txt`](scripts/brand/fonts/OFL.txt)); the model makers' logos in the results card are their
 owners' trademarks, used only to name the models.
 
-<p align="center"><sub>A <a href="https://nest.technology/?utm_source=github&utm_medium=readme&utm_campaign=slm-conversion-bench">Nest</a> research project · <a href="https://nest.technology/benchmarks/?utm_source=github&utm_medium=readme&utm_campaign=slm-conversion-bench">nest.technology/benchmarks</a></sub></p>
+<p align="center"><sub>A <a href="https://nest.technology">Nest</a> research project · <a href="https://nest.technology/benchmarks">nest.technology/benchmarks</a></sub></p>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/footer-dark.svg">
