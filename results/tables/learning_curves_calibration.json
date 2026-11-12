@@ -1,0 +1,1613 @@
+{
+  "label": "EXPLORATORY, post-registration learning curves per cluster (calib replay of B0's own inputs, each adapter at its cluster's call sites). Outside the preregistered plan; not a test-split result; never read by a verdict. Fixed epochs: rows and optimiser steps vary together. One seed per point.",
+  "teacher": "agent-B0-calib-20261109T151141.039667Z",
+  "seed": 20261111,
+  "n_boot": 2000,
+  "b4_engines_by_cluster": {
+    "c0": {
+      "slm:qwen3-8b+lora:c0-842db723c47e": 13128
+    },
+    "c1": {
+      "slm:qwen3-8b+lora:c1-fa3a060fdb1c": 614
+    },
+    "c2": {
+      "slm:qwen3-8b+lora:c2-64efb1484f8c": 200
+    },
+    "c3": {
+      "slm:qwen3-8b+lora:c3-22febb722a91": 2198
+    }
+  },
+  "clusters": {
+    "c0": {
+      "0% (base)": {
+        "replay": "replay-slm_qwen3-8b-calib-20261110T025007.659032Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b-calib-20261110T025007.659032Z-20261110T031423.931711Z",
+        "engine": "slm:qwen3-8b",
+        "per_call_site": {
+          "filter_column": {
+            "n_calls": 13138,
+            "n_questions": 200,
+            "distinct_prompts": 13138,
+            "routed_to_cluster": 13128,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.8884152839092708,
+            "recall_kept": 0.8588090853284224,
+            "agreement_dropped": 0.8926057867755669,
+            "kappa": 0.5939693566026633,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.8765547263681592,
+                0.9006181645268664
+              ],
+              "recall_kept": [
+                0.8359322033898305,
+                0.8801560758082497
+              ],
+              "agreement_dropped": [
+                0.8782921348314606,
+                0.9071653152407745
+              ],
+              "kappa": [
+                0.563546465869131,
+                0.6229146834154436
+              ]
+            },
+            "latency_ms": {
+              "p50": 7465,
+              "p95": 18325
+            },
+            "tokens_per_call": {
+              "input": 4052.33231846552,
+              "output": 83.8242502664028
+            }
+          }
+        }
+      },
+      "25%": {
+        "replay": "replay-slm_qwen3-8b_lora_c0-01698ecff1d0-calib-20261112T131047.290366Z",
+        "eval": null,
+        "engine": "slm:qwen3-8b+lora:c0-01698ecff1d0",
+        "per_call_site": {
+          "filter_column": {
+            "n_calls": 13138,
+            "n_questions": 200,
+            "distinct_prompts": 13138,
+            "routed_to_cluster": 13128,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.961181306134876,
+            "recall_kept": 0.8096992019643954,
+            "agreement_dropped": 0.9826222955947519,
+            "kappa": 0.8159717669460205,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.954191188166057,
+                0.9677687198067633
+              ],
+              "recall_kept": [
+                0.7818599311136625,
+                0.8376068376068376
+              ],
+              "agreement_dropped": [
+                0.977914453452614,
+                0.9866836920831813
+              ],
+              "kappa": [
+                0.7944336314324907,
+                0.8364772180946762
+              ]
+            },
+            "latency_ms": {
+              "p50": 18387,
+              "p95": 26023
+            },
+            "tokens_per_call": {
+              "input": 4052.33231846552,
+              "output": 90.48066676815345
+            }
+          }
+        }
+      },
+      "50%": {
+        "replay": "replay-slm_qwen3-8b_lora_c0-b3991beaa7a3-calib-20261112T134921.305626Z",
+        "eval": null,
+        "engine": "slm:qwen3-8b+lora:c0-b3991beaa7a3",
+        "per_call_site": {
+          "filter_column": {
+            "n_calls": 13138,
+            "n_questions": 200,
+            "distinct_prompts": 13138,
+            "routed_to_cluster": 13128,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.9684883543918404,
+            "recall_kept": 0.8360957642725598,
+            "agreement_dropped": 0.9872273872621427,
+            "kappa": 0.8502058978612432,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.962456509426329,
+                0.9742846241892408
+              ],
+              "recall_kept": [
+                0.8094936708860759,
+                0.8619195046439628
+              ],
+              "agreement_dropped": [
+                0.9834329632792485,
+                0.9903603994789405
+              ],
+              "kappa": [
+                0.8317688353956815,
+                0.8685729765575818
+              ]
+            },
+            "latency_ms": {
+              "p50": 17872,
+              "p95": 25835
+            },
+            "tokens_per_call": {
+              "input": 4052.33231846552,
+              "output": 90.68906987364896
+            }
+          }
+        }
+      },
+      "100%": {
+        "replay": "replay-slm_qwen3-8b_lora_c0-842db723c47e-calib-20261112T132957.024600Z",
+        "eval": null,
+        "engine": "slm:qwen3-8b+lora:c0-842db723c47e",
+        "per_call_site": {
+          "filter_column": {
+            "n_calls": 13138,
+            "n_questions": 200,
+            "distinct_prompts": 13138,
+            "routed_to_cluster": 13128,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.9730552595524433,
+            "recall_kept": 0.8723143032535298,
+            "agreement_dropped": 0.9873142757841689,
+            "kappa": 0.8739051618433067,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.9675117091666047,
+                0.9779293151488488
+              ],
+              "recall_kept": [
+                0.8503319251659626,
+                0.893286219081272
+              ],
+              "agreement_dropped": [
+                0.9835000877654906,
+                0.9905563186813187
+              ],
+              "kappa": [
+                0.857025900191821,
+                0.8903576327308786
+              ]
+            },
+            "latency_ms": {
+              "p50": 18296,
+              "p95": 26169
+            },
+            "tokens_per_call": {
+              "input": 4052.33231846552,
+              "output": 90.94945958288933
+            }
+          }
+        }
+      },
+      "B4 (100%, cross-check)": {
+        "replay": "replay-B4-calib-20261110T174825.799047Z",
+        "eval": "eval-per-call-replay-B4-calib-20261110T174825.799047Z-20261110T181832.677536Z",
+        "engine": "B4",
+        "per_call_site": {
+          "filter_column": {
+            "n_calls": 13138,
+            "n_questions": 200,
+            "distinct_prompts": 13138,
+            "routed_to_cluster": 13128,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.9720657634343127,
+            "recall_kept": 0.8692449355432781,
+            "agreement_dropped": 0.986619167607959,
+            "kappa": 0.869379527793185,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.9664708943572968,
+                0.977156038395714
+              ],
+              "recall_kept": [
+                0.8469150174621654,
+                0.891291642314436
+              ],
+              "agreement_dropped": [
+                0.9828631689955181,
+                0.989811113723646
+              ],
+              "kappa": [
+                0.8525029822624162,
+                0.8863181824442365
+              ]
+            },
+            "latency_ms": {
+              "p50": 12186,
+              "p95": 24217
+            },
+            "tokens_per_call": {
+              "input": 4052.33231846552,
+              "output": 90.96118130613488
+            }
+          }
+        }
+      },
+      "teacher (self-replay, pilot)": {
+        "replay": "replay-production_llm-calib-20261110T021304.240338Z",
+        "eval": null,
+        "engine": "production_llm",
+        "per_call_site": {
+          "filter_column": {
+            "n_calls": 3311,
+            "n_questions": 50,
+            "distinct_prompts": 3311,
+            "routed_to_cluster": 3307,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.9906372697070371,
+            "recall_kept": 0.9722222222222222,
+            "agreement_dropped": 0.9942259112233851,
+            "kappa": 0.9657281969313946,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.9867751780264497,
+                0.9940975458216837
+              ],
+              "recall_kept": [
+                0.9585185185185185,
+                0.9853249475890985
+              ],
+              "agreement_dropped": [
+                0.9909714698447093,
+                0.9967558799675588
+              ],
+              "kappa": [
+                0.9561369044278103,
+                0.9763167136134462
+              ]
+            },
+            "latency_ms": {
+              "p50": 1957,
+              "p95": 3060
+            },
+            "tokens_per_call": {
+              "input": 5891.288130474177,
+              "output": 139.421926910299
+            }
+          }
+        }
+      }
+    },
+    "c1": {
+      "0% (base)": {
+        "replay": "replay-slm_qwen3-8b-calib-20261110T025007.659032Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b-calib-20261110T025007.659032Z-20261110T031423.931711Z",
+        "engine": "slm:qwen3-8b",
+        "per_call_site": {
+          "select_tables": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.82,
+            "set_recall": 0.9694047619047617,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.765,
+                0.87
+              ],
+              "set_recall": [
+                0.9542261904761902,
+                0.9823809523809524
+              ]
+            },
+            "latency_ms": {
+              "p50": 10115,
+              "p95": 19782
+            },
+            "tokens_per_call": {
+              "input": 1241.35,
+              "output": 154.25
+            }
+          },
+          "select_columns": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.395,
+            "set_recall": 0.8129064078215126,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.33,
+                0.46
+              ],
+              "set_recall": [
+                0.7869867202242199,
+                0.838288227292032
+              ]
+            },
+            "latency_ms": {
+              "p50": 10387,
+              "p95": 21140
+            },
+            "tokens_per_call": {
+              "input": 1125.285,
+              "output": 165.35
+            }
+          },
+          "generate_candidate": {
+            "n_calls": 199,
+            "n_questions": 199,
+            "distinct_prompts": 199,
+            "routed_to_cluster": 199,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.542713567839196,
+            "ex_teacher": 0.6884422110552764,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.4723618090452261,
+                0.6130653266331658
+              ],
+              "ex_teacher": [
+                0.6231155778894473,
+                0.7537688442211056
+              ]
+            },
+            "latency_ms": {
+              "p50": 32295,
+              "p95": 94110
+            },
+            "tokens_per_call": {
+              "input": 9929.055276381909,
+              "output": 685.321608040201
+            }
+          },
+          "revise": {
+            "n_calls": 5,
+            "n_questions": 5,
+            "distinct_prompts": 5,
+            "routed_to_cluster": 5,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.0,
+            "ex_teacher": 0.4,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.0,
+                0.0
+              ],
+              "ex_teacher": [
+                0.0,
+                0.8
+              ]
+            },
+            "latency_ms": {
+              "p50": 58217,
+              "p95": 66739
+            },
+            "tokens_per_call": {
+              "input": 3901.4,
+              "output": 802.0
+            }
+          }
+        }
+      },
+      "25%": {
+        "replay": "replay-slm_qwen3-8b_lora_c1-96adf3036600-calib-20261112T061503.097490Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b_lora_c1-96adf3036600-calib-20261112T061503.097490Z-20261112T062835.023673Z",
+        "engine": "slm:qwen3-8b+lora:c1-96adf3036600",
+        "per_call_site": {
+          "select_tables": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.85,
+            "set_recall": 0.9649999999999999,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.8,
+                0.895
+              ],
+              "set_recall": [
+                0.9491666666666667,
+                0.9791666666666665
+              ]
+            },
+            "latency_ms": {
+              "p50": 4029,
+              "p95": 7783
+            },
+            "tokens_per_call": {
+              "input": 1241.35,
+              "output": 140.45
+            }
+          },
+          "select_columns": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.625,
+            "set_recall": 0.9117711665084813,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.56,
+                0.69
+              ],
+              "set_recall": [
+                0.8911324023199028,
+                0.9317817965788943
+              ]
+            },
+            "latency_ms": {
+              "p50": 4038,
+              "p95": 8547
+            },
+            "tokens_per_call": {
+              "input": 1125.285,
+              "output": 147.785
+            }
+          },
+          "generate_candidate": {
+            "n_calls": 199,
+            "n_questions": 199,
+            "distinct_prompts": 199,
+            "routed_to_cluster": 199,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.5678391959798995,
+            "ex_teacher": 0.6884422110552764,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.49748743718592964,
+                0.6381909547738693
+              ],
+              "ex_teacher": [
+                0.6231155778894473,
+                0.7537688442211056
+              ]
+            },
+            "latency_ms": {
+              "p50": 11630,
+              "p95": 31029
+            },
+            "tokens_per_call": {
+              "input": 9929.055276381909,
+              "output": 519.9547738693467
+            }
+          },
+          "revise": {
+            "n_calls": 5,
+            "n_questions": 5,
+            "distinct_prompts": 5,
+            "routed_to_cluster": 5,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.0,
+            "ex_teacher": 0.4,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.0,
+                0.0
+              ],
+              "ex_teacher": [
+                0.0,
+                0.8
+              ]
+            },
+            "latency_ms": {
+              "p50": 7834,
+              "p95": 32721
+            },
+            "tokens_per_call": {
+              "input": 3901.4,
+              "output": 423.8
+            }
+          }
+        }
+      },
+      "50%": {
+        "replay": "replay-slm_qwen3-8b_lora_c1-211bb206e39d-calib-20261112T062058.001360Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b_lora_c1-211bb206e39d-calib-20261112T062058.001360Z-20261112T062858.233553Z",
+        "engine": "slm:qwen3-8b+lora:c1-211bb206e39d",
+        "per_call_site": {
+          "select_tables": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.865,
+            "set_recall": 0.9637499999999997,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.815,
+                0.91
+              ],
+              "set_recall": [
+                0.9475,
+                0.9791666666666665
+              ]
+            },
+            "latency_ms": {
+              "p50": 4042,
+              "p95": 7203
+            },
+            "tokens_per_call": {
+              "input": 1241.35,
+              "output": 139.24
+            }
+          },
+          "select_columns": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.675,
+            "set_recall": 0.9347614395976287,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.61,
+                0.74
+              ],
+              "set_recall": [
+                0.9156848672072457,
+                0.9521849355461249
+              ]
+            },
+            "latency_ms": {
+              "p50": 4042,
+              "p95": 8826
+            },
+            "tokens_per_call": {
+              "input": 1125.285,
+              "output": 149.49
+            }
+          },
+          "generate_candidate": {
+            "n_calls": 199,
+            "n_questions": 199,
+            "distinct_prompts": 199,
+            "routed_to_cluster": 199,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.6030150753768844,
+            "ex_teacher": 0.6884422110552764,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.5326633165829145,
+                0.6683417085427136
+              ],
+              "ex_teacher": [
+                0.6231155778894473,
+                0.7537688442211056
+              ]
+            },
+            "latency_ms": {
+              "p50": 11413,
+              "p95": 26444
+            },
+            "tokens_per_call": {
+              "input": 9929.055276381909,
+              "output": 504.47236180904525
+            }
+          },
+          "revise": {
+            "n_calls": 5,
+            "n_questions": 5,
+            "distinct_prompts": 5,
+            "routed_to_cluster": 5,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.0,
+            "ex_teacher": 0.4,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.0,
+                0.0
+              ],
+              "ex_teacher": [
+                0.0,
+                0.8
+              ]
+            },
+            "latency_ms": {
+              "p50": 9623,
+              "p95": 37771
+            },
+            "tokens_per_call": {
+              "input": 3901.4,
+              "output": 535.6
+            }
+          }
+        }
+      },
+      "100%": {
+        "replay": "replay-slm_qwen3-8b_lora_c1-fa3a060fdb1c-calib-20261112T062644.926464Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b_lora_c1-fa3a060fdb1c-calib-20261112T062644.926464Z-20261112T070418.196611Z",
+        "engine": "slm:qwen3-8b+lora:c1-fa3a060fdb1c",
+        "per_call_site": {
+          "select_tables": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.895,
+            "set_recall": 0.9720833333333333,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.85,
+                0.935
+              ],
+              "set_recall": [
+                0.9562500000000002,
+                0.9845833333333335
+              ]
+            },
+            "latency_ms": {
+              "p50": 3886,
+              "p95": 6864
+            },
+            "tokens_per_call": {
+              "input": 1241.35,
+              "output": 135.71
+            }
+          },
+          "select_columns": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.725,
+            "set_recall": 0.9512610530668983,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.66,
+                0.785
+              ],
+              "set_recall": [
+                0.9342041205956066,
+                0.966890493805711
+              ]
+            },
+            "latency_ms": {
+              "p50": 4051,
+              "p95": 9462
+            },
+            "tokens_per_call": {
+              "input": 1125.285,
+              "output": 147.015
+            }
+          },
+          "generate_candidate": {
+            "n_calls": 199,
+            "n_questions": 199,
+            "distinct_prompts": 199,
+            "routed_to_cluster": 199,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.6130653266331658,
+            "ex_teacher": 0.6884422110552764,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.542713567839196,
+                0.6834170854271356
+              ],
+              "ex_teacher": [
+                0.6231155778894473,
+                0.7537688442211056
+              ]
+            },
+            "latency_ms": {
+              "p50": 11126,
+              "p95": 25313
+            },
+            "tokens_per_call": {
+              "input": 9929.055276381909,
+              "output": 473.3969849246231
+            }
+          },
+          "revise": {
+            "n_calls": 5,
+            "n_questions": 5,
+            "distinct_prompts": 5,
+            "routed_to_cluster": 5,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.0,
+            "ex_teacher": 0.4,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.0,
+                0.0
+              ],
+              "ex_teacher": [
+                0.0,
+                0.8
+              ]
+            },
+            "latency_ms": {
+              "p50": 7625,
+              "p95": 20743
+            },
+            "tokens_per_call": {
+              "input": 3901.4,
+              "output": 320.0
+            }
+          }
+        }
+      },
+      "B4 (100%, cross-check)": {
+        "replay": "replay-B4-calib-20261110T174825.799047Z",
+        "eval": "eval-per-call-replay-B4-calib-20261110T174825.799047Z-20261110T181832.677536Z",
+        "engine": "B4",
+        "per_call_site": {
+          "select_tables": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.89,
+            "set_recall": 0.9726190476190475,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.84,
+                0.93
+              ],
+              "set_recall": [
+                0.9570833333333336,
+                0.984702380952381
+              ]
+            },
+            "latency_ms": {
+              "p50": 12495,
+              "p95": 26964
+            },
+            "tokens_per_call": {
+              "input": 1241.35,
+              "output": 136.1
+            }
+          },
+          "select_columns": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.73,
+            "set_recall": 0.9457759798068252,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.67,
+                0.79
+              ],
+              "set_recall": [
+                0.9263856428916799,
+                0.9620432362323668
+              ]
+            },
+            "latency_ms": {
+              "p50": 12331,
+              "p95": 28648
+            },
+            "tokens_per_call": {
+              "input": 1125.285,
+              "output": 146.935
+            }
+          },
+          "generate_candidate": {
+            "n_calls": 199,
+            "n_questions": 199,
+            "distinct_prompts": 199,
+            "routed_to_cluster": 199,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.6180904522613065,
+            "ex_teacher": 0.6884422110552764,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.5477386934673367,
+                0.6834170854271356
+              ],
+              "ex_teacher": [
+                0.6231155778894473,
+                0.7537688442211056
+              ]
+            },
+            "latency_ms": {
+              "p50": 34424,
+              "p95": 71127
+            },
+            "tokens_per_call": {
+              "input": 9929.055276381909,
+              "output": 476.30150753768845
+            }
+          },
+          "revise": {
+            "n_calls": 5,
+            "n_questions": 5,
+            "distinct_prompts": 5,
+            "routed_to_cluster": 5,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "ex": 0.4,
+            "ex_teacher": 0.4,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "ex": [
+                0.0,
+                0.8
+              ],
+              "ex_teacher": [
+                0.0,
+                0.8
+              ]
+            },
+            "latency_ms": {
+              "p50": 27174,
+              "p95": 37663
+            },
+            "tokens_per_call": {
+              "input": 3901.4,
+              "output": 373.8
+            }
+          }
+        }
+      },
+      "teacher (self-replay, pilot)": {
+        "replay": "replay-production_llm-calib-20261110T021304.240338Z",
+        "eval": null,
+        "engine": "production_llm",
+        "per_call_site": {
+          "select_tables": {
+            "n_calls": 50,
+            "n_questions": 50,
+            "distinct_prompts": 50,
+            "routed_to_cluster": 50,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.98,
+            "set_recall": 0.9966666666666666,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.94,
+                1.0
+              ],
+              "set_recall": [
+                0.99,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 2510,
+              "p95": 4105
+            },
+            "tokens_per_call": {
+              "input": 2009.52,
+              "output": 239.12
+            }
+          },
+          "select_columns": {
+            "n_calls": 50,
+            "n_questions": 50,
+            "distinct_prompts": 50,
+            "routed_to_cluster": 50,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.86,
+            "set_recall": 0.9940043956043957,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.76,
+                0.94
+              ],
+              "set_recall": [
+                0.9863472527472529,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 2221,
+              "p95": 3620
+            },
+            "tokens_per_call": {
+              "input": 1797.4,
+              "output": 247.2
+            }
+          }
+        }
+      }
+    },
+    "c2": {
+      "0% (base)": {
+        "replay": "replay-slm_qwen3-8b-calib-20261110T025007.659032Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b-calib-20261110T025007.659032Z-20261110T031423.931711Z",
+        "engine": "slm:qwen3-8b",
+        "per_call_site": {
+          "extract_keywords": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 0.995,
+            "agreement": 0.0,
+            "jaccard": 0.4871437349151816,
+            "ci95": {
+              "parsed_ok": [
+                0.985,
+                1.0
+              ],
+              "agreement": [
+                0.0,
+                0.0
+              ],
+              "jaccard": [
+                0.46346281573059706,
+                0.5097913773959498
+              ]
+            },
+            "latency_ms": {
+              "p50": 3494,
+              "p95": 11008
+            },
+            "tokens_per_call": {
+              "input": 707.03,
+              "output": 40.935
+            }
+          }
+        }
+      },
+      "25%": {
+        "replay": "replay-slm_qwen3-8b_lora_c2-020965a79b5b-calib-20261112T063217.960898Z",
+        "eval": null,
+        "engine": "slm:qwen3-8b+lora:c2-020965a79b5b",
+        "per_call_site": {
+          "extract_keywords": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 0.995,
+            "agreement": 0.025,
+            "jaccard": 0.6355828623418202,
+            "ci95": {
+              "parsed_ok": [
+                0.985,
+                1.0
+              ],
+              "agreement": [
+                0.005,
+                0.05
+              ],
+              "jaccard": [
+                0.6155128463888218,
+                0.6565197384604973
+              ]
+            },
+            "latency_ms": {
+              "p50": 962,
+              "p95": 2338
+            },
+            "tokens_per_call": {
+              "input": 707.03,
+              "output": 79.97
+            }
+          }
+        }
+      },
+      "50%": {
+        "replay": "replay-slm_qwen3-8b_lora_c2-45f4e80908eb-calib-20261112T063449.991196Z",
+        "eval": null,
+        "engine": "slm:qwen3-8b+lora:c2-45f4e80908eb",
+        "per_call_site": {
+          "extract_keywords": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.065,
+            "jaccard": 0.6858111498732571,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.03,
+                0.1
+              ],
+              "jaccard": [
+                0.6630540213662005,
+                0.7088499502401551
+              ]
+            },
+            "latency_ms": {
+              "p50": 993,
+              "p95": 2226
+            },
+            "tokens_per_call": {
+              "input": 707.03,
+              "output": 61.035
+            }
+          }
+        }
+      },
+      "100%": {
+        "replay": "replay-slm_qwen3-8b_lora_c2-64efb1484f8c-calib-20261112T063625.937680Z",
+        "eval": null,
+        "engine": "slm:qwen3-8b+lora:c2-64efb1484f8c",
+        "per_call_site": {
+          "extract_keywords": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.11,
+            "jaccard": 0.7292992103440648,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.065,
+                0.155
+              ],
+              "jaccard": [
+                0.7053968751811921,
+                0.7521074201891416
+              ]
+            },
+            "latency_ms": {
+              "p50": 983,
+              "p95": 2289
+            },
+            "tokens_per_call": {
+              "input": 707.03,
+              "output": 61.415
+            }
+          }
+        }
+      },
+      "B4 (100%, cross-check)": {
+        "replay": "replay-B4-calib-20261110T174825.799047Z",
+        "eval": "eval-per-call-replay-B4-calib-20261110T174825.799047Z-20261110T181832.677536Z",
+        "engine": "B4",
+        "per_call_site": {
+          "extract_keywords": {
+            "n_calls": 200,
+            "n_questions": 200,
+            "distinct_prompts": 200,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.125,
+            "jaccard": 0.7306834978940948,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.08,
+                0.17
+              ],
+              "jaccard": [
+                0.7083641524318424,
+                0.7525978824996765
+              ]
+            },
+            "latency_ms": {
+              "p50": 5259,
+              "p95": 15432
+            },
+            "tokens_per_call": {
+              "input": 707.03,
+              "output": 61.095
+            }
+          }
+        }
+      },
+      "teacher (self-replay, pilot)": {
+        "replay": "replay-production_llm-calib-20261110T021304.240338Z",
+        "eval": null,
+        "engine": "production_llm",
+        "per_call_site": {
+          "extract_keywords": {
+            "n_calls": 50,
+            "n_questions": 50,
+            "distinct_prompts": 50,
+            "routed_to_cluster": 50,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.44,
+            "jaccard": 0.8987265058072801,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.3,
+                0.58
+              ],
+              "jaccard": [
+                0.8623115174299382,
+                0.9322583625954367
+              ]
+            },
+            "latency_ms": {
+              "p50": 1741,
+              "p95": 5114
+            },
+            "tokens_per_call": {
+              "input": 1082.42,
+              "output": 98.32
+            }
+          }
+        }
+      }
+    },
+    "c3": {
+      "0% (base)": {
+        "replay": "replay-slm_qwen3-8b-calib-20261110T025007.659032Z",
+        "eval": "eval-per-call-replay-slm_qwen3-8b-calib-20261110T025007.659032Z-20261110T031423.931711Z",
+        "engine": "slm:qwen3-8b",
+        "per_call_site": {
+          "agent_ir": {
+            "n_calls": 800,
+            "n_questions": 200,
+            "distinct_prompts": 4,
+            "routed_to_cluster": 800,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1276,
+              "p95": 2435
+            },
+            "tokens_per_call": {
+              "input": 245.5,
+              "output": 4.75
+            }
+          },
+          "agent_ss": {
+            "n_calls": 800,
+            "n_questions": 200,
+            "distinct_prompts": 4,
+            "routed_to_cluster": 800,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 0.75,
+            "agreement_per_prompt": 0.75,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                0.75,
+                0.75
+              ],
+              "agreement_per_prompt": [
+                0.75,
+                0.75
+              ]
+            },
+            "latency_ms": {
+              "p50": 1095,
+              "p95": 2633
+            },
+            "tokens_per_call": {
+              "input": 231.5,
+              "output": 4.75
+            }
+          },
+          "agent_cg": {
+            "n_calls": 598,
+            "n_questions": 200,
+            "distinct_prompts": 3,
+            "routed_to_cluster": 598,
+            "teacher_unparsed": 1,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1093,
+              "p95": 7812
+            },
+            "tokens_per_call": {
+              "input": 229.62541806020067,
+              "output": 22.959866220735787
+            }
+          }
+        }
+      },
+      "B4 (100%, cross-check)": {
+        "replay": "replay-B4-calib-20261110T174825.799047Z",
+        "eval": "eval-per-call-replay-B4-calib-20261110T174825.799047Z-20261110T181832.677536Z",
+        "engine": "B4",
+        "per_call_site": {
+          "agent_ir": {
+            "n_calls": 800,
+            "n_questions": 200,
+            "distinct_prompts": 4,
+            "routed_to_cluster": 800,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 935,
+              "p95": 2099
+            },
+            "tokens_per_call": {
+              "input": 245.5,
+              "output": 4.25
+            }
+          },
+          "agent_ss": {
+            "n_calls": 800,
+            "n_questions": 200,
+            "distinct_prompts": 4,
+            "routed_to_cluster": 800,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1261,
+              "p95": 2492
+            },
+            "tokens_per_call": {
+              "input": 231.5,
+              "output": 4.75
+            }
+          },
+          "agent_cg": {
+            "n_calls": 598,
+            "n_questions": 200,
+            "distinct_prompts": 3,
+            "routed_to_cluster": 598,
+            "teacher_unparsed": 1,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1187,
+              "p95": 2625
+            },
+            "tokens_per_call": {
+              "input": 229.62541806020067,
+              "output": 4.670568561872909
+            }
+          }
+        }
+      },
+      "teacher (self-replay, pilot)": {
+        "replay": "replay-production_llm-calib-20261110T021304.240338Z",
+        "eval": null,
+        "engine": "production_llm",
+        "per_call_site": {
+          "agent_ir": {
+            "n_calls": 200,
+            "n_questions": 50,
+            "distinct_prompts": 4,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1245,
+              "p95": 1549
+            },
+            "tokens_per_call": {
+              "input": 377.0,
+              "output": 16.67
+            }
+          },
+          "agent_ss": {
+            "n_calls": 200,
+            "n_questions": 50,
+            "distinct_prompts": 4,
+            "routed_to_cluster": 200,
+            "teacher_unparsed": 0,
+            "parsed_ok": 1.0,
+            "agreement": 1.0,
+            "agreement_per_prompt": 1.0,
+            "ci95": {
+              "parsed_ok": [
+                1.0,
+                1.0
+              ],
+              "agreement": [
+                1.0,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                1.0,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1246,
+              "p95": 2076
+            },
+            "tokens_per_call": {
+              "input": 345.0,
+              "output": 47.485
+            }
+          },
+          "agent_cg": {
+            "n_calls": 150,
+            "n_questions": 50,
+            "distinct_prompts": 3,
+            "routed_to_cluster": 150,
+            "teacher_unparsed": 0,
+            "parsed_ok": 0.9933333333333333,
+            "agreement": 0.9933333333333333,
+            "agreement_per_prompt": 0.9933333333333333,
+            "ci95": {
+              "parsed_ok": [
+                0.98,
+                1.0
+              ],
+              "agreement": [
+                0.98,
+                1.0
+              ],
+              "agreement_per_prompt": [
+                0.98,
+                1.0
+              ]
+            },
+            "latency_ms": {
+              "p50": 1343,
+              "p95": 2428
+            },
+            "tokens_per_call": {
+              "input": 337.3333333333333,
+              "output": 67.24666666666667
+            }
+          }
+        }
+      }
+    }
+  }
+}
