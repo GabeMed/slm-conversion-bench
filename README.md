@@ -10,7 +10,7 @@
   <a href="https://github.com/nest-ai-org/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/nest-ai-org/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
   <a href="https://arxiv.org/abs/2506.02153"><img alt="arXiv 2506.02153" src="https://img.shields.io/badge/arXiv-2506.02153-506959?style=flat-square&labelColor=262323"></a>
   <a href="prereg/STAGE0"><img alt="pre-registered: Stage 0" src="https://img.shields.io/badge/pre--registered-Stage%200-506959?style=flat-square&labelColor=262323"></a>
-  <a href="#results"><img alt="results: pending" src="https://img.shields.io/badge/results-pending-8f8d86?style=flat-square&labelColor=262323"></a>
+  <a href="#results"><img alt="results: reported" src="https://img.shields.io/badge/results-reported-506959?style=flat-square&labelColor=262323"></a>
   <a href="LICENSE"><img alt="license: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-506959?style=flat-square&labelColor=262323"></a>
 </p>
 
@@ -35,9 +35,9 @@ protocol is registered before any test result; every change after Stage 0 is a l
 
 - ✓ **Harness:** built and tested against a fake server, a small local model and CPU training.
 - ✓ **Stage 0:** the configuration and the verdict rules committed and timestamped ([`prereg/STAGE0`](prereg/STAGE0), OpenTimestamps).
-- ◐ **Day 1:** the pilot, the teacher's logs, curation, clusters, the SLM's choice, LoRA training. Paid runs on the
-  training and calibration splits are done; none has touched the test split.
-- ○ **Day 2:** the load test, the allocation, the pre-registration, the test split, the report.
+- ✓ **Day 1:** the pilot, the teacher's logs, curation, clusters, the SLM's choice, LoRA training.
+- ✓ **Day 2:** the load test, the allocation, the pre-registration, the test split (498 questions, every arm), the
+  report. What departed from the protocol is in [`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md).
 
 [`RUNBOOK.md`](RUNBOOK.md) is the order of the two days, command by command.
 
@@ -70,18 +70,57 @@ a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="Results: pending. The arms: Claude Sonnet 5.5, gpt-oss-120b, and Qwen3-8B zero-shot, fine-tuned and routed with the LLM. The protocol is registered at Stage 0.">
+  <img src=".github/assets/results-light.svg" width="100%" alt="Results on 498 test questions, execution accuracy: the agent on Claude Sonnet 5.5 81.7%; the agent on gpt-oss-120b 76.7%; one call to Claude Sonnet 5.5 83.5%; one call to gpt-oss-120b 77.3%; the agent on Qwen3-8B zero-shot 53.2%, fine-tuned 66.7%, and fine-tuned on two of four task clusters with the LLM on the rest 82.5%.">
 </picture>
 
-No test result exists yet, so there are no numbers here. When there are, `bench report` writes `reports/<sha256>/`, and
-this card is redrawn from its `report.json`:
+**A fine-tuned 8B model took 95% of the agent's calls with no loss of accuracy, at 81–89% lower cost per correct
+answer than the agent on the large model. Handing it every call lost 15 points.** Small models for the narrow tasks,
+the large model where it is still needed.
+
+On the 498 test questions (execution accuracy, EX; cost per correct answer at list prices):
+
+| Arm | The agent's calls go to | EX | Cost per correct answer |
+|---|---|---|---|
+| **B5** | Qwen3-8B + LoRA for the column filter and the agent's steps (95.5% of calls), Claude Sonnet 5.5 for the rest | **82.5%** | **$0.038 – $0.063** |
+| **B0** | Claude Sonnet 5.5 | 81.7% | $0.338 |
+| **B1** | gpt-oss-120b, few-shot | 76.7% | $0.033 |
+| **B4** | Qwen3-8B + LoRA, every call | 66.7% | $0.015 – $0.074 |
+| **B3** | Qwen3-8B, zero-shot | 53.2% | $0.009 – $0.045 |
+| **B2** | one call to Claude Sonnet 5.5, no agent | 83.5% | $0.028 |
+| **B2** | one call to gpt-oss-120b, no agent | 77.3% | $0.0006 |
+
+An SLM arm's cost runs from a fully used GPU to one used 20% of the time.
+
+What the registered verdicts say, for this workload only:
+
+- **The hybrid holds quality.** B5 is non-inferior to B0 (+0.8 points, 90% CI [−0.8, +2.4], margin 5), with the SLM
+  taking 95.5% of the calls, 93.5% of the tokens and 85.8% of the cost at the LLM's price.
+- **Converting every call does not.** B4 is 15.1 points below B0 (90% CI [−18.1, −12.0]): the paper's claim in its
+  strongest form is refuted here. SQL generation was trained on 826 examples, far below the paper's rule of thumb of
+  ten thousand, so this does not speak for larger training sets. Fine-tuning adds 13.5 points over the same model
+  zero-shot.
+- **The agent is not the cheapest way to this accuracy.** One call to Claude Sonnet 5.5, with no agent, scores at least
+  as high as the agent (83.5%) and costs less per correct answer than B5. Against that baseline the registered cost
+  claim for the hybrid is refuted; against the agent it replaces, B5 costs 81–89% less.
+- **Latency is not a win.** The SLM, served on one rented GPU, answered slower than the hosted LLM and outside the
+  latency limit its cost assumes.
+
+One execution per arm; the exploratory analyses (per task, learning curves, the single call on the small model) say
+more about where the small model is close and where it is not.
+
+- The full report, with every test and the SPEC §5 map: [`results/report/report.md`](results/report/report.md). It was
+  produced with a small declared patch of the analysis code ([`results/report/analysis-patch.diff`](results/report/analysis-patch.diff)),
+  explained in [`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md); no verdict rule changed.
+- Per-task results, learning curves, cost and latency: [`docs/preliminary-results.md`](docs/preliminary-results.md),
+  [`docs/preliminary-cost-latency.md`](docs/preliminary-cost-latency.md).
+- The data behind every table: [`results/`](results/README.md). Raw call logs, adapters and training sets: the
+  [`data-2026-11-12`](https://github.com/nest-ai-org/slm-conversion-bench/releases/tag/data-2026-11-12) release.
+
+The card is drawn from the report's `report.json` and changes no result:
 
 ```sh
-python scripts/brand/results_card.py reports/<sha256> --out .github/assets --title "<the finding>"
+python scripts/brand/results_card.py results/report --out .github/assets --title "<the finding>"
 ```
-
-The full report (every arm, every test, the SPEC §5 map) is the `report.md` beside it. The card changes no result and
-no file of the registered analysis code.
 
 ## Run it locally (no paid calls)
 
