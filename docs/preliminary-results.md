@@ -41,7 +41,7 @@ What these numbers describe, and what limits each reading:
   reading (SPEC section 5, row V1/A1) a negative result at that volume does not refute the claim for
   volumes within the rule.
 - **Two clusters on the small model (B5)** scores level with the agent on the production LLM.
-- **A single call to the production LLM scores at least as high as the whole agent.** SPEC section 4
+- **A single call to the production LLM scores at least as high as the whole agent.** SPEC section 3
   states the consequence in advance: if the single call matches the agent, the per-call-site conversion
   loses its object. The calls B5 moves to the small model (the column filter and the agent's steps) may
   therefore have little bearing on the final answer with this LLM, and B5's result cannot by itself
