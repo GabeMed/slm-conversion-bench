@@ -74,39 +74,58 @@ a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md)
 </picture>
 
 **A fine-tuned 8B model took 95% of the agent's calls with no loss of accuracy, at 81–89% lower cost per correct
-answer than the agent on the large model. Handing it every call lost 15 points.** Small models for the narrow tasks,
-the large model where it is still needed.
+answer. Handing it every call lost 15 points.** Small models for the narrow tasks, the large model where it is still
+needed.
 
-On the 498 test questions (execution accuracy, EX; cost per correct answer at list prices):
+One agent, one task, the same 498 test questions in every row. The only thing that changes is which model answers
+the agent's calls:
 
-| Arm | The agent's calls go to | EX | Cost per correct answer |
+| Who answers the agent's calls | Accuracy | Cost per correct answer |
+|---|---|---|
+| Claude Sonnet 5.5, every call | 81.7% | $0.338 |
+| **Fine-tuned Qwen3-8B on the narrow tasks (95% of calls), Claude Sonnet 5.5 on the rest** | **82.5%** | **$0.038 – $0.063** |
+| Fine-tuned Qwen3-8B, every call | 66.7% | $0.015 – $0.074 |
+
+The small model's cost runs from a fully used GPU to one used 20% of the time.
+
+Three things a reader should know before quoting this:
+
+- **Full replacement failed at our data volume.** The step that writes the SQL was trained on 826 examples, far below
+  the paper's rule of thumb of ten thousand; this says nothing about larger training sets.
+- **For this task the agent itself is optional with a large model.** One call to Claude Sonnet 5.5, with no agent,
+  scores 83.5% at $0.028 per correct answer, less than the hybrid. The 81–89% saving is against the agent it replaces.
+- **It was not faster.** On one rented GPU the small model answered slower than the hosted LLM.
+
+<details>
+<summary>Every configuration tested, and the registered verdicts</summary>
+
+<br>
+
+The protocol calls the configurations B0 to B5; the report uses those codes.
+
+| Code | Configuration | Accuracy | Cost per correct answer |
 |---|---|---|---|
-| **B5** | Qwen3-8B + LoRA for the column filter and the agent's steps (95.5% of calls), Claude Sonnet 5.5 for the rest | **82.5%** | **$0.038 – $0.063** |
-| **B0** | Claude Sonnet 5.5 | 81.7% | $0.338 |
-| **B1** | gpt-oss-120b, few-shot | 76.7% | $0.033 |
-| **B4** | Qwen3-8B + LoRA, every call | 66.7% | $0.015 – $0.074 |
-| **B3** | Qwen3-8B, zero-shot | 53.2% | $0.009 – $0.045 |
-| **B2** | one call to Claude Sonnet 5.5, no agent | 83.5% | $0.028 |
-| **B2** | one call to gpt-oss-120b, no agent | 77.3% | $0.0006 |
+| B0 | the agent, every call on Claude Sonnet 5.5 | 81.7% | $0.338 |
+| B1 | the agent, every call on gpt-oss-120b (a cheaper open-weight LLM), few-shot | 76.7% | $0.033 |
+| B2 | no agent: one call to Claude Sonnet 5.5 per question | 83.5% | $0.028 |
+| B2 | no agent: one call to gpt-oss-120b per question | 77.3% | $0.0006 |
+| B3 | the agent, every call on Qwen3-8B without training | 53.2% | $0.009 – $0.045 |
+| B4 | the agent, every call on fine-tuned Qwen3-8B | 66.7% | $0.015 – $0.074 |
+| B5 | the agent, fine-tuned Qwen3-8B on two of four task clusters (95.5% of calls), Claude Sonnet 5.5 on the rest | 82.5% | $0.038 – $0.063 |
 
-An SLM arm's cost runs from a fully used GPU to one used 20% of the time.
+The registered verdicts, for this workload only (margin 5 points, 90% intervals):
 
-What the registered verdicts say, for this workload only:
+- B5 is non-inferior to B0: +0.8 points [−0.8, +2.4]. The small model takes 95.5% of the calls, 93.5% of the tokens
+  and 85.8% of the cost at the LLM's price.
+- B4 is worse than B0: −15.1 points [−18.1, −12.0]. The paper's claim in its strongest form is refuted here.
+  Fine-tuning adds 13.5 points over the same model without training.
+- B1 against B0 is inconclusive: −5.0 points [−8.0, −2.2].
+- The registered cost claim for the hybrid is refuted: B5 is not cheaper than the cheapest configuration that needs
+  no training and is non-inferior to B0, which is the single call to Claude Sonnet 5.5.
 
-- **The hybrid holds quality.** B5 is non-inferior to B0 (+0.8 points, 90% CI [−0.8, +2.4], margin 5), with the SLM
-  taking 95.5% of the calls, 93.5% of the tokens and 85.8% of the cost at the LLM's price.
-- **Converting every call does not.** B4 is 15.1 points below B0 (90% CI [−18.1, −12.0]): the paper's claim in its
-  strongest form is refuted here. SQL generation was trained on 826 examples, far below the paper's rule of thumb of
-  ten thousand, so this does not speak for larger training sets. Fine-tuning adds 13.5 points over the same model
-  zero-shot.
-- **The agent is not the cheapest way to this accuracy.** One call to Claude Sonnet 5.5, with no agent, scores at least
-  as high as the agent (83.5%) and costs less per correct answer than B5. Against that baseline the registered cost
-  claim for the hybrid is refuted; against the agent it replaces, B5 costs 81–89% less.
-- **Latency is not a win.** The SLM, served on one rented GPU, answered slower than the hosted LLM and outside the
-  latency limit its cost assumes.
+One execution per configuration.
 
-One execution per arm; the exploratory analyses (per task, learning curves, the single call on the small model) say
-more about where the small model is close and where it is not.
+</details>
 
 - A two-page summary: [`docs/summary.md`](docs/summary.md).
 - The full report, with every test and the SPEC §5 map: [`results/report/report.md`](results/report/report.md). It was
