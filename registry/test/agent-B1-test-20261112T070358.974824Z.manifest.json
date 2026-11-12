@@ -809,8 +809,8 @@
   "splits_sha256": "b4d01eb0061b91a7d2e13126213c1c83a4ca8c046119dfcfb59eec95823d1de5",
   "data_manifest_sha256": "74c8de481ed085d37991360201b5d1eb615764f53cf1f6dde0fd9e6db962f913",
   "started_at": "2026-11-12T07:03:58.974824+00:00",
-  "finished_at": null,
-  "status": "running",
+  "finished_at": "2026-11-12T07:41:19.194477+00:00",
+  "status": "failed",
   "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
   "call_sites_registry_sha256": "231efbf75b37f76d5908343e1898853a4ec7089a28db8c429bc85774bbd9d22b",
   "earlier_attempts": [
@@ -900,5 +900,265 @@
       "status": "failed"
     }
   ],
-  "redo_reason": null
+  "redo_reason": null,
+  "registry_intent": "registry/test/agent-B1-test-20261112T070358.974824Z.intent.json",
+  "resumed_from": {
+    "run_id": "agent-B1-test-20261112T055252.415096Z",
+    "commit": "60090c9c5849a83754ebd9fb420f2236ea59c7a1",
+    "dirty": false,
+    "config_sha256": "72c4024a5f10aceb590beafac1fe5d31d637d40c4a17db612e993905b253b0d8",
+    "status": "failed",
+    "started_at": "2026-11-12T05:52:52.415096+00:00",
+    "finished_at": "2026-11-12T06:54:42.569302+00:00",
+    "workers": 2,
+    "stopped_by": null,
+    "prereg_hash": "7dbf99048fd82faee1a04f63f82db688142ddb0bdc715425cb3eaed9a23d49b2",
+    "end_reason": "harness error on question 409: agent_ss: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}",
+    "predictions_sha256": "d027867506749306059199cd1b1538509dedfcb46087e80ea1071bc245aa9284",
+    "calls_sha256": "5dd7e8c9f5cfa03289f6ed544142388382624ad3a1831400a6c423a9bd01e5b7",
+    "discarded": {
+      "n_calls": 9,
+      "usage": {
+        "input": 10765,
+        "cached_input": 9600,
+        "output": 2507,
+        "reasoning": 2362,
+        "cache_write": 0
+      },
+      "question_ids": [
+        "409",
+        "415"
+      ]
+    },
+    "routes": null
+  },
+  "resumed_question_ids": [
+    "5",
+    "11",
+    "12",
+    "17",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "31",
+    "32",
+    "36",
+    "37",
+    "39",
+    "40",
+    "41",
+    "45",
+    "46",
+    "47",
+    "48",
+    "50",
+    "62",
+    "72",
+    "77",
+    "79",
+    "82",
+    "83",
+    "85",
+    "87",
+    "89",
+    "92",
+    "93",
+    "94",
+    "95",
+    "98",
+    "99",
+    "100",
+    "112",
+    "115",
+    "116",
+    "117",
+    "118",
+    "125",
+    "128",
+    "129",
+    "136",
+    "137",
+    "138",
+    "145",
+    "149",
+    "152",
+    "159",
+    "168",
+    "169",
+    "173",
+    "186",
+    "189",
+    "192",
+    "194",
+    "195",
+    "197",
+    "198",
+    "200",
+    "201",
+    "206",
+    "207",
+    "208",
+    "212",
+    "213",
+    "215",
+    "218",
+    "219",
+    "220",
+    "226",
+    "227",
+    "228",
+    "230",
+    "231",
+    "232",
+    "234",
+    "236",
+    "239",
+    "240",
+    "242",
+    "243",
+    "244",
+    "245",
+    "247",
+    "248",
+    "249",
+    "253",
+    "255",
+    "260",
+    "263",
+    "268",
+    "273",
+    "281",
+    "282",
+    "327",
+    "340",
+    "341",
+    "344",
+    "345",
+    "346",
+    "347",
+    "349",
+    "352",
+    "356",
+    "358",
+    "366",
+    "368",
+    "371",
+    "377",
+    "379",
+    "383",
+    "391",
+    "397",
+    "402",
+    "405",
+    "407",
+    "408",
+    "412"
+  ],
+  "sessions": [
+    {
+      "started_at": "2026-11-12T04:17:39.999205+00:00",
+      "finished_at": "2026-11-12T04:17:51.356018+00:00",
+      "commit": "3e60b380fa7a6cdc27fb539bbc073219dc7a812c",
+      "workers": 2,
+      "killed": true
+    },
+    {
+      "started_at": "2026-11-12T04:42:37.569427+00:00",
+      "finished_at": "2026-11-12T04:45:33.431511+00:00",
+      "commit": "baa282ae62c5af6832523e246ebde1eb821eecf2",
+      "workers": 2
+    },
+    {
+      "started_at": "2026-11-12T04:47:58.673079+00:00",
+      "finished_at": "2026-11-12T04:50:12.409217+00:00",
+      "commit": "6710afefb2b01495ff25796c4c203290a7747585",
+      "workers": 2
+    },
+    {
+      "started_at": "2026-11-12T04:52:43.073712+00:00",
+      "finished_at": "2026-11-12T04:54:57.091216+00:00",
+      "commit": "ac7ed87248964db2f728124af085bcfcca51558d",
+      "workers": 2
+    },
+    {
+      "started_at": "2026-11-12T05:52:52.415096+00:00",
+      "finished_at": "2026-11-12T06:54:42.569302+00:00",
+      "commit": "60090c9c5849a83754ebd9fb420f2236ea59c7a1",
+      "workers": 2
+    },
+    {
+      "started_at": "2026-11-12T07:03:58.974824+00:00",
+      "finished_at": "2026-11-12T07:41:19.194477+00:00",
+      "commit": "daa08de7e760caee537196f511f41fb10d326c42",
+      "workers": 2
+    }
+  ],
+  "stopped_by": null,
+  "problems": [],
+  "n_calls": 13112,
+  "call_sites_seen": [
+    "agent_cg",
+    "agent_ir",
+    "agent_ss",
+    "extract_keywords",
+    "filter_column",
+    "generate_candidate",
+    "revise",
+    "select_columns",
+    "select_tables"
+  ],
+  "errors_by_call_site": {
+    "agent_ss": {
+      "IndexError": 10,
+      "RateLimitError": 7,
+      "ValueError": 1
+    },
+    "filter_column": {
+      "RateLimitError": 781
+    },
+    "agent_ir": {
+      "IndexError": 19,
+      "RateLimitError": 2
+    },
+    "select_tables": {
+      "RateLimitError": 3,
+      "ValueError": 1
+    },
+    "select_columns": {
+      "RateLimitError": 6
+    },
+    "agent_cg": {
+      "RateLimitError": 3
+    },
+    "generate_candidate": {
+      "RateLimitError": 2
+    },
+    "extract_keywords": {
+      "RateLimitError": 2
+    }
+  },
+  "c1_errors": 0,
+  "failures": {},
+  "tool_errors": {
+    "671": {
+      "select_tables": "<class 'AttributeError'>: <'NoneType' object has no attribute 'get'>"
+    }
+  },
+  "harness_errors": {
+    "671": [
+      "select_tables: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}"
+    ],
+    "640": [
+      "agent_ss: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}"
+    ]
+  },
+  "databases_changed": [],
+  "predictions_sha256": "3726db790c6df627054f9a4c70b30f3758169c9da2fa991d95c6339c8a21f109",
+  "calls_sha256": "3e72ac3bd1076b8fd68b2367edcc04f1aa034f3b794d6e177fbfc03b9662adf3",
+  "n_predictions": 187,
+  "unregistered_call_sites": [],
+  "end_reason": "harness error on question 640 (and 1 more): agent_ss: engine cheap_alt: ValueError: {'message': 'Upstream idle timeout exceeded', 'code': 504, 'metadata': {'error_type': 'timeout'}}"
 }
