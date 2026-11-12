@@ -81,11 +81,19 @@ so every engine sees exactly the same input and no error accumulates along the a
 
 Notes that change how the rows should be read:
 
-- **c0** is the only cluster trained above ten thousand rows. Raw agreement overstates it: the
-  expected answers are imbalanced, and on calibration the rule "always answer No" agrees with the
-  production LLM 87.6% of the time, about what the base model reaches. The registered form of this row
-  (recall of the kept columns, agreement on the dropped ones, Cohen's kappa, and the trivial rule beside
-  it) has not been computed yet.
+- **c0** is the only cluster trained above ten thousand rows, and raw agreement overstates it. In the
+  form the SPEC fixes for the column filter (same 38,318 calls; the production LLM repeated on 100
+  questions):
+
+  | Column filter | Recall of the kept columns | Agreement on the dropped | Cohen's kappa | Raw agreement |
+  |---|---|---|---|---|
+  | Trivial rule (always "No") | 0.000 | 1.000 | 0.000 | 90.8% |
+  | Base Qwen3-8B | 0.826 | 0.902 | 0.536 | 88.7% |
+  | Qwen3-8B + LoRA | 0.838 | 0.992 | 0.860 | 97.7% |
+  | Production LLM, repeated | 0.967 | 0.997 | 0.966 | 99.4% |
+
+  Training taught the adapter to drop the columns the production LLM drops; its recall of the columns
+  the production LLM keeps barely moved and stays well below the production LLM's own repeatability.
 - **c1** was trained on 2,517 rows. The adapter improves every task (column selection by 41 points, SQL
   generation by 11), and remains 14 points below the production LLM on SQL generation, the step that
   produces the final answer.
@@ -101,8 +109,10 @@ Notes that change how the rows should be read:
 The same table on the 200 calibration questions shows the same pattern (c0 97.2%, table selection
 89.0%, column selection 73.0%, SQL generation 61.8%, keyword extraction 12.5%, agent steps 100%).
 
-This table is not yet in the form SPEC section 6.1 fixes for it: the trivial-rule and gpt-oss-120b
-columns are missing, and the column filter is shown as raw agreement.
+The full table in the form SPEC section 6.1 fixes (primary metric per call site, the trivial rule,
+intervals that resample questions, latency and tokens per call) has been computed outside the registered
+code; the gpt-oss-120b column is "not run", and two trivial rules (keyword extraction, SQL generation)
+are not defined precisely enough in the SPEC to compute.
 
 ## 3. Cost and latency (exploratory, recomputed from the logged calls)
 
