@@ -53,6 +53,15 @@ def test_names_come_from_the_configuration():
     assert unchosen["B4"][0] == "SLM" and unchosen["B4"][2] is None
 
 
+def test_slm_named_from_the_registered_judgment():
+    """config.yaml names the SLM through J6's judgment file, not by name: the card reads it (Qwen3-8B, Qwen's logo)"""
+    import yaml
+    config = yaml.safe_load((card.ROOT / "config.yaml").read_text())
+    name, mk = card.slm_of(config)
+    assert (name, mk) == ("Qwen3-8B", "qwen")
+    assert card.arm_names(config)["B4"] == ("Qwen3-8B", "fine-tuned", "qwen")
+
+
 def test_bars_are_the_report_numbers():
     bars = card.bars_of(REPORT, CONFIG)
     assert [b["arm"] for b in bars] == ["B0", "B1", "B4"]  # an arm with no EX is not drawn
