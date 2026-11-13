@@ -73,11 +73,9 @@ of the same plan ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 ## Results
 
-### Qwen3-8B fine-tuned outperformed Claude Sonnet 5.5 at 9× lower cost per call
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="Qwen3-8B fine-tuned outperformed Claude Sonnet 5.5 at 9x lower cost per call. Execution accuracy on 498 test questions: Claude Sonnet 5.5 on every call 81.7% ($0.338 per correct answer); fine-tuned Qwen3-8B on 95% of the calls with Sonnet on the rest 82.5% ($0.038 to $0.063); fine-tuned Qwen3-8B on every call 66.7% ($0.015 to $0.074).">
+  <img src=".github/assets/results-light.svg" width="100%" alt="An 8B model outperformed Claude Sonnet 5.5 at 9x lower cost per call. Execution accuracy on 498 test questions, every configuration tested: the agent on Claude Sonnet 5.5, every call, 81.7% ($0.338 per correct answer); the agent on gpt-oss-120b, few-shot, 76.7% ($0.033); one call to Claude Sonnet 5.5, no agent, 83.5% ($0.0275); one call to gpt-oss-120b, no agent, 77.3% ($0.000614); the agent on Qwen3-8B zero-shot 53.2% ($0.009 to $0.045); fine-tuned, every call, 66.7% ($0.015 to $0.075); fine-tuned on 95% of the calls with Claude Sonnet 5.5 on the rest 82.5% ($0.038 to $0.063).">
 </picture>
 
 <picture>
@@ -100,9 +98,9 @@ the agent's calls:
 
 | Who answers the agent's calls | Accuracy | Cost per correct answer |
 |---|---|---|
-| <img src="scripts/brand/logos/anthropic-dark.svg#gh-light-mode-only" height="14" alt="Anthropic"><img src="scripts/brand/logos/anthropic-light.svg#gh-dark-mode-only" height="14" alt="Anthropic"> Claude Sonnet 5.5, every call | 81.7% | $0.338 |
-| <img src="scripts/brand/logos/qwen.svg" height="14" alt="Qwen"> **Fine-tuned Qwen3-8B on the narrow tasks (95% of calls), Claude Sonnet 5.5 on the rest** | **82.5%** | **$0.038 – $0.063** |
-| <img src="scripts/brand/logos/qwen.svg" height="14" alt="Qwen"> Fine-tuned Qwen3-8B, every call | 66.7% | $0.015 – $0.074 |
+| <img src="scripts/brand/logos/anthropic-dark.svg#gh-light-mode-only" height="11" alt="Anthropic"><img src="scripts/brand/logos/anthropic-light.svg#gh-dark-mode-only" height="11" alt="Anthropic"> Claude Sonnet 5.5, every call | 81.7% | $0.338 |
+| <img src="scripts/brand/logos/qwen-mark.svg" height="13" alt="Qwen"> **Fine-tuned Qwen3-8B on the narrow tasks (95% of calls), Claude Sonnet 5.5 on the rest** | **82.5%** | **$0.038 – $0.063** |
+| <img src="scripts/brand/logos/qwen-mark.svg" height="13" alt="Qwen"> Fine-tuned Qwen3-8B, every call | 66.7% | $0.015 – $0.074 |
 
 The small model's cost runs from a fully used GPU to one used 20% of the time.
 
@@ -185,7 +183,7 @@ The images are drawn from the report's `report.json` (the answer time from `resu
 and change no result:
 
 ```sh
-python scripts/brand/results_card.py results/report --out .github/assets --arms B0 B5 B4 --plain --title "Qwen3-8B fine-tuned outperformed Claude Sonnet 5.5 at 9× lower cost per call"
+python scripts/brand/results_card.py results/report --out .github/assets --plain --title "An 8B model outperformed Claude Sonnet 5.5 at 9× lower cost per call"
 python scripts/brand/headline_card.py --out .github/assets   # the cost and the time charts
 ```
 
