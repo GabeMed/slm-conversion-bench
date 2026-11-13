@@ -124,7 +124,7 @@ def test_footer_is_svg_with_moving_blimps(theme):
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_headline_card_reads_the_report(theme):
-    """the cards and the two charts read report.json and T2: B5 against B0, accuracy, cost per call, answer time"""
+    """the two charts read report.json and T2: B5 against B0, cost per call and answer time"""
     report = json.loads(headline.REPORT.read_text())
     v = headline.numbers(report)
     b0, b5 = report["arms"]["B0"], report["arms"]["B5"]
@@ -133,8 +133,6 @@ def test_headline_card_reads_the_report(theme):
     assert v["diff"] == pytest.approx(b5["ex"] - b0["ex"], abs=1e-9)
     assert v["ref_s"] and v["hyb_s"]
     words = lambda svg: "".join(t.text or "" for t in _svg(svg).iter() if t.tag.endswith("text"))
-    cards = words(headline.draw_cards(v, theme))
-    for w in ("same accuracy", "cheaper per call", "faster per answer", "Qwen3-8B fine-tuned", "Claude Sonnet 5.5"):
-        assert w in cards
-    assert "Cost per call" in words(headline.draw_chart(v, theme, "cost"))
+    cost = words(headline.draw_chart(v, theme, "cost"))
+    assert "Cost per call" in cost and "Qwen3-8B fine-tuned" in cost and "Claude Sonnet 5.5" in cost
     assert "Time to answer" in words(headline.draw_chart(v, theme, "time"))

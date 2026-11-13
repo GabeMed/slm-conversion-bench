@@ -1,9 +1,6 @@
-"""The README's result images beyond the bars card (light and dark), the hybrid against the agent on the large LLM:
-
-- cards-{theme}.svg: three cards, each a pixel picture (`pixel/`, see its README) over the fine-tuned Qwen3-8B's figure
-  against Claude Sonnet 5.5 and a few words: the accuracy, × cheaper per call, seconds faster per answer;
-- cost-{theme}.svg and time-{theme}.svg: the cost per call and the time to answer as two bars, Qwen3-8B fine-tuned
-  against Claude Sonnet 5.5, with the makers' logos.
+"""The README's two charts under the bars card (light and dark), the hybrid against the agent on the large LLM: the
+cost per call (cost-{theme}.svg) and the time to answer (time-{theme}.svg) as two bars, Qwen3-8B fine-tuned against
+Claude Sonnet 5.5, with the makers' logos.
 
     python scripts/brand/headline_card.py --out .github/assets
 
@@ -32,14 +29,7 @@ W, X, R = 1200, 72, 1128
 CW = R - X
 REF, HYB = "B0", "B5"
 URL = "nest.technology/benchmarks"
-PIXEL = Path(__file__).resolve().parent / "pixel"
 
-
-def _png_size(path: Path):
-    import struct
-    with open(path, "rb") as f:
-        head = f.read(24)
-    return struct.unpack(">II", head[16:24])
 
 
 def q_wall_p50(path: Path, arm: str) -> Optional[float]:
@@ -113,66 +103,6 @@ def _card(P: Dict[str, Any], theme: str, gid: str, x: float, y: float, w: float,
             + nest.rrect(x + 0.47, y + 0.47, w - 0.93, h - 0.93, 23.5, f'fill="none" stroke="{ring}" stroke-width=".93"'))
 
 
-def _title(P: Dict[str, Any], theme: str, y: float, size: float = 40) -> List[str]:
-    """Qwen3-8B fine-tuned vs Claude Sonnet 5.5, with the makers' logos in the line"""
-    out, x, ls = [], X, size
-    out.append(_logo(theme, "qwen", x, y - ls + 6, ls)); x += ls + 12
-    t1 = "Qwen3-8B fine-tuned"
-    out.append(nest.text(x, y, t1, size, P["ink"], 450, tracking=-1.2)); x += nest.width(t1, size, weight=450, tracking=-1.2) + 18
-    out.append(nest.text(x, y, "vs", size, P["dim"], 400, tracking=-1.2)); x += nest.width("vs", size, tracking=-1.2) + 18
-    out.append(_logo(theme, "anthropic", x, y - ls + 6, ls)); x += ls + 12
-    out.append(nest.text(x, y, "Claude Sonnet 5.5", size, P["ink"], 450, tracking=-1.2))
-    return out
-
-
-def _figures(v: Dict[str, Any]) -> List[Dict[str, Any]]:
-    pct = lambda f: f"{f * 100:.1f}%"
-    same = "same accuracy" if v["noninferior"] else "lower accuracy"
-    out = [{"id": "accuracy", "big": pct(v["hyb_ex"]), "label": same, "sub": f"Claude Sonnet 5.5: {pct(v['ref_ex'])}"},
-           {"id": "cost", "big": f"{v['x_full']:.0f}×", "label": "cheaper per call",
-            "sub": f"{_usd(v['hyb_call_full'])} against {_usd(v['ref_call'])}"}]
-    if v["ref_s"] and v["hyb_s"]:
-        d = v["ref_s"] - v["hyb_s"]
-        out.append({"id": "time", "big": f"{d:.0f} s" if d >= 0.5 else "=", "label": "faster per answer",
-                    "sub": f"{v['hyb_s']:.1f} s against {v['ref_s']:.1f} s"})
-    return out
-
-
-def draw_cards(v: Dict[str, Any], theme: str) -> str:
-    """three cards: the pixel picture on top, the figure and a few words under it"""
-    P = nest.PAL[theme]
-    gid = f"cd-{theme}"
-    body: List[str] = [_defs(P, theme, gid), nest.lockup(X, 62, 28, P["ink"]),
-                       nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2)]
-    body += _title(P, theme, 132)
-    figs = _figures(v)
-    top, gap = 176, 24
-    tw = (CW - gap * (len(figs) - 1)) / len(figs)
-    pic_h = tw / 2                                   # the pictures are 2:1
-    ph = pic_h + 170
-    for i, f in enumerate(figs):
-        x = X + i * (tw + gap)
-        cid = f"{gid}-c{i}"
-        body.append(f'<clipPath id="{cid}">{nest.rrect(x, top, tw, ph, 24, "")}</clipPath>')
-        body.append(_card(P, theme, gid, x, top, tw, ph))
-        pic = PIXEL / f"{f['id']}.png"
-        if pic.exists():
-            body.append(f'<image x="{x:.1f}" y="{top:.1f}" width="{tw:.1f}" height="{pic_h:.1f}" clip-path="url(#{cid})" '
-                        f'preserveAspectRatio="xMidYMid slice" style="image-rendering:pixelated" '
-                        f'href="{nest._data_uri(pic, "image/png")}"/>')
-        size = 72
-        while size > 48 and nest.width(f["big"], size, weight=450, tracking=-size * 0.05) > tw - 64:
-            size -= 4
-        y = top + pic_h + 32 + size * 0.74
-        body.append(nest.text(x + 30, y, f["big"], size, P["ink"], 420, tracking=round(-size * 0.05, 1),
-                              extra=' style="font-variant-numeric:tabular-nums"'))
-        body.append(nest.text(x + 30, y + 38, f["label"], 22, P["ink"], 450, tracking=-0.5))
-        body.append(nest.text(x + 30, y + 66, f["sub"], 16, P["dim"], 400, tracking=-0.2))
-    h = top + ph + 34
-    label = ("Qwen3-8B fine-tuned vs Claude Sonnet 5.5: " + "; ".join(f"{f['big']} {f['label']} ({f['sub']})" for f in figs) + ".")
-    return nest.svg(W, h, body, label)
-
-
 def draw_chart(v: Dict[str, Any], theme: str, which: str) -> Optional[str]:
     """one comparison as two bars: cost per call or time to answer (median per question)"""
     if which == "cost":
@@ -188,11 +118,10 @@ def draw_chart(v: Dict[str, Any], theme: str, which: str) -> Optional[str]:
     from results_card import _chip
     P = nest.PAL[theme]
     gid = f"ch-{which}-{theme}"
-    body: List[str] = [_defs(P, theme, gid), nest.lockup(X, 62, 28, P["ink"]),
-                       nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2)]
-    body.append(nest.text(X, 130, metric, 40, P["ink"], 450, tracking=-1.3))
-    body.append(nest.text(X, 162, note, 18, P["dim"], 400, tracking=-0.2))
-    top, ph = 192, 360
+    body: List[str] = [_defs(P, theme, gid)]
+    body.append(nest.text(X, 56, metric, 36, P["ink"], 450, tracking=-1.2))
+    body.append(nest.text(X, 86, note, 18, P["dim"], 400, tracking=-0.2))
+    top, ph = 112, 360
     body.append(_card(P, theme, gid, X, top, CW, ph))
     base, hmax, bw, cs = top + 250, 190, 132, 46
     body.append(f'<rect x="{X + 36}" y="{base:.1f}" width="{CW - 72}" height="1.5" fill="{P["line"]}"/>')
@@ -216,8 +145,7 @@ def write(out: Path, v: Dict[str, Any]) -> List[Path]:
     out.mkdir(parents=True, exist_ok=True)
     paths = []
     for theme in nest.THEMES:
-        for name, svg in (("cards", draw_cards(v, theme)), ("cost", draw_chart(v, theme, "cost")),
-                          ("time", draw_chart(v, theme, "time"))):
+        for name, svg in (("cost", draw_chart(v, theme, "cost")), ("time", draw_chart(v, theme, "time"))):
             if svg:
                 p = out / f"{name}-{theme}.svg"
                 p.write_text(svg)
@@ -229,7 +157,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--report", default=str(REPORT), help="report.json (default: results/report/report.json)")
     ap.add_argument("--tables", default=str(TABLES), help="the cost and latency tables (default: results/tables/…)")
-    ap.add_argument("--out", default=".", help="where to write cards-, cost- and time-{light,dark}.svg")
+    ap.add_argument("--out", default=".", help="where to write cost- and time-{light,dark}.svg")
     args = ap.parse_args(argv)
     v = numbers(json.loads(Path(args.report).read_text()), Path(args.tables))
     for p in write(Path(args.out), v):
