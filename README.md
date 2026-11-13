@@ -7,7 +7,7 @@
 <br>
 
 <p align="center">
-  <a href="https://github.com/nest-ai-org/slm-conversion-bench/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/nest-ai-org/slm-conversion-bench/ci.yml?branch=main&style=flat-square&label=tests&labelColor=262323"></a>
+  <a href="#status"><img alt="study: completed, 12 Nov 2026" src="https://img.shields.io/badge/study-completed%2C%2012%20Nov%202026-506959?style=flat-square&labelColor=262323"></a>
   <a href="https://arxiv.org/abs/2506.02153"><img alt="arXiv 2506.02153" src="https://img.shields.io/badge/arXiv-2506.02153-506959?style=flat-square&labelColor=262323"></a>
   <a href="prereg/STAGE0"><img alt="pre-registered: Stage 0" src="https://img.shields.io/badge/pre--registered-Stage%200-506959?style=flat-square&labelColor=262323"></a>
   <a href="#results"><img alt="results: reported" src="https://img.shields.io/badge/results-reported-506959?style=flat-square&labelColor=262323"></a>
@@ -32,6 +32,9 @@ protocol is registered before any test result; every change after Stage 0 is a l
 [`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md).
 
 ## Status
+
+**Completed on 12 November 2026.** Every configuration ran on the 498 test questions and the registered report is
+published ([Results](#results)).
 
 - ✓ **Harness:** built and tested against a fake server, a small local model and CPU training.
 - ✓ **Stage 0:** the configuration and the verdict rules committed and timestamped ([`prereg/STAGE0`](prereg/STAGE0), OpenTimestamps).
@@ -69,8 +72,8 @@ a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md)
 ## Results
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="Results on 498 test questions, execution accuracy: the agent on Claude Sonnet 5.5 81.7%; the agent on gpt-oss-120b 76.7%; one call to Claude Sonnet 5.5 83.5%; one call to gpt-oss-120b 77.3%; the agent on Qwen3-8B zero-shot 53.2%, fine-tuned 66.7%, and fine-tuned on two of four task clusters with the LLM on the rest 82.5%.">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/headline-dark.svg">
+  <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B on 95.5% of the agent's calls against Claude Sonnet 5.5 on every call: 9 times cheaper per call ($0.003 to $0.00033; 5.4 times with the GPU 20% busy), +0.8 points of accuracy (82.5% against 81.7%, the same within the 5-point margin), 6% less time to answer (52.5 s against 55.6 s, median per question).">
 </picture>
 
 **A fine-tuned 8B model took 95% of the agent's calls with no loss of accuracy, at 81–89% lower cost per correct
@@ -88,6 +91,14 @@ the agent's calls:
 
 The small model's cost runs from a fully used GPU to one used 20% of the time.
 
+The small model is **Qwen3-8B**, a dense 8-billion-parameter model released in April 2025 (the Qwen3 generation,
+since followed by Qwen3.5): the result needs no newer architecture.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
+  <img src=".github/assets/results-light.svg" width="100%" alt="Results on 498 test questions, execution accuracy: the agent on Claude Sonnet 5.5 81.7%; the agent on gpt-oss-120b 76.7%; one call to Claude Sonnet 5.5 83.5%; one call to gpt-oss-120b 77.3%; the agent on Qwen3-8B zero-shot 53.2%, fine-tuned 66.7%, and fine-tuned on two of four task clusters with the LLM on the rest 82.5%.">
+</picture>
+
 Three things a reader should know before quoting this:
 
 - **Full replacement failed at our data volume.** The step that writes the SQL was trained on 826 examples, far below
@@ -96,6 +107,27 @@ Three things a reader should know before quoting this:
   scores 83.5% at $0.028 per correct answer, less than the hybrid. The 81–89% saving is against the agent it replaces.
 - **Latency depends on sizing.** Within its GPU's capacity the fine-tuned small model answers its tasks as fast as
   the large LLM or faster; in the test one GPU was overloaded and it was slower. Time per question was the same.
+
+### What it cost to build, and where it ran
+
+Converting the agent cost **US$ 281.48**. At the hybrid's saving (US$ 0.23–0.25 per question against the agent on
+Claude Sonnet 5.5) it pays for itself after about 1,200 questions.
+
+| Step | What | Data | Time | Cost |
+|---|---|---|---|---|
+| Collect the training data | the agent on Claude Sonnet 5.5 over the training questions | 82,403 calls | 3.5 h | $225.80 |
+| Train adapter c0: column filter | LoRA r16, 2 epochs | 11,982 examples, 99.1 M tokens | 79 min | $43.62 |
+| Train adapter c1: table and column selection, SQL | LoRA r16, 2 epochs | 2,517 examples, 21.7 M tokens | 22 min | $9.55 |
+| Train adapter c2: keyword extraction | LoRA r16, 2 epochs | 833 examples, 1.3 M tokens | 7 min | $0.56 |
+| Train adapter c3: agent steps | LoRA r16, 2 epochs | 9,164 examples, 4.4 M tokens | 61 min | $1.95 |
+| **Total** | | | | **$281.48** |
+
+- Training ran on [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API, at US$ 0.44 per
+  million training tokens; the cost is what it billed for the four adapters the test used. Not included: engineering
+  time, load tests, adapters trained for other purposes (learning curves, repeats).
+- **Inference:** one [RunPod](https://www.runpod.io/) Secure Cloud pod with one **NVIDIA A100 80GB PCIe** (16 vCPU,
+  117 GB RAM), US$ 1.79 per hour billed per second. vLLM 0.30 with prefix caching serves Qwen3-8B in bf16 (16.4 GB of
+  weights) and the four LoRA adapters together on that one GPU. The whole study used 27.5 pod-hours, US$ 49.19.
 
 <details>
 <summary>Every configuration tested, and the registered verdicts</summary>
@@ -139,9 +171,11 @@ One execution per configuration.
 - The data behind every table: [`results/`](results/README.md). Raw call logs, adapters and training sets: the
   [`data-2026-11-12`](https://github.com/nest-ai-org/slm-conversion-bench/releases/tag/data-2026-11-12) release.
 
-The card is drawn from the report's `report.json` and changes no result:
+The cards are drawn from the report's `report.json` (the headline's answer time from
+`results/tables/cost_latency_tables.md`) and change no result:
 
 ```sh
+python scripts/brand/headline_card.py --out .github/assets
 python scripts/brand/results_card.py results/report --out .github/assets --title "<the finding>"
 ```
 
