@@ -63,17 +63,19 @@ Seven arms answer the same questions; each is the whole agent with its calls sen
 | **B5** | per cluster, the cheapest engine not worse than B0 | the paper's S6 |
 
 The SLM is **Qwen3-8B** ([`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B), revision `b968826`), chosen by
-S4's desk triage (J6) from the two candidates, Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). The LoRA adapters (r 16) are
-trained with TRL and PEFT on Modal's GPUs (the registered configuration; the reference GPU is an A100 80GB) or on
-[Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines' fine-tuning API (`bench train --on tinker`, Qwen3-8B
-only), and served with vLLM on Modal or on RunPod (`bench serve --on runpod up`, behind an SSH tunnel). Both backends write the same adapter and a manifest that pairs runs of the same plan, so
-a Tinker adapter can be compared against a Modal one ([`RUNBOOK.md`](RUNBOOK.md), step 9).
+S4's desk triage (J6) from the two candidates, Qwen3-8B and Granite-4.2-8B (Nemotron-3-Nano-4B in reserve). In this run
+the four LoRA adapters (r 16) were trained on [Tinker](https://thinkingmachines.ai/tinker/), Thinking Machines'
+fine-tuning API (`bench train --on tinker`), and served with vLLM on [RunPod](https://www.runpod.io/)
+(`bench serve --on runpod up`: one NVIDIA A100 80GB PCIe pod behind an SSH tunnel). The registered configuration named
+Modal for both; the switch is recorded in [`prereg/DEVIATIONS.md`](prereg/DEVIATIONS.md). The harness keeps Modal as a
+second backend (TRL and PEFT on Modal's GPUs, vLLM on Modal); both write the same adapter and a manifest that pairs runs
+of the same plan ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 ## Results
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/headline-dark.svg">
-  <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B on 95.5% of the agent's calls against Claude Sonnet 5.5 on every call: 9 times cheaper per call ($0.003 to $0.00033; 5.4 times with the GPU 20% busy), +0.8 points of accuracy (82.5% against 81.7%, the same within the 5-point margin), 6% less time to answer (52.5 s against 55.6 s, median per question).">
+  <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, inside the same agent on the same 498 questions (Qwen3-8B answers 95.5% of the calls, Sonnet the rest). Three bar charts. Accuracy: 82.5% against 81.7%, +0.8 points, the same within the 5-point margin. Cost per call: $0.00033 against $0.003, 9 times cheaper (5.4 times with the GPU 20% busy). Time to answer: 52.5 s against 55.6 s, 3 s faster, median per question.">
 </picture>
 
 **A fine-tuned 8B model took 95% of the agent's calls with no loss of accuracy, at 81–89% lower cost per correct
@@ -215,8 +217,8 @@ committed and pushed.
 | `bench/contracts/` | the contracts between the parts: C1 `calls.jsonl` (one line per LLM call), C2 configuration, C3 agreement between outputs, C4 the router |
 | `bench/` | the harness: `data`, `run` and `replay` (agent executions), `curate` and `embed` (training examples and their clusters), `train`, `loadtest`, `eval` (execution accuracy), `prereg`, `verify`, `report`, the test barrier |
 | `bench/judge/` | the judgments (J1–J8 and the choice of B1's few-shot k): pure functions over what the executions wrote |
-| `modal_apps/` | training and vLLM serving on Modal |
-| `runpod_apps/` | inference on RunPod: the vLLM server behind an SSH tunnel (`bench serve --on runpod up`), the load test's client and P-4's reference; `configs/runpod.patch.yaml` switches the configuration to it |
+| `modal_apps/` | training and vLLM serving on Modal (the registered backend; this run used Tinker and RunPod instead) |
+| `runpod_apps/` | inference on [RunPod](https://www.runpod.io/), used in this run: the vLLM server behind an SSH tunnel (`bench serve --on runpod up`), the load test's client and P-4's reference; `configs/runpod.patch.yaml` switches the configuration to it |
 | `vendor/chess/` | CHESS @ `3d6e835`, patched; every change is in [`vendor/chess/PATCHES.md`](vendor/chess/PATCHES.md) |
 | `data/MANIFEST.json`, `data/splits.json` | hashes of every input and the train / calibration / test splits |
 | `env/` | the three environments: `agent` (Python 3.11, CHESS's pinned LangChain 0.2), `analysis` (the judgments), `train` (training and serving) |

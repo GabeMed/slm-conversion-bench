@@ -124,7 +124,7 @@ def test_footer_is_svg_with_moving_blimps(theme):
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_headline_card_reads_the_report(theme):
-    """the headline's three numbers come from report.json and T2: B5 against B0, per call, accuracy, answer time"""
+    """the headline's three charts read report.json and T2: B5 against B0, accuracy, cost per call, answer time"""
     report = json.loads(headline.REPORT.read_text())
     v = headline.numbers(report)
     b0, b5 = report["arms"]["B0"], report["arms"]["B5"]
@@ -134,5 +134,5 @@ def test_headline_card_reads_the_report(theme):
     assert v["ref_s"] and v["hyb_s"]
     root = _svg(headline.draw(v, theme))
     words = "".join(t.text or "" for t in root.iter() if t.tag.endswith("text"))
-    for w in ("cheaper per call", "accuracy", "time to answer", "Qwen3-8B", "A100 80GB"):
+    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "Qwen3-8B", "Sonnet 5.5", "A100 80GB"):
         assert w in words
