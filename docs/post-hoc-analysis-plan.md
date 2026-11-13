@@ -16,7 +16,10 @@ Already run, before this page existed (reported as exploratory, with that fact s
 - the single call on the small model on calibration (P2), both variants;
 - the learning-curve replays of c1 and c2 on calibration (P4).
 
-Not yet run: P1 and P3. P5 is not funded and may not run.
+Not yet run when this page was written: P1 and P3. P5 is not funded and may not run. P1 was run on 2026-11-12
+after this page was merged; its result is in [`results.md`](results.md), section 9. Two departures from the
+text below: the hybrid arm was resumed once after a worker crashed and the "No" arm twice after connection
+errors of the embeddings service, and the patch reads the constant from an environment variable.
 
 ## P1. Does the column filter matter to the answer? (a control for B5)
 
