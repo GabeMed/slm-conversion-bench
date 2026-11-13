@@ -123,10 +123,22 @@ def draw(v: Dict[str, Any], theme: str) -> str:
     P = nest.PAL[theme]
     body: List[str] = []
     gid = f"hc-{theme}"
+    dark = theme == "dark"
+    ring = "rgba(0,0,0,.5)" if dark else "rgba(0,0,0,.08)"           # the site's card: a .93 px ring and two soft shadows
+    so = (".28", ".2") if dark else (".03", ".02")
+    tile_ring = "rgba(0,0,0,.45)" if dark else "rgba(38,35,35,.09)"
     body.append(f'<defs><linearGradient id="{gid}-s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["g"][0]}"/>'
                 f'<stop offset="1" stop-color="{P["g"][1]}"/></linearGradient>'
                 f'<linearGradient id="{gid}-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["k"][0]}"/>'
-                f'<stop offset="1" stop-color="{P["k"][1]}"/></linearGradient></defs>')
+                f'<stop offset="1" stop-color="{P["k"][1]}"/></linearGradient>'
+                f'<filter id="{gid}-sh" x="-4%" y="-4%" width="108%" height="114%">'
+                f'<feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000" flood-opacity="{so[0]}"/>'
+                f'<feDropShadow dx="0" dy="9" stdDeviation="4" flood-color="#000" flood-opacity="{so[1]}"/></filter></defs>')
+
+    def card(x: float, y: float, w: float, h: float) -> str:
+        return (nest.rrect(x, y, w, h, 24, f'fill="{P["card"]}" filter="url(#{gid}-sh)"')
+                + nest.rrect(x + 0.47, y + 0.47, w - 0.93, h - 0.93, 23.5, f'fill="none" stroke="{ring}" stroke-width=".93"'))
+
     body.append(nest.lockup(X, 62, 28, P["ink"]))
     body.append(nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2))
     # the title, with the makers' logos in the line
@@ -139,28 +151,29 @@ def draw(v: Dict[str, Any], theme: str) -> str:
     body.append(_logo(theme, "anthropic", x, ty - ls + 6, ls)); x += ls + 12
     body.append(nest.text(x, ty, "Claude Sonnet 5.5", ts, P["ink"], 450, tracking=-1.2))
 
-    acc = (v["hyb_ex"] - v["ref_ex"]) / v["ref_ex"]
     pct = lambda f: f"{f * 100:.1f}%"
+    # accuracy as the study reads it (non-inferior: the same accuracy), cost as a ratio, time as the seconds saved
+    same = "Same accuracy" if v["noninferior"] else "Lower accuracy"
     charts = [
-        {"metric": "Accuracy", "pill": f"{acc * 100:+.1f}% accuracy", "q": v["hyb_ex"], "s": v["ref_ex"],
+        {"metric": "Accuracy", "pill": same, "q": v["hyb_ex"], "s": v["ref_ex"],
          "qt": pct(v["hyb_ex"]), "st": pct(v["ref_ex"]), "max": 1.0,
-         "card": (f"{acc * 100:+.1f}%", "more accurate", "accuracy")},
+         "card": (pct(v["hyb_ex"]), same.lower(), "accuracy")},
         {"metric": "Cost per call", "pill": f"{v['x_full']:.0f}× cheaper", "q": v["hyb_call_full"], "s": v["ref_call"],
          "qt": _usd(v["hyb_call_full"]), "st": _usd(v["ref_call"]), "max": v["ref_call"],
          "card": (f"{v['x_full']:.0f}×", "cheaper per call", "cost")},
     ]
     if v["ref_s"] and v["hyb_s"]:
-        lat = (v["ref_s"] - v["hyb_s"]) / v["ref_s"]
-        charts.append({"metric": "Time to answer", "pill": f"{lat * 100:.1f}% faster", "q": v["hyb_s"], "s": v["ref_s"],
-                       "qt": f"{v['hyb_s']:.1f} s", "st": f"{v['ref_s']:.1f} s", "max": max(v["hyb_s"], v["ref_s"]),
-                       "card": (f"{lat * 100:.1f}%", "faster answers", "time")})
+        d = v["ref_s"] - v["hyb_s"]
+        charts.append({"metric": "Time to answer", "pill": f"{d:.0f} s faster" if d >= 0.5 else "same time",
+                       "q": v["hyb_s"], "s": v["ref_s"], "qt": f"{v['hyb_s']:.1f} s", "st": f"{v['ref_s']:.1f} s",
+                       "max": max(v["hyb_s"], v["ref_s"]),
+                       "card": (f"{d:.0f} s" if d >= 0.5 else "=", "faster per answer", "time")})
     top, ph = 176, 430
     # the scenes: one big chart each
     for i, c in enumerate(charts, 1):
         g = [f'<g class="sc s{i}">']
-        g.append(nest.rrect(X, top, CW, ph, 24, f'fill="{P["card"]}"'))
-        g.append(nest.rrect(X + 0.5, top + 0.5, CW - 1, ph - 1, 23.5, f'fill="none" stroke="{P["line"]}" stroke-width="1"'))
-        g.append(nest.text(X + 36, top + 50, c["metric"].upper(), 16, P["dim"], 500, mono=True, tracking=1.5))
+        g.append(card(X, top, CW, ph))
+        g.append(nest.text(X + 36, top + 50, c["metric"].upper(), 15, P["faint"], 500, mono=True, tracking=1.4))
         pw = nest.width(c["pill"], 24, weight=500, tracking=-0.4) + 34
         g.append(f'<g class="v{i}">' + nest.rrect(R - 36 - pw, top + 24, pw, 42, 21, f'fill="{P["greenBg"]}"')
                  + nest.text(R - 36 - pw + 17, top + 53, c["pill"], 24, P["green"], 500, tracking=-0.4) + "</g>")
@@ -181,32 +194,35 @@ def draw(v: Dict[str, Any], theme: str) -> str:
                                tracking=-0.3))
         g.append("</g>")
         body.append("".join(g))
-    # the end: three cards, how much better the fine-tuned Qwen3-8B did than Claude Sonnet 5.5
+    # the end: three cards, how the fine-tuned Qwen3-8B did against Claude Sonnet 5.5 (the DS's stat tile: a relief card,
+    # the icon in ink in a recessed tile, the figure at 420, the two values under it with the makers' logos)
     gap = 24
     tw = (CW - gap * (len(charts) - 1)) / len(charts)
     for i, c in enumerate(charts, 1):
         big, label, icon = c["card"]
         x = X + (i - 1) * (tw + gap)
-        g = [f'<g class="fc f{i}">']
-        g.append(nest.rrect(x, top, tw, ph, 24, f'fill="{P["card"]}"'))
-        g.append(nest.rrect(x + 0.5, top + 0.5, tw - 1, ph - 1, 23.5, f'fill="none" stroke="{P["line"]}" stroke-width="1"'))
-        g.append(f'<circle cx="{x + 36 + 32:.1f}" cy="{top + 36 + 32:.1f}" r="32" fill="{P["greenBg"]}"/>')
-        g.append(f'<g transform="translate({x + 36 + 14:.1f} {top + 36 + 14:.1f}) scale(1.5)" fill="none" stroke="{P["green"]}" '
-                 f'color="{P["green"]}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{ICONS[icon]}</g>')
-        size = 104
-        while size > 64 and nest.width(big, size, weight=500, tracking=-size * 0.05) > tw - 72:
+        g = [f'<g class="fc f{i}">', card(x, top, tw, ph)]
+        g.append(nest.rrect(x + 32, top + 32, 52, 52, 14, f'fill="{P["tile"]}"'))
+        g.append(nest.rrect(x + 32.5, top + 32.5, 51, 51, 13.5, f'fill="none" stroke="{tile_ring}" stroke-width="1"'))
+        g.append(f'<g transform="translate({x + 32 + 12:.1f} {top + 32 + 12:.1f}) scale(1.17)" fill="none" stroke="{P["ink"]}" '
+                 f'color="{P["ink"]}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{ICONS[icon]}</g>')
+        size = 108
+        while size > 64 and nest.width(big, size, weight=450, tracking=-size * 0.05) > tw - 64:
             size -= 4
-        g.append(nest.text(x + 36, top + 214 + size * 0.2, big, size, P["ink"], 500, tracking=round(-size * 0.05, 1)))
-        g.append(nest.text(x + 36, top + 292, label, 28, P["ink"], 450, tracking=-0.7))
-        g.append(nest.text(x + 36, top + 336, "than", 18, P["dim"], 400))
-        lx = x + 36 + nest.width("than", 18) + 10
-        g.append(_logo(theme, "anthropic", lx, top + 320, 20))
-        g.append(nest.text(lx + 28, top + 336, "Claude Sonnet 5.5", 18, P["dim"], 400))
-        g.append(nest.text(x + 36, top + 388, f"{c['qt']} vs {c['st']}", 18, P["faint"], 500, mono=True, tracking=-0.4))
+        g.append(nest.text(x + 32, top + 200 + size * 0.16, big, size, P["ink"], 420, tracking=round(-size * 0.05, 1),
+                           extra=' style="font-variant-numeric:tabular-nums"'))
+        g.append(nest.text(x + 32, top + 272, label, 26, P["ink"], 450, tracking=-0.8))
+        g.append(f'<rect x="{x + 32:.1f}" y="{top + 300:.1f}" width="{tw - 64:.1f}" height="1" fill="{P["line"]}"/>')
+        for k, (maker, name, val, ink) in enumerate((("qwen", "Qwen3-8B", c["qt"], P["ink"]),
+                                                     ("anthropic", "Sonnet 5.5", c["st"], P["dim"]))):
+            yy = top + 340 + k * 40
+            g.append(_logo(theme, maker, x + 32, yy - 17, 20))
+            g.append(nest.text(x + 32 + 30, yy, name, 17, ink, 450 if k == 0 else 400, tracking=-0.2))
+            g.append(nest.text(x + tw - 32, yy, val, 17, ink, 500, mono=True, anchor="end"))
         g.append("</g>")
         body.append("".join(g))
     label = ("Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, shown one by one, then as three cards: "
-             + "; ".join(f"{c['card'][0]} {c['card'][1]} ({c['metric'].lower()} {c['qt']} against {c['st']})" for c in charts)
+             + "; ".join(f"{c['card'][0]} {c['card'][1]} ({c['metric'].lower()}: Qwen3-8B fine-tuned {c['qt']}, Claude Sonnet 5.5 {c['st']})" for c in charts)
              + ".")
     return nest.svg(W, H, body, label, css=CSS)
 

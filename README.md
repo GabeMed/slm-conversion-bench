@@ -75,7 +75,7 @@ of the same plan ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/headline-dark.svg">
-  <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, animated: accuracy 82.5% against 81.7%, then cost per call $0.00033 against $0.003, then time to answer 52.5 s against 55.6 s, each as two bars; then three cards: +1.0% more accurate, 9x cheaper per call, 5.6% faster answers than Claude Sonnet 5.5.">
+  <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, animated: accuracy 82.5% against 81.7% (the same accuracy), then cost per call $0.00033 against $0.003 (9x cheaper), then time to answer 52.5 s against 55.6 s per answer (3 s faster), each as two bars; then three cards: 82.5% same accuracy, 9x cheaper per call, 3 s faster per answer.">
 </picture>
 
 **A fine-tuned 8B model took 95% of the agent's calls with no loss of accuracy, at 81–89% lower cost per correct

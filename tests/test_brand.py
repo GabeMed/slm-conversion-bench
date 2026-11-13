@@ -136,6 +136,6 @@ def test_headline_card_reads_the_report(theme):
     assert "@keyframes" in out                         # animated: the three charts, then the three cards
     root = _svg(out)
     words = "".join(t.text or "" for t in root.iter() if t.tag.endswith("text"))
-    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "more accurate", "cheaper per call", "faster answers",
+    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "same accuracy", "cheaper per call", "faster per answer",
               "Qwen3-8B fine-tuned", "Claude Sonnet 5.5"):
         assert w in words
