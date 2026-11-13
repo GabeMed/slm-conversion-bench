@@ -187,8 +187,8 @@ the test and its gold is uncorrected: levels are not comparable with section 1.
 ## 4.1 What is still missing
 
 - **The registered report.** The registered `bench report` cannot be produced as it stands (section 5).
-- **A control for B5**: the same arm with a constant in place of the column-filter adapter, to show whether
-  the column filter bears on the final answer (planned on calibration, not run).
+- **A control for B5** was run on calibration after this page was written: with a constant in place of the
+  column-filter adapter the agent scores the same ([`results.md`](results.md), section 9).
 - **The gpt-oss-120b replay** on the test, for the missing column of the per-task table.
 - The declaration of the test's execution conditions in `prereg/DEVIATIONS.md`.
 
