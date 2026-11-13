@@ -134,5 +134,5 @@ def test_headline_card_reads_the_report(theme):
     assert v["ref_s"] and v["hyb_s"]
     root = _svg(headline.draw(v, theme))
     words = "".join(t.text or "" for t in root.iter() if t.tag.endswith("text"))
-    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "Qwen3-8B", "Sonnet 5.5", "A100 80GB"):
+    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "Qwen3-8B", "Sonnet 5.5"):
         assert w in words

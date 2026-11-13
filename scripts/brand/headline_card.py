@@ -88,13 +88,8 @@ def draw(v: Dict[str, Any], theme: str) -> str:
                 f'<linearGradient id="{gid}-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["k"][0]}"/>'
                 f'<stop offset="1" stop-color="{P["k"][1]}"/></linearGradient></defs>')
     body.append(nest.lockup(X, 62, 28, P["ink"]))
-    body.append(nest.text(R, 60, f"CHESS ON BIRD · {v['n']} TEST QUESTIONS", 15, P["dim"], 500, mono=True, anchor="end",
-                          tracking=1.4))
-    body.append(nest.text(X, 124, "Fine-tuned Qwen3-8B vs Claude Sonnet 5.5", 38, P["ink"], 450, tracking=-1.3))
-    share = f"{v['slm_calls'] * 100:.1f}%" if v["slm_calls"] else "most"
-    body.append(nest.text(X, 156, nest.fit(f"Inside the same agent, on the same {v['n']} questions. Qwen3-8B answers {share} "
-                                           "of the calls; Sonnet keeps the rest.", CW, 18, tracking=-0.2), 18, P["dim"], 400,
-                          tracking=-0.2))
+    body.append(nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2))
+    body.append(nest.text(X, 138, "Fine-tuned Qwen3-8B vs Claude Sonnet 5.5", 44, P["ink"], 450, tracking=-1.5))
     pct = lambda f: f"{f * 100:.1f}%"
     charts = [
         {"metric": "Accuracy", "better": "higher is better", "pill": f"{v['diff'] * 100:+.1f} pt",
@@ -111,23 +106,20 @@ def draw(v: Dict[str, Any], theme: str) -> str:
                        "pill": (f"{d:.0f} s faster" if d >= 0.5 else f"{-d:.0f} s slower" if d <= -0.5 else "the same"),
                        "note": "median per question, as the test ran", "q": v["hyb_s"], "s": v["ref_s"],
                        "qt": f"{v['hyb_s']:.1f} s", "st": f"{v['ref_s']:.1f} s", "max": max(v["hyb_s"], v["ref_s"])})
-    top, ph, gap = 180, 400, 24
+    top, ph, gap = 186, 412, 24
     tw = (CW - gap * (len(charts) - 1)) / len(charts)
-    base, hmax, bw, cs = top + 290, 144, 76, 40
+    base, hmax, bw, cs = top + 300, 170, 84, 44
     for i, c in enumerate(charts):
         x = X + i * (tw + gap)
         body.append(nest.rrect(x, top, tw, ph, 22, f'fill="{P["card"]}"'))
         body.append(nest.rrect(x + 0.5, top + 0.5, tw - 1, ph - 1, 21.5, f'fill="none" stroke="{P["line"]}" stroke-width="1"'))
         body.append(nest.text(x + 24, top + 34, c["metric"].upper(), 14, P["dim"], 500, mono=True, tracking=1.3))
-        body.append(nest.text(x + tw - 24, top + 34, c["better"], 13, P["faint"], 400, anchor="end"))
-        pw = nest.width(c["pill"], 20, weight=500, tracking=-0.4) + 28
-        body.append(nest.rrect(x + 24, top + 50, pw, 34, 17, f'fill="{P["greenBg"]}"'))
-        body.append(nest.text(x + 38, top + 74, c["pill"], 20, P["green"], 500, tracking=-0.4))
-        body.append(nest.text(x + 24, top + 108, nest.fit(c["note"], tw - 48, 14), 14, P["dim"], 400))
+        pw = nest.width(c["pill"], 22, weight=500, tracking=-0.4) + 30
+        body.append(nest.rrect(x + 24, top + 50, pw, 38, 19, f'fill="{P["greenBg"]}"'))
+        body.append(nest.text(x + 39, top + 76, c["pill"], 22, P["green"], 500, tracking=-0.4))
         body.append(f'<rect x="{x + 24:.1f}" y="{base:.1f}" width="{tw - 48:.1f}" height="1.5" fill="{P["line"]}"/>')
-        for k, (val, txt, green, maker, name, sub) in enumerate(((c["q"], c["qt"], True, "qwen", "Qwen3-8B", "fine-tuned"),
-                                                                 (c["s"], c["st"], False, "anthropic", "Sonnet 5.5",
-                                                                  "every call"))):
+        for k, (val, txt, green, maker, name, sub) in enumerate(((c["q"], c["qt"], True, "qwen", "Qwen3-8B FT", ""),
+                                                                 (c["s"], c["st"], False, "anthropic", "Sonnet 5.5", ""))):
             cx = x + tw * (0.3 if k == 0 else 0.7)
             h = max(4.0, hmax * val / c["max"])
             body.append(nest.rrect(cx - bw / 2, base - h, bw, h, min(8, h / 2), f'fill="url(#{gid}-{"s" if green else "b"})"'))
@@ -136,14 +128,10 @@ def draw(v: Dict[str, Any], theme: str) -> str:
             body.append(nest.text(cx, base - h - 10, txt, 22, P["ink"] if green else P["muted"], 500, mono=True,
                                   anchor="middle", tracking=-0.6))
             body.append(_chip(P, theme, maker, name[0], cx - cs / 2, base + 14, cs))
-            body.append(nest.text(cx, base + 14 + cs + 22, name, 16, P["ink"] if green else P["muted"], 500,
+            body.append(nest.text(cx, base + 14 + cs + 26, name, 17, P["ink"] if green else P["muted"], 500,
                                   anchor="middle", tracking=-0.3))
-            body.append(nest.text(cx, base + 14 + cs + 40, sub, 13, P["dim"], 400, anchor="middle"))
-    foot = "Qwen3-8B (April 2025) · LoRA r16 · served on one A100 80GB PCIe, RunPod, $1.79/h"
-    body.append(nest.text(X, 612, nest.fit(foot, CW - 330, 17, tracking=-0.2), 17, P["dim"], 400, tracking=-0.2))
-    body.append(nest.text(R, 612, URL, 18, P["ink"], 500, mono=True, anchor="end", tracking=-0.2))
-    label = ("Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, inside the same agent: "
-             + "; ".join(f"{c['metric'].lower()} {c['qt']} against {c['st']} ({c['pill']}, {c['note']})" for c in charts) + ".")
+    label = ("Fine-tuned Qwen3-8B vs Claude Sonnet 5.5: "
+             + "; ".join(f"{c['metric'].lower()} {c['qt']} against {c['st']} ({c['pill']})" for c in charts) + ".")
     return nest.svg(W, H, body, label)
 
 
