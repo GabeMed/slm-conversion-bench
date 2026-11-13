@@ -73,12 +73,21 @@ of the same plan ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 ## Results
 
+### An 8B model outperformed Claude Sonnet 5.5 at 9× lower cost per call
+
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/headline-dark.svg">
-  <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, animated: accuracy 82.5% against 81.7% (the same accuracy), then cost per call $0.00033 against $0.003 (9x cheaper), then time to answer 52.5 s against 55.6 s per answer (3 s faster), each as two bars; then three cards: 82.5% same accuracy, 9x cheaper per call, 3 s faster per answer.">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
+  <img src=".github/assets/results-light.svg" width="100%" alt="An 8B model outperformed Claude Sonnet 5.5 at 9x lower cost per call. Execution accuracy on 498 test questions: Claude Sonnet 5.5 on every call 81.7% ($0.338 per correct answer); fine-tuned Qwen3-8B on 95% of the calls with Sonnet on the rest 82.5% ($0.038 to $0.063); fine-tuned Qwen3-8B on every call 66.7% ($0.015 to $0.074).">
 </picture>
 
-### An 8B model matches Claude Sonnet 5.5, 9× cheaper
+Fine-tuned Qwen3-8B, answering 95.5% of the agent's calls, scored 82.5% against Claude Sonnet 5.5's 81.7% on the same
+498 questions, a 0.8-point lead inside the 5-point margin the protocol set (so the registered verdict is the same
+accuracy), at 9× lower cost per call.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/cards-dark.svg">
+  <img src=".github/assets/cards-light.svg" width="100%" alt="Qwen3-8B fine-tuned vs Claude Sonnet 5.5, three cards with pixel pictures of Nest's robot: 82.5% same accuracy (Claude Sonnet 5.5: 81.7%); 9x cheaper per call ($0.00033 against $0.003); 3 s faster per answer (52.5 s against 55.6 s).">
+</picture>
 
 One agent, one task, the same 498 test questions in every row. The only thing that changes is which model answers
 the agent's calls:
@@ -94,11 +103,6 @@ The small model's cost runs from a fully used GPU to one used 20% of the time.
 The small model is **Qwen3-8B**, a dense 8-billion-parameter model released in April 2025 (the Qwen3 generation,
 since followed by Qwen3.5): the result needs no newer architecture.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="An 8B model matches Claude Sonnet 5.5, 9x cheaper. Execution accuracy on 498 test questions: Claude Sonnet 5.5 on every call 81.7% ($0.338 per correct answer); fine-tuned Qwen3-8B on 95% of the calls with Sonnet on the rest 82.5% ($0.038 to $0.063); fine-tuned Qwen3-8B on every call 66.7% ($0.015 to $0.074).">
-</picture>
-
 Three things a reader should know before quoting this:
 
 - **Full replacement failed at our data volume.** The step that writes the SQL was trained on 826 examples, far below
@@ -107,6 +111,29 @@ Three things a reader should know before quoting this:
   scores 83.5% at $0.028 per correct answer, less than the hybrid. The 81–89% saving is against the agent it replaces.
 - **Latency depends on sizing.** Within its GPU's capacity the fine-tuned small model answers its tasks as fast as
   the large LLM or faster; in the test one GPU was overloaded and it was slower. Time per question was the same.
+
+### Cost per call
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/cost-dark.svg">
+  <img src=".github/assets/cost-light.svg" width="100%" alt="Cost per call: Qwen3-8B fine-tuned $0.00033 against Claude Sonnet 5.5 $0.003, with the GPU in full use ($0.00056 with it 20% busy).">
+</picture>
+
+With the fine-tuned Qwen3-8B answering 95.5% of the agent's calls on one A100, a call costs $0.00033 on average with
+the GPU in full use ($0.00056 with it 20% busy), against $0.003 when Claude Sonnet 5.5 answers every call at list price:
+9× cheaper (5.4× at 20% use). Per correct answer, $0.038–0.063 against $0.338.
+
+### Time to answer
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/time-dark.svg">
+  <img src=".github/assets/time-light.svg" width="100%" alt="Time to answer, median per question as the test ran: Qwen3-8B fine-tuned 52.5 s against Claude Sonnet 5.5 55.6 s.">
+</picture>
+
+Median per question, as the test ran: 52.5 s against 55.6 s, 3 s faster. Within its GPU's capacity the fine-tuned
+small model answers its tasks as fast as the large LLM or faster (the agent's steps about ten times faster); at peaks
+the one GPU was overloaded, which made the 95th percentile slower (97 s against 83 s). More GPUs bring the latency
+down and the cost up ([`docs/results.md`](docs/results.md), section 6).
 
 ### What it cost to build, and where it ran
 
@@ -171,12 +198,12 @@ One execution per configuration.
 - The data behind every table: [`results/`](results/README.md). Raw call logs, adapters and training sets: the
   [`data-2026-11-12`](https://github.com/nest-ai-org/slm-conversion-bench/releases/tag/data-2026-11-12) release.
 
-The cards are drawn from the report's `report.json` (the headline's answer time from
-`results/tables/cost_latency_tables.md`) and change no result:
+The images are drawn from the report's `report.json` (the answer time from `results/tables/cost_latency_tables.md`)
+and change no result:
 
 ```sh
-python scripts/brand/headline_card.py --out .github/assets
-python scripts/brand/results_card.py results/report --out .github/assets --arms B0 B5 B4 --plain --title "An 8B model matches Claude Sonnet 5.5, 9× cheaper"
+python scripts/brand/results_card.py results/report --out .github/assets --arms B0 B5 B4 --plain --title "An 8B model outperformed Claude Sonnet 5.5 at 9× lower cost per call"
+python scripts/brand/headline_card.py --out .github/assets   # the three cards, the cost and the time charts
 ```
 
 ## Run it locally (no paid calls)

@@ -1,10 +1,11 @@
-"""The headline of the results as an animated image (1200 × 630, light and dark): the hybrid against the agent on the
-large LLM, shown one comparison at a time as two bars (accuracy, cost per call, time to answer), then as three cards
-with the fine-tuned Qwen3-8B's three figures against Claude Sonnet 5.5 (the same accuracy, × cheaper per call, seconds
-faster per answer), each over a pixel picture (`pixel/`, see its README). CSS animation only, so it plays in an <img>
-(GitHub included); with reduced motion, the three cards alone.
+"""The README's result images beyond the bars card (light and dark), the hybrid against the agent on the large LLM:
 
-    python scripts/brand/headline_card.py --out .github/assets      # writes headline-light.svg, headline-dark.svg
+- cards-{theme}.svg: three cards, each a pixel picture (`pixel/`, see its README) over the fine-tuned Qwen3-8B's figure
+  against Claude Sonnet 5.5 and a few words: the accuracy, × cheaper per call, seconds faster per answer;
+- cost-{theme}.svg and time-{theme}.svg: the cost per call and the time to answer as two bars, Qwen3-8B fine-tuned
+  against Claude Sonnet 5.5, with the makers' logos.
+
+    python scripts/brand/headline_card.py --out .github/assets
 
 Every number is read, not typed: cost and accuracy from `results/report/report.json` (the registered report: each
 arm's cost per correct answer at the GPU's full and lowest utilization, its accuracy, its number of calls, and the
@@ -27,7 +28,7 @@ import nest  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 REPORT = ROOT / "results" / "report" / "report.json"
 TABLES = ROOT / "results" / "tables" / "cost_latency_tables.md"
-W, H, X, R = 1200, 630, 72, 1128
+W, X, R = 1200, 72, 1128
 CW = R - X
 REF, HYB = "B0", "B5"
 URL = "nest.technology/benchmarks"
@@ -87,36 +88,6 @@ def _usd(x: float) -> str:
     return f"${x:.5f}".rstrip("0") if x < 0.001 else f"${x:.4f}".rstrip("0")
 
 
-CYCLE = 16  # seconds: accuracy, cost per call, time to answer (3.2 s each), then the three cards (6.4 s)
-
-CSS = """
-.sc,.fc{opacity:0}
-.s1{animation:s1 %(c)ds infinite}.s2{animation:s2 %(c)ds infinite}.s3{animation:s3 %(c)ds infinite}
-@keyframes s1{0%%{opacity:0}2%%{opacity:1}18%%{opacity:1}20%%{opacity:0}100%%{opacity:0}}
-@keyframes s2{0%%,20%%{opacity:0}22%%{opacity:1}38%%{opacity:1}40%%{opacity:0}100%%{opacity:0}}
-@keyframes s3{0%%,40%%{opacity:0}42%%{opacity:1}58%%{opacity:1}60%%{opacity:0}100%%{opacity:0}}
-.bar{transform-box:fill-box;transform-origin:50%% 100%%}
-.g1{animation:g1 %(c)ds infinite}.g2{animation:g2 %(c)ds infinite}.g3{animation:g3 %(c)ds infinite}
-@keyframes g1{0%%,3%%{transform:scaleY(0)}9%%,100%%{transform:scaleY(1)}}
-@keyframes g2{0%%,23%%{transform:scaleY(0)}29%%,100%%{transform:scaleY(1)}}
-@keyframes g3{0%%,43%%{transform:scaleY(0)}49%%,100%%{transform:scaleY(1)}}
-.v1{animation:v1 %(c)ds infinite}.v2{animation:v2 %(c)ds infinite}.v3{animation:v3 %(c)ds infinite}
-@keyframes v1{0%%,8%%{opacity:0}11%%,100%%{opacity:1}}
-@keyframes v2{0%%,28%%{opacity:0}31%%,100%%{opacity:1}}
-@keyframes v3{0%%,48%%{opacity:0}51%%,100%%{opacity:1}}
-.f1{animation:f1 %(c)ds infinite}.f2{animation:f2 %(c)ds infinite}.f3{animation:f3 %(c)ds infinite}
-@keyframes f1{0%%,60%%{opacity:0;transform:translateY(14px)}63%%,97%%{opacity:1;transform:none}100%%{opacity:0}}
-@keyframes f2{0%%,64%%{opacity:0;transform:translateY(14px)}67%%,97%%{opacity:1;transform:none}100%%{opacity:0}}
-@keyframes f3{0%%,68%%{opacity:0;transform:translateY(14px)}71%%,97%%{opacity:1;transform:none}100%%{opacity:0}}
-@media (prefers-reduced-motion:reduce){.sc{animation:none;opacity:0}.fc{animation:none;opacity:1;transform:none}}
-""" % {"c": CYCLE}
-
-ICONS = {  # 24 x 24, stroked, as the site's line icons
-    "accuracy": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/>',
-    "cost": '<circle cx="12" cy="12" r="9"/><path d="M15 8.6c-.6-.9-1.7-1.4-3-1.4-1.8 0-3 .9-3 2.3 0 3.1 6 1.6 6 4.8 0 1.4-1.3 2.4-3.1 2.4-1.4 0-2.6-.6-3.2-1.6M12 5.6v1.6M12 16.7v1.7"/>',
-    "time": '<path d="M13 2.5 4 13.5h7l-1 8 9-11h-7l1-8z"/>',
-}
-
 
 def _logo(theme: str, maker: str, x: float, y: float, s: float) -> str:
     uri = nest.logo(maker, theme)
@@ -124,124 +95,133 @@ def _logo(theme: str, maker: str, x: float, y: float, s: float) -> str:
             if uri else "")
 
 
-def draw(v: Dict[str, Any], theme: str) -> str:
-    """an animated SVG: the three comparisons one by one as bar charts (accuracy, cost per call, time to answer),
-    fine-tuned Qwen3-8B against Claude Sonnet 5.5, then three cards with how much better the small model did. CSS
-    animations only (they play in an <img>, GitHub included); with reduced motion, only the three cards"""
-    from results_card import _chip
-    P = nest.PAL[theme]
-    body: List[str] = []
-    gid = f"hc-{theme}"
-    dark = theme == "dark"
-    ring = "rgba(0,0,0,.5)" if dark else "rgba(0,0,0,.08)"           # the site's card: a .93 px ring and two soft shadows
-    so = (".28", ".2") if dark else (".03", ".02")
-    tile_ring = "rgba(0,0,0,.45)" if dark else "rgba(38,35,35,.09)"
-    kfill = P["k"]
-    body.append(f'<defs><linearGradient id="{gid}-s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["g"][0]}"/>'
-                f'<stop offset="1" stop-color="{P["g"][1]}"/></linearGradient>'
-                f'<linearGradient id="{gid}-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{kfill[0]}"/>'
-                f'<stop offset="1" stop-color="{kfill[1]}"/></linearGradient>'
-                f'<filter id="{gid}-sh" x="-4%" y="-4%" width="108%" height="114%">'
-                f'<feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000" flood-opacity="{so[0]}"/>'
-                f'<feDropShadow dx="0" dy="9" stdDeviation="4" flood-color="#000" flood-opacity="{so[1]}"/></filter></defs>')
+def _defs(P: Dict[str, Any], theme: str, gid: str) -> str:
+    so = (".28", ".2") if theme == "dark" else (".03", ".02")
+    return (f'<defs><linearGradient id="{gid}-s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["g"][0]}"/>'
+            f'<stop offset="1" stop-color="{P["g"][1]}"/></linearGradient>'
+            f'<linearGradient id="{gid}-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["k"][0]}"/>'
+            f'<stop offset="1" stop-color="{P["k"][1]}"/></linearGradient>'
+            f'<filter id="{gid}-sh" x="-4%" y="-4%" width="108%" height="114%">'
+            f'<feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000" flood-opacity="{so[0]}"/>'
+            f'<feDropShadow dx="0" dy="9" stdDeviation="4" flood-color="#000" flood-opacity="{so[1]}"/></filter></defs>')
 
-    def card(x: float, y: float, w: float, h: float) -> str:
-        return (nest.rrect(x, y, w, h, 24, f'fill="{P["card"]}" filter="url(#{gid}-sh)"')
-                + nest.rrect(x + 0.47, y + 0.47, w - 0.93, h - 0.93, 23.5, f'fill="none" stroke="{ring}" stroke-width=".93"'))
 
-    body.append(nest.lockup(X, 62, 28, P["ink"]))
-    body.append(nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2))
-    # the title, with the makers' logos in the line
-    ty, ts, ls = 132, 40, 40
-    x = X
-    body.append(_logo(theme, "qwen", x, ty - ls + 6, ls)); x += ls + 12
+def _card(P: Dict[str, Any], theme: str, gid: str, x: float, y: float, w: float, h: float) -> str:
+    """the site's card in relief: a .93 px ring and two soft shadows, no border"""
+    ring = "rgba(0,0,0,.5)" if theme == "dark" else "rgba(0,0,0,.08)"
+    return (nest.rrect(x, y, w, h, 24, f'fill="{P["card"]}" filter="url(#{gid}-sh)"')
+            + nest.rrect(x + 0.47, y + 0.47, w - 0.93, h - 0.93, 23.5, f'fill="none" stroke="{ring}" stroke-width=".93"'))
+
+
+def _title(P: Dict[str, Any], theme: str, y: float, size: float = 40) -> List[str]:
+    """Qwen3-8B fine-tuned vs Claude Sonnet 5.5, with the makers' logos in the line"""
+    out, x, ls = [], X, size
+    out.append(_logo(theme, "qwen", x, y - ls + 6, ls)); x += ls + 12
     t1 = "Qwen3-8B fine-tuned"
-    body.append(nest.text(x, ty, t1, ts, P["ink"], 450, tracking=-1.2)); x += nest.width(t1, ts, weight=450, tracking=-1.2) + 18
-    body.append(nest.text(x, ty, "vs", ts, P["dim"], 400, tracking=-1.2)); x += nest.width("vs", ts, tracking=-1.2) + 18
-    body.append(_logo(theme, "anthropic", x, ty - ls + 6, ls)); x += ls + 12
-    body.append(nest.text(x, ty, "Claude Sonnet 5.5", ts, P["ink"], 450, tracking=-1.2))
+    out.append(nest.text(x, y, t1, size, P["ink"], 450, tracking=-1.2)); x += nest.width(t1, size, weight=450, tracking=-1.2) + 18
+    out.append(nest.text(x, y, "vs", size, P["dim"], 400, tracking=-1.2)); x += nest.width("vs", size, tracking=-1.2) + 18
+    out.append(_logo(theme, "anthropic", x, y - ls + 6, ls)); x += ls + 12
+    out.append(nest.text(x, y, "Claude Sonnet 5.5", size, P["ink"], 450, tracking=-1.2))
+    return out
 
+
+def _figures(v: Dict[str, Any]) -> List[Dict[str, Any]]:
     pct = lambda f: f"{f * 100:.1f}%"
-    # accuracy as the study reads it (non-inferior: the same accuracy), cost as a ratio, time as the seconds saved
-    same = "Same accuracy" if v["noninferior"] else "Lower accuracy"
-    charts = [
-        {"metric": "Accuracy", "pill": same, "q": v["hyb_ex"], "s": v["ref_ex"],
-         "qt": pct(v["hyb_ex"]), "st": pct(v["ref_ex"]), "max": 1.0,
-         "card": (pct(v["hyb_ex"]), same.lower(), "accuracy")},
-        {"metric": "Cost per call", "pill": f"{v['x_full']:.0f}× cheaper", "q": v["hyb_call_full"], "s": v["ref_call"],
-         "qt": _usd(v["hyb_call_full"]), "st": _usd(v["ref_call"]), "max": v["ref_call"],
-         "card": (f"{v['x_full']:.0f}×", "cheaper per call", "cost")},
-    ]
+    same = "same accuracy" if v["noninferior"] else "lower accuracy"
+    out = [{"id": "accuracy", "big": pct(v["hyb_ex"]), "label": same, "sub": f"Claude Sonnet 5.5: {pct(v['ref_ex'])}"},
+           {"id": "cost", "big": f"{v['x_full']:.0f}×", "label": "cheaper per call",
+            "sub": f"{_usd(v['hyb_call_full'])} against {_usd(v['ref_call'])}"}]
     if v["ref_s"] and v["hyb_s"]:
         d = v["ref_s"] - v["hyb_s"]
-        charts.append({"metric": "Time to answer", "pill": f"{d:.0f} s faster" if d >= 0.5 else "same time",
-                       "q": v["hyb_s"], "s": v["ref_s"], "qt": f"{v['hyb_s']:.1f} s", "st": f"{v['ref_s']:.1f} s",
-                       "max": max(v["hyb_s"], v["ref_s"]),
-                       "card": (f"{d:.0f} s" if d >= 0.5 else "=", "faster per answer", "time")})
-    top, ph = 176, 430
-    # the scenes: one big chart each
-    for i, c in enumerate(charts, 1):
-        g = [f'<g class="sc s{i}">']
-        g.append(card(X, top, CW, ph))
-        g.append(nest.text(X + 36, top + 50, c["metric"].upper(), 15, P["faint"], 500, mono=True, tracking=1.4))
-        base, hmax, bw, cs = top + 326, 210, 132, 48
-        g.append(f'<rect x="{X + 36}" y="{base:.1f}" width="{CW - 72}" height="1.5" fill="{P["line"]}"/>')
-        for k, (val, txt, green, maker, name) in enumerate(((c["q"], c["qt"], True, "qwen", "Qwen3-8B fine-tuned"),
-                                                            (c["s"], c["st"], False, "anthropic", "Claude Sonnet 5.5"))):
-            cx = X + CW * (0.36 if k == 0 else 0.64)
-            h = max(5.0, hmax * val / c["max"])
-            g.append(f'<g class="bar g{i}">'
-                     + nest.rrect(cx - bw / 2, base - h, bw, h, min(10, h / 2), f'fill="url(#{gid}-{"s" if green else "b"})"')
-                     + nest.rrect(cx - bw / 2 + 0.5, base - h + 0.5, bw - 1, h - 1, min(9.5, h / 2),
-                                  f'fill="none" stroke="{P["gEdge"] if green else P["kEdge"]}" stroke-width="1"') + "</g>")
-            g.append(f'<g class="v{i}">' + nest.text(cx, base - h - 14, txt, 30, P["ink"] if green else P["muted"], 500,
-                                                       mono=True, anchor="middle", tracking=-0.8) + "</g>")
-            g.append(_chip(P, theme, maker, name[0], cx - cs / 2, base + 16, cs))
-            g.append(nest.text(cx, base + 16 + cs + 26, name, 18, P["ink"] if green else P["muted"], 500, anchor="middle",
-                               tracking=-0.3))
-        g.append("</g>")
-        body.append("".join(g))
-    # the end: three cards, each a figure, a few words and a pixel picture of it (scripts/brand/pixel/, Nest's pixel
-    # pipeline: the robot of the site in the Nest city), less to read than the charts before them
-    gap = 24
-    tw = (CW - gap * (len(charts) - 1)) / len(charts)
-    for i, c in enumerate(charts, 1):
-        big, label, icon = c["card"]
-        x = X + (i - 1) * (tw + gap)
+        out.append({"id": "time", "big": f"{d:.0f} s" if d >= 0.5 else "=", "label": "faster per answer",
+                    "sub": f"{v['hyb_s']:.1f} s against {v['ref_s']:.1f} s"})
+    return out
+
+
+def draw_cards(v: Dict[str, Any], theme: str) -> str:
+    """three cards: the pixel picture on top, the figure and a few words under it"""
+    P = nest.PAL[theme]
+    gid = f"cd-{theme}"
+    body: List[str] = [_defs(P, theme, gid), nest.lockup(X, 62, 28, P["ink"]),
+                       nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2)]
+    body += _title(P, theme, 132)
+    figs = _figures(v)
+    top, gap = 176, 24
+    tw = (CW - gap * (len(figs) - 1)) / len(figs)
+    pic_h = tw / 2                                   # the pictures are 2:1
+    ph = pic_h + 170
+    for i, f in enumerate(figs):
+        x = X + i * (tw + gap)
         cid = f"{gid}-c{i}"
-        g = [f'<g class="fc f{i}">', f'<clipPath id="{cid}">{nest.rrect(x, top, tw, ph, 24, "")}</clipPath>', card(x, top, tw, ph)]
-        pic = PIXEL / f"{icon}.png"
+        body.append(f'<clipPath id="{cid}">{nest.rrect(x, top, tw, ph, 24, "")}</clipPath>')
+        body.append(_card(P, theme, gid, x, top, tw, ph))
+        pic = PIXEL / f"{f['id']}.png"
         if pic.exists():
-            pw_, phh = _png_size(pic)
-            k = tw / pw_
-            g.append(f'<image x="{x:.1f}" y="{top + ph - phh * k:.1f}" width="{tw:.1f}" height="{phh * k:.1f}" '
-                     f'clip-path="url(#{cid})" preserveAspectRatio="none" style="image-rendering:pixelated" '
-                     f'href="{nest._data_uri(pic, "image/png")}"/>')
-            text_bottom = top + ph - phh * k
-        else:
-            text_bottom = top + ph
-        size = 96
-        while size > 60 and nest.width(big, size, weight=450, tracking=-size * 0.05) > tw - 64:
+            body.append(f'<image x="{x:.1f}" y="{top:.1f}" width="{tw:.1f}" height="{pic_h:.1f}" clip-path="url(#{cid})" '
+                        f'preserveAspectRatio="xMidYMid slice" style="image-rendering:pixelated" '
+                        f'href="{nest._data_uri(pic, "image/png")}"/>')
+        size = 72
+        while size > 48 and nest.width(f["big"], size, weight=450, tracking=-size * 0.05) > tw - 64:
             size -= 4
-        ny = top + (text_bottom - top) * 0.5 + size * 0.12
-        g.append(nest.text(x + 32, ny, big, size, P["ink"], 420, tracking=round(-size * 0.05, 1),
-                           extra=' style="font-variant-numeric:tabular-nums"'))
-        g.append(nest.text(x + 32, ny + 44, label, 24, P["muted"], 450, tracking=-0.6))
-        g.append("</g>")
-        body.append("".join(g))
-    label = ("Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, shown one by one, then as three cards: "
-             + "; ".join(f"{c['card'][0]} {c['card'][1]} ({c['metric'].lower()}: Qwen3-8B fine-tuned {c['qt']}, Claude Sonnet 5.5 {c['st']})" for c in charts)
-             + ".")
-    return nest.svg(W, H, body, label, css=CSS)
+        y = top + pic_h + 32 + size * 0.74
+        body.append(nest.text(x + 30, y, f["big"], size, P["ink"], 420, tracking=round(-size * 0.05, 1),
+                              extra=' style="font-variant-numeric:tabular-nums"'))
+        body.append(nest.text(x + 30, y + 38, f["label"], 22, P["ink"], 450, tracking=-0.5))
+        body.append(nest.text(x + 30, y + 66, f["sub"], 16, P["dim"], 400, tracking=-0.2))
+    h = top + ph + 34
+    label = ("Qwen3-8B fine-tuned vs Claude Sonnet 5.5: " + "; ".join(f"{f['big']} {f['label']} ({f['sub']})" for f in figs) + ".")
+    return nest.svg(W, h, body, label)
+
+
+def draw_chart(v: Dict[str, Any], theme: str, which: str) -> Optional[str]:
+    """one comparison as two bars: cost per call or time to answer (median per question)"""
+    if which == "cost":
+        metric, q, s_, qt, st, mx = ("Cost per call", v["hyb_call_full"], v["ref_call"], _usd(v["hyb_call_full"]),
+                                     _usd(v["ref_call"]), v["ref_call"])
+        note = f"GPU in full use; {_usd(v['hyb_call_low'])} with it {v['low']} busy"
+    else:
+        if not (v["ref_s"] and v["hyb_s"]):
+            return None
+        metric, q, s_, qt, st, mx = ("Time to answer", v["hyb_s"], v["ref_s"], f"{v['hyb_s']:.1f} s", f"{v['ref_s']:.1f} s",
+                                     max(v["hyb_s"], v["ref_s"]))
+        note = "median per question, as the test ran"
+    from results_card import _chip
+    P = nest.PAL[theme]
+    gid = f"ch-{which}-{theme}"
+    body: List[str] = [_defs(P, theme, gid), nest.lockup(X, 62, 28, P["ink"]),
+                       nest.text(R, 62, URL, 18, P["dim"], 500, mono=True, anchor="end", tracking=-0.2)]
+    body.append(nest.text(X, 130, metric, 40, P["ink"], 450, tracking=-1.3))
+    body.append(nest.text(X, 162, note, 18, P["dim"], 400, tracking=-0.2))
+    top, ph = 192, 360
+    body.append(_card(P, theme, gid, X, top, CW, ph))
+    base, hmax, bw, cs = top + 250, 190, 132, 46
+    body.append(f'<rect x="{X + 36}" y="{base:.1f}" width="{CW - 72}" height="1.5" fill="{P["line"]}"/>')
+    for k, (val, txt, green, maker, name) in enumerate(((q, qt, True, "qwen", "Qwen3-8B fine-tuned"),
+                                                        (s_, st, False, "anthropic", "Claude Sonnet 5.5"))):
+        cx = X + CW * (0.36 if k == 0 else 0.64)
+        h = max(5.0, hmax * val / mx)
+        body.append(nest.rrect(cx - bw / 2, base - h, bw, h, min(10, h / 2), f'fill="url(#{gid}-{"s" if green else "b"})"'))
+        body.append(nest.rrect(cx - bw / 2 + 0.5, base - h + 0.5, bw - 1, h - 1, min(9.5, h / 2),
+                               f'fill="none" stroke="{P["gEdge"] if green else P["kEdge"]}" stroke-width="1"'))
+        body.append(nest.text(cx, base - h - 14, txt, 30, P["ink"] if green else P["muted"], 500, mono=True,
+                              anchor="middle", tracking=-0.8))
+        body.append(_chip(P, theme, maker, name[0], cx - cs / 2, base + 16, cs))
+        body.append(nest.text(cx, base + 16 + cs + 26, name, 18, P["ink"] if green else P["muted"], 500, anchor="middle",
+                              tracking=-0.3))
+    label = f"{metric}, Qwen3-8B fine-tuned {qt} against Claude Sonnet 5.5 {st} ({note})."
+    return nest.svg(W, top + ph + 34, body, label)
 
 
 def write(out: Path, v: Dict[str, Any]) -> List[Path]:
     out.mkdir(parents=True, exist_ok=True)
     paths = []
     for theme in nest.THEMES:
-        p = out / f"headline-{theme}.svg"
-        p.write_text(draw(v, theme))
-        paths.append(p)
+        for name, svg in (("cards", draw_cards(v, theme)), ("cost", draw_chart(v, theme, "cost")),
+                          ("time", draw_chart(v, theme, "time"))):
+            if svg:
+                p = out / f"{name}-{theme}.svg"
+                p.write_text(svg)
+                paths.append(p)
     return paths
 
 
@@ -249,7 +229,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--report", default=str(REPORT), help="report.json (default: results/report/report.json)")
     ap.add_argument("--tables", default=str(TABLES), help="the cost and latency tables (default: results/tables/…)")
-    ap.add_argument("--out", default=".", help="where to write headline-{light,dark}.svg")
+    ap.add_argument("--out", default=".", help="where to write cards-, cost- and time-{light,dark}.svg")
     args = ap.parse_args(argv)
     v = numbers(json.loads(Path(args.report).read_text()), Path(args.tables))
     for p in write(Path(args.out), v):
