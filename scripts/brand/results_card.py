@@ -98,7 +98,7 @@ def arm_names(config: Dict[str, Any]) -> Dict[str, Tuple[str, str, Optional[str]
 def _usd(x: float) -> str:
     if x >= 1:
         return f"${x:,.2f}"
-    return f"${x:.3g}" if x >= 0.001 else f"${x:.2e}"
+    return f"${x:.3g}" if x >= 0.001 else "$" + f"{x:.6f}".rstrip("0")       # $0.000614, never 6.14e-04
 
 
 def cost_line(costs: Dict[str, Optional[float]]) -> Optional[str]:
@@ -222,7 +222,10 @@ def draw(bars: List[Dict[str, Any]], theme: str, title: str = "", metric: str = 
         body.append(nest.text(cx, y, nest.fit(b["name"], wide, nf, weight=500, tracking=-0.3), nf, ink, 500,
                               anchor="middle", tracking=-0.3))
         y += fs + 3
-        body.append(nest.text(cx, y, nest.fit(b["variant"], wide, fs - 2, tracking=-0.2), fs - 2, P["dim"], 400,
+        vf = fs - 2  # what answers: smaller before it is cut, as the name
+        while vf > 13 and nest.width(b["variant"], vf, tracking=-0.2) > wide:
+            vf -= 1
+        body.append(nest.text(cx, y, nest.fit(b["variant"], wide, vf, tracking=-0.2), vf, P["dim"], 400,
                               anchor="middle", tracking=-0.2))
         sub = b["cost"] if b["cost"] else (b["arm"] if b["f"] is None else None)
         if sub:

@@ -22,7 +22,7 @@ PAL: Dict[str, Dict[str, object]] = {
     "light": {"bg": "#f5f5f2", "ink": "#262323", "muted": "rgba(38,35,35,.74)", "dim": "rgba(38,35,35,.54)",
               "faint": "rgba(38,35,35,.36)", "line": "rgba(38,35,35,.14)",
               "g": ("rgb(181,233,153)", "rgb(153,233,157)"), "gEdge": "rgba(96,160,84,.6)",
-              "k": ("#e2e1da", "#d8d7cf"), "kEdge": "rgba(38,35,35,.16)",
+              "k": ("#d2d0c8", "#c5c3bb"), "kEdge": "rgba(38,35,35,.18)",   # the site's #e2e1da read as an empty bar on a card
               "green": "#506959", "chip": "#ffffff", "chipLine": "rgba(38,35,35,.13)", "card": "#fbfbf8",
               "tile": "#f3f3f0", "greenBg": "#e5efe5"},
     "dark": {"bg": "#161514", "ink": "#f2f0ea", "muted": "rgba(242,240,234,.76)", "dim": "rgba(242,240,234,.58)",

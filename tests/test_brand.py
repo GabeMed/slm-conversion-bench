@@ -20,6 +20,7 @@ def _load(name):
 
 
 card = _load("results_card")
+headline = _load("headline_card")
 diagram = _load("diagram")
 hero = _load("hero")
 footer = _load("footer")
@@ -119,3 +120,19 @@ def test_footer_is_svg_with_moving_blimps(theme):
     text = footer.draw(theme)
     root = _svg(text)
     assert "@keyframes f-banner" in text and len([e for e in root.iter() if e.tag.endswith("image")]) >= 2
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_headline_card_reads_the_report(theme):
+    """the two charts read report.json and T2: B5 against B0, cost per call and answer time"""
+    report = json.loads(headline.REPORT.read_text())
+    v = headline.numbers(report)
+    b0, b5 = report["arms"]["B0"], report["arms"]["B5"]
+    assert v["ref_call"] == pytest.approx(b0["cost_per_correct"][next(iter(b0["cost_per_correct"]))] * b0["ex"] * b0["n"] / b0["calls"])
+    assert v["x_full"] == pytest.approx(v["ref_call"] / v["hyb_call_full"]) and v["x_full"] > v["x_low"] > 1
+    assert v["diff"] == pytest.approx(b5["ex"] - b0["ex"], abs=1e-9)
+    assert v["ref_s"] and v["hyb_s"]
+    words = lambda svg: "".join(t.text or "" for t in _svg(svg).iter() if t.tag.endswith("text"))
+    cost = words(headline.draw_chart(v, theme, "cost"))
+    assert "Cost per call" in cost and "Qwen3-8B fine-tuned" in cost and "Claude Sonnet 5.5" in cost
+    assert "Time to answer" in words(headline.draw_chart(v, theme, "time"))
