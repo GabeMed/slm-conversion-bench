@@ -75,23 +75,44 @@ of the same plan ([`RUNBOOK.md`](RUNBOOK.md), step 9).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="An 8B model outperformed Claude Sonnet 5.5 at 9x lower cost per call. Execution accuracy on 498 test questions, every configuration tested: the agent on Claude Sonnet 5.5, every call, 81.7% ($0.338 per correct answer); the agent on gpt-oss-120b, few-shot, 76.7% ($0.033); one call to Claude Sonnet 5.5, no agent, 83.5% ($0.0275); one call to gpt-oss-120b, no agent, 77.3% ($0.000614); the agent on Qwen3-8B zero-shot 53.2% ($0.009 to $0.045); fine-tuned, every call, 66.7% ($0.015 to $0.075); fine-tuned on 95% of the calls with Claude Sonnet 5.5 on the rest 82.5% ($0.038 to $0.063).">
+  <img src=".github/assets/results-light.svg" width="100%" alt="NVIDIA's LLM-to-SLM conversion on a real agent: narrow calls convert, the decisive one does not. Execution accuracy on 498 test questions, every configuration tested: the agent on Claude Sonnet 5.5, every call, 81.7% ($0.338 per correct answer); the agent on gpt-oss-120b, few-shot, 76.7% ($0.033); one call to Claude Sonnet 5.5, no agent, 83.5% ($0.0275); one call to gpt-oss-120b, no agent, 77.3% ($0.000614); the agent on Qwen3-8B zero-shot 53.2% ($0.009 to $0.045); fine-tuned, every call, 66.7% ($0.015 to $0.075); fine-tuned on 95% of the calls with Claude Sonnet 5.5 on the rest 82.5% ($0.038 to $0.063).">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/cost-dark.svg">
-  <img src=".github/assets/cost-light.svg" width="100%" alt="Cost per call: Qwen3-8B fine-tuned $0.00033 against Claude Sonnet 5.5 $0.003, with the GPU in full use ($0.00056 with it 20% busy).">
+  <img src=".github/assets/cost-light.svg" width="100%" alt="Cost per call: the hybrid (Qwen3-8B fine-tuned on 95% of calls, the LLM on the rest) $0.00033 against Claude Sonnet 5.5 $0.003, with the GPU in full use ($0.00056 with it 20% busy).">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/time-dark.svg">
-  <img src=".github/assets/time-light.svg" width="100%" alt="Time to answer, median per question as the test ran: Qwen3-8B fine-tuned 52.5 s against Claude Sonnet 5.5 55.6 s.">
+  <img src=".github/assets/time-light.svg" width="100%" alt="Time to answer, median per question as the test ran: the hybrid 52.5 s against Claude Sonnet 5.5 55.6 s.">
 </picture>
 
-Fine-tuned Qwen3-8B, answering 95.5% of the agent's calls, scored 82.5% against Claude Sonnet 5.5's 81.7% on the same
-498 questions (a 0.8-point lead inside the protocol's 5-point margin: the registered verdict is the same accuracy). A
-call cost $0.00033 on average with the GPU in full use ($0.00056 with it 20% busy) against $0.003: 9× cheaper (5.4× at
-20% use). The median answer took 52.5 s against 55.6 s.
+**We ran the paper's conversion algorithm end to end on a real agent. The agent's narrow calls moved to a fine-tuned
+8B model at near-parity with the large LLM and a small fraction of its cost per call. The call that decides the answer
+did not. And the calls that moved turned out not to affect the answer.**
+
+The charts compare the agent on Claude Sonnet 5.5 with the hybrid: fine-tuned Qwen3-8B answering 95.5% of the agent's
+calls and Claude Sonnet 5.5 the rest. The hybrid scored 82.5% against 81.7% on the same 498 questions; the 0.8-point
+difference is inside the protocol's 5-point margin, so the registered verdict is the same accuracy, not a win. Averaged
+over all its calls, a call of the hybrid cost $0.00033 with the GPU in full use ($0.00056 at 20% use) against $0.003.
+The median answer took 52.5 s against 55.6 s.
+
+Claim by claim (details and sources in [`docs/results.md`](docs/results.md)):
+
+| What the paper argues | What we measured | Reading |
+|---|---|---|
+| Small models can do an agent's narrow calls as well as a large one | Fine-tuned Qwen3-8B against Claude Sonnet 5.5 on the same inputs: 100% agreement on the agent's control steps; 97.7% on the column filter (Sonnet agrees with itself 99.4%; Cohen's kappa 0.86 against 0.97) | Supported on the trivial task, close on the filter |
+| ...including the hard ones | SQL generation: 67.3% against 81.3% execution accuracy, trained on 826 examples | Not at this data volume; the paper suggests about ten thousand |
+| An agent can run with every call on small models | 66.7% against 81.7% for the agent on the large LLM (−15.1 points, 90% CI [−18.1, −12.0]) | Refuted here (registered), at this data volume |
+| Most calls can go to a small model while the rest stay on the large one | With 95.5% of the calls on the small model: 82.5% against 81.7% (non-inferior, registered). With the column filter answered by a constant instead of a model, accuracy is the same (control, calibration) | True, and uninformative: this agent does not need those calls |
+| Small models are 10 to 30 times cheaper | Per call, GPU in full use: about 45 times cheaper on the column filter, about 800 times on the control steps. Per correct answer, the hybrid costs 81–89% less than the agent on the large LLM, and more than one call to the large LLM with no agent | Supported per call; end to end it depends on the baseline (the registered cost claim is refuted against the single call) |
+| Adapting a small model is cheap and fast | Four LoRA adapters: US$ 56 and under three hours of training, after US$ 226 of large-LLM calls to collect the data; +13.5 points over the untrained model | Supported |
+| Small models answer faster | Control steps: ten times faster. Column filter: as fast as the large LLM up to 16 simultaneous calls on one GPU, slower beyond; in the test the GPU was overloaded | Supported within the GPU's capacity |
+
+This is one pre-registered case of the paper's algorithm: one agent, one domain, one small model, and less training
+data than the paper recommends. It neither validates nor refutes the paper. It shows where the conversion worked,
+where it did not, and that a per-call conversion claim needs a check that the calls matter.
 
 One agent, one task, the same 498 test questions in every row. The only thing that changes is which model answers
 the agent's calls:
@@ -107,7 +128,7 @@ The small model's cost runs from a fully used GPU to one used 20% of the time.
 The small model is **Qwen3-8B**, a dense 8-billion-parameter model released in April 2025 (the Qwen3 generation,
 since followed by Qwen3.5): the result needs no newer architecture.
 
-Three things a reader should know before quoting this:
+Four things a reader should know before quoting this:
 
 - **Full replacement failed at our data volume.** The step that writes the SQL was trained on 826 examples, far below
   the paper's rule of thumb of ten thousand; this says nothing about larger training sets.
@@ -186,7 +207,7 @@ The images are drawn from the report's `report.json` (the answer time from `resu
 and change no result:
 
 ```sh
-python scripts/brand/results_card.py results/report --out .github/assets --plain --title "An 8B model outperformed Claude Sonnet 5.5 at 9× lower cost per call"
+python scripts/brand/results_card.py results/report --out .github/assets --plain --title "NVIDIA's LLM-to-SLM conversion on a real agent: narrow calls convert, the decisive one does not"
 python scripts/brand/headline_card.py --out .github/assets   # the cost and the time charts
 ```
 
