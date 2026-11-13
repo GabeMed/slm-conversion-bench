@@ -78,9 +78,7 @@ of the same plan ([`RUNBOOK.md`](RUNBOOK.md), step 9).
   <img src=".github/assets/headline-light.svg" width="100%" alt="Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, animated: accuracy 82.5% against 81.7% (the same accuracy), then cost per call $0.00033 against $0.003 (9x cheaper), then time to answer 52.5 s against 55.6 s per answer (3 s faster), each as two bars; then three cards: 82.5% same accuracy, 9x cheaper per call, 3 s faster per answer.">
 </picture>
 
-**A fine-tuned 8B model took 95% of the agent's calls with no loss of accuracy, at 81–89% lower cost per correct
-answer. Handing it every call lost 15 points.** Small models for the narrow tasks, the large model where it is still
-needed.
+### An 8B model matches Claude Sonnet 5.5, 9× cheaper
 
 One agent, one task, the same 498 test questions in every row. The only thing that changes is which model answers
 the agent's calls:
@@ -98,7 +96,7 @@ since followed by Qwen3.5): the result needs no newer architecture.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/results-dark.svg">
-  <img src=".github/assets/results-light.svg" width="100%" alt="Results on 498 test questions, execution accuracy: the agent on Claude Sonnet 5.5 81.7%; the agent on gpt-oss-120b 76.7%; one call to Claude Sonnet 5.5 83.5%; one call to gpt-oss-120b 77.3%; the agent on Qwen3-8B zero-shot 53.2%, fine-tuned 66.7%, and fine-tuned on two of four task clusters with the LLM on the rest 82.5%.">
+  <img src=".github/assets/results-light.svg" width="100%" alt="An 8B model matches Claude Sonnet 5.5, 9x cheaper. Execution accuracy on 498 test questions: Claude Sonnet 5.5 on every call 81.7% ($0.338 per correct answer); fine-tuned Qwen3-8B on 95% of the calls with Sonnet on the rest 82.5% ($0.038 to $0.063); fine-tuned Qwen3-8B on every call 66.7% ($0.015 to $0.074).">
 </picture>
 
 Three things a reader should know before quoting this:
@@ -178,7 +176,7 @@ The cards are drawn from the report's `report.json` (the headline's answer time 
 
 ```sh
 python scripts/brand/headline_card.py --out .github/assets
-python scripts/brand/results_card.py results/report --out .github/assets --title "<the finding>"
+python scripts/brand/results_card.py results/report --out .github/assets --arms B0 B5 B4 --plain --title "An 8B model matches Claude Sonnet 5.5, 9× cheaper"
 ```
 
 ## Run it locally (no paid calls)

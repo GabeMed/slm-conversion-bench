@@ -1,7 +1,8 @@
 """The headline of the results as an animated image (1200 × 630, light and dark): the hybrid against the agent on the
 large LLM, shown one comparison at a time as two bars (accuracy, cost per call, time to answer), then as three cards
-with how much better the fine-tuned Qwen3-8B did than Claude Sonnet 5.5 (relative %, and × for cost). CSS animation
-only, so it plays in an <img> (GitHub included); with reduced motion, the three cards alone.
+with the fine-tuned Qwen3-8B's three figures against Claude Sonnet 5.5 (the same accuracy, × cheaper per call, seconds
+faster per answer), each over a pixel picture (`pixel/`, see its README). CSS animation only, so it plays in an <img>
+(GitHub included); with reduced motion, the three cards alone.
 
     python scripts/brand/headline_card.py --out .github/assets      # writes headline-light.svg, headline-dark.svg
 
@@ -30,6 +31,14 @@ W, H, X, R = 1200, 630, 72, 1128
 CW = R - X
 REF, HYB = "B0", "B5"
 URL = "nest.technology/benchmarks"
+PIXEL = Path(__file__).resolve().parent / "pixel"
+
+
+def _png_size(path: Path):
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(24)
+    return struct.unpack(">II", head[16:24])
 
 
 def q_wall_p50(path: Path, arm: str) -> Optional[float]:
@@ -127,10 +136,11 @@ def draw(v: Dict[str, Any], theme: str) -> str:
     ring = "rgba(0,0,0,.5)" if dark else "rgba(0,0,0,.08)"           # the site's card: a .93 px ring and two soft shadows
     so = (".28", ".2") if dark else (".03", ".02")
     tile_ring = "rgba(0,0,0,.45)" if dark else "rgba(38,35,35,.09)"
+    kfill = P["k"]
     body.append(f'<defs><linearGradient id="{gid}-s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["g"][0]}"/>'
                 f'<stop offset="1" stop-color="{P["g"][1]}"/></linearGradient>'
-                f'<linearGradient id="{gid}-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{P["k"][0]}"/>'
-                f'<stop offset="1" stop-color="{P["k"][1]}"/></linearGradient>'
+                f'<linearGradient id="{gid}-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{kfill[0]}"/>'
+                f'<stop offset="1" stop-color="{kfill[1]}"/></linearGradient>'
                 f'<filter id="{gid}-sh" x="-4%" y="-4%" width="108%" height="114%">'
                 f'<feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000" flood-opacity="{so[0]}"/>'
                 f'<feDropShadow dx="0" dy="9" stdDeviation="4" flood-color="#000" flood-opacity="{so[1]}"/></filter></defs>')
@@ -174,9 +184,6 @@ def draw(v: Dict[str, Any], theme: str) -> str:
         g = [f'<g class="sc s{i}">']
         g.append(card(X, top, CW, ph))
         g.append(nest.text(X + 36, top + 50, c["metric"].upper(), 15, P["faint"], 500, mono=True, tracking=1.4))
-        pw = nest.width(c["pill"], 24, weight=500, tracking=-0.4) + 34
-        g.append(f'<g class="v{i}">' + nest.rrect(R - 36 - pw, top + 24, pw, 42, 21, f'fill="{P["greenBg"]}"')
-                 + nest.text(R - 36 - pw + 17, top + 53, c["pill"], 24, P["green"], 500, tracking=-0.4) + "</g>")
         base, hmax, bw, cs = top + 326, 210, 132, 48
         g.append(f'<rect x="{X + 36}" y="{base:.1f}" width="{CW - 72}" height="1.5" fill="{P["line"]}"/>')
         for k, (val, txt, green, maker, name) in enumerate(((c["q"], c["qt"], True, "qwen", "Qwen3-8B fine-tuned"),
@@ -194,31 +201,32 @@ def draw(v: Dict[str, Any], theme: str) -> str:
                                tracking=-0.3))
         g.append("</g>")
         body.append("".join(g))
-    # the end: three cards, how the fine-tuned Qwen3-8B did against Claude Sonnet 5.5 (the DS's stat tile: a relief card,
-    # the icon in ink in a recessed tile, the figure at 420, the two values under it with the makers' logos)
+    # the end: three cards, each a figure, a few words and a pixel picture of it (scripts/brand/pixel/, Nest's pixel
+    # pipeline: the robot of the site in the Nest city), less to read than the charts before them
     gap = 24
     tw = (CW - gap * (len(charts) - 1)) / len(charts)
     for i, c in enumerate(charts, 1):
         big, label, icon = c["card"]
         x = X + (i - 1) * (tw + gap)
-        g = [f'<g class="fc f{i}">', card(x, top, tw, ph)]
-        g.append(nest.rrect(x + 32, top + 32, 52, 52, 14, f'fill="{P["tile"]}"'))
-        g.append(nest.rrect(x + 32.5, top + 32.5, 51, 51, 13.5, f'fill="none" stroke="{tile_ring}" stroke-width="1"'))
-        g.append(f'<g transform="translate({x + 32 + 12:.1f} {top + 32 + 12:.1f}) scale(1.17)" fill="none" stroke="{P["ink"]}" '
-                 f'color="{P["ink"]}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{ICONS[icon]}</g>')
-        size = 108
-        while size > 64 and nest.width(big, size, weight=450, tracking=-size * 0.05) > tw - 64:
+        cid = f"{gid}-c{i}"
+        g = [f'<g class="fc f{i}">', f'<clipPath id="{cid}">{nest.rrect(x, top, tw, ph, 24, "")}</clipPath>', card(x, top, tw, ph)]
+        pic = PIXEL / f"{icon}.png"
+        if pic.exists():
+            pw_, phh = _png_size(pic)
+            k = tw / pw_
+            g.append(f'<image x="{x:.1f}" y="{top + ph - phh * k:.1f}" width="{tw:.1f}" height="{phh * k:.1f}" '
+                     f'clip-path="url(#{cid})" preserveAspectRatio="none" style="image-rendering:pixelated" '
+                     f'href="{nest._data_uri(pic, "image/png")}"/>')
+            text_bottom = top + ph - phh * k
+        else:
+            text_bottom = top + ph
+        size = 96
+        while size > 60 and nest.width(big, size, weight=450, tracking=-size * 0.05) > tw - 64:
             size -= 4
-        g.append(nest.text(x + 32, top + 200 + size * 0.16, big, size, P["ink"], 420, tracking=round(-size * 0.05, 1),
+        ny = top + (text_bottom - top) * 0.5 + size * 0.12
+        g.append(nest.text(x + 32, ny, big, size, P["ink"], 420, tracking=round(-size * 0.05, 1),
                            extra=' style="font-variant-numeric:tabular-nums"'))
-        g.append(nest.text(x + 32, top + 272, label, 26, P["ink"], 450, tracking=-0.8))
-        g.append(f'<rect x="{x + 32:.1f}" y="{top + 300:.1f}" width="{tw - 64:.1f}" height="1" fill="{P["line"]}"/>')
-        for k, (maker, name, val, ink) in enumerate((("qwen", "Qwen3-8B", c["qt"], P["ink"]),
-                                                     ("anthropic", "Sonnet 5.5", c["st"], P["dim"]))):
-            yy = top + 340 + k * 40
-            g.append(_logo(theme, maker, x + 32, yy - 17, 20))
-            g.append(nest.text(x + 32 + 30, yy, name, 17, ink, 450 if k == 0 else 400, tracking=-0.2))
-            g.append(nest.text(x + tw - 32, yy, val, 17, ink, 500, mono=True, anchor="end"))
+        g.append(nest.text(x + 32, ny + 44, label, 24, P["muted"], 450, tracking=-0.6))
         g.append("</g>")
         body.append("".join(g))
     label = ("Fine-tuned Qwen3-8B vs Claude Sonnet 5.5, shown one by one, then as three cards: "
