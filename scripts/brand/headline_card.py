@@ -125,7 +125,7 @@ def draw_chart(v: Dict[str, Any], theme: str, which: str) -> Optional[str]:
     body.append(_card(P, theme, gid, X, top, CW, ph))
     base, hmax, bw, cs = top + 250, 190, 132, 46
     body.append(f'<rect x="{X + 36}" y="{base:.1f}" width="{CW - 72}" height="1.5" fill="{P["line"]}"/>')
-    for k, (val, txt, green, maker, name) in enumerate(((q, qt, True, "qwen", "Qwen3-8B fine-tuned"),
+    for k, (val, txt, green, maker, name) in enumerate(((q, qt, True, "qwen", "Qwen3-8B fine-tuned + LLM"),
                                                         (s_, st, False, "anthropic", "Claude Sonnet 5.5"))):
         cx = X + CW * (0.36 if k == 0 else 0.64)
         h = max(5.0, hmax * val / mx)
@@ -137,7 +137,7 @@ def draw_chart(v: Dict[str, Any], theme: str, which: str) -> Optional[str]:
         body.append(_chip(P, theme, maker, name[0], cx - cs / 2, base + 16, cs))
         body.append(nest.text(cx, base + 16 + cs + 26, name, 18, P["ink"] if green else P["muted"], 500, anchor="middle",
                               tracking=-0.3))
-    label = f"{metric}, Qwen3-8B fine-tuned {qt} against Claude Sonnet 5.5 {st} ({note})."
+    label = f"{metric}, the hybrid (Qwen3-8B fine-tuned on 95% of calls, the LLM on the rest) {qt} against Claude Sonnet 5.5 {st} ({note})."
     return nest.svg(W, top + ph + 34, body, label)
 
 
