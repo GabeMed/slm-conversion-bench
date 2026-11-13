@@ -124,7 +124,7 @@ def test_footer_is_svg_with_moving_blimps(theme):
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_headline_card_reads_the_report(theme):
-    """the headline's three charts read report.json and T2: B5 against B0, accuracy, cost per call, answer time"""
+    """the animated headline reads report.json and T2: B5 against B0, accuracy, cost per call, answer time"""
     report = json.loads(headline.REPORT.read_text())
     v = headline.numbers(report)
     b0, b5 = report["arms"]["B0"], report["arms"]["B5"]
@@ -132,7 +132,10 @@ def test_headline_card_reads_the_report(theme):
     assert v["x_full"] == pytest.approx(v["ref_call"] / v["hyb_call_full"]) and v["x_full"] > v["x_low"] > 1
     assert v["diff"] == pytest.approx(b5["ex"] - b0["ex"], abs=1e-9)
     assert v["ref_s"] and v["hyb_s"]
-    root = _svg(headline.draw(v, theme))
+    out = headline.draw(v, theme)
+    assert "@keyframes" in out                         # animated: the three charts, then the three cards
+    root = _svg(out)
     words = "".join(t.text or "" for t in root.iter() if t.tag.endswith("text"))
-    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "Qwen3-8B", "Sonnet 5.5"):
+    for w in ("ACCURACY", "COST PER CALL", "TIME TO ANSWER", "more accurate", "cheaper per call", "faster answers",
+              "Qwen3-8B fine-tuned", "Claude Sonnet 5.5"):
         assert w in words
