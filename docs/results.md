@@ -1,7 +1,8 @@
 # Results, axis by axis
 
 One page per question a reader may ask: what was compared, how accurate each option is, what it costs to run,
-what it costs to build, how fast it answers, how much training data matters, and what none of this shows. Each
+what it costs to build, how fast it answers, how much training data matters, whether the calls it took over
+matter, and what none of this shows. Each
 section starts with its answer. The registered verdicts are in
 [`results/report/report.md`](../results/report/report.md); a two-page version of this page is
 [`summary.md`](summary.md).
@@ -213,12 +214,43 @@ Adapters trained on 25%, 50% and 100% of each group's examples, measured on the 
 Breaking the task into narrow steps is what makes the small model usable. For a large LLM on this benchmark
 the same steps are redundant, which is why the single call is the cheapest way to this accuracy.
 
-## 9. What this does not show
+## 9. Does the column filter matter to the answer? (exploratory control)
 
-- **That the small model does the column filter's job as well as the large LLM in a way that matters.** Since
-  one LLM call matches the whole agent, the filter may bear little on the final answer. A filter that always
-  answers "no" would drop a column the large LLM used in 31% of calibration questions, so it is not vacuous,
-  but the direct control (the hybrid with a constant filter) has not been run.
+**Not measurably. With the column filter replaced by a constant, the agent scores the same. The hybrid's result
+therefore does not show that the small model does the filter's job; it shows that this agent does not need the
+filter with this LLM.**
+
+The control fixed in [`post-hoc-analysis-plan.md`](post-hoc-analysis-plan.md) (P1), run on the 200 calibration
+questions on 2026-11-12, one execution each, same GPU, two questions in parallel. In all three the agent steps
+run on the small model and selection, keywords and SQL generation on the large LLM, as in the hybrid.
+
+| Column filter answered by | Accuracy | Against the hybrid | Large-LLM cost per question | Seconds per question, median |
+|---|---|---|---|---|
+| Fine-tuned small model (the hybrid) | 141 / 200 = 70.5% | — | $0.026 | 45 |
+| The constant "No" (drop every column) | 139 / 200 = 69.5% | −1.0 [−4.0, +2.0] | $0.026 | 35 |
+| The constant "Yes" (keep every column) | 139 / 200 = 69.5% | −1.0 [−3.0, +1.0] | $0.038 | 34 |
+| For reference: the agent on the large LLM, calibration | 139 / 200 = 69.5% | | | |
+
+- Both intervals include 0. Under the reading fixed before the runs, the "No" control is uninformative at this
+  n (a difference under about 5 points cannot be seen) and the "Yes" control says that removing the step is not
+  seen to cost accuracy. Neither shows a drop.
+- The filter is 84% of the agent's calls and 86% of its cost on the large LLM. Answering it with a constant
+  "No" removes those calls altogether, with no model and no GPU for them, at the same accuracy and the same
+  downstream cost. Keeping every column instead raises the large LLM's cost downstream by 46%.
+- An earlier estimate from the logs said an always-"No" filter would drop a column the large LLM later used in
+  31% of calibration questions. The live control shows no loss; we have not traced which later step restores
+  what the answer needs.
+- Limits: calibration, not the test (the test barrier accepts only registered code); the calibration gold is
+  the uncorrected one; one execution per arm; 200 questions.
+
+What this changes: "a fine-tuned 8B model took 95% of the agent's calls with no loss" is true, and so is "a
+constant took 84% of the agent's calls with no loss". The evidence that a fine-tuned small model can do a
+narrow task as well as the large LLM is the per-task comparison of section 3, not the end-to-end result.
+
+## 10. What this does not show
+
+- **That the small model's column filter matters to the answer.** The control of section 9 found no
+  difference between it and a constant.
 - **Anything about the paper's claim at the data volume it recommends**, or about other agents, domains, small
   models or databases unseen in training.
 - **Run-to-run variation.** One execution per configuration.
@@ -226,7 +258,7 @@ the same steps are redundant, which is why the single call is the cheapest way t
   was restarted twice, and the report needed a small published patch of the analysis code. All of it is listed
   in [`prereg/DEVIATIONS.md`](../prereg/DEVIATIONS.md).
 
-## 10. Where each number comes from
+## 11. Where each number comes from
 
 | Section | Source |
 |---|---|
@@ -236,3 +268,4 @@ the same steps are redundant, which is why the single call is the cheapest way t
 | 6.1 | the load-test judgment, `judgments/J8/` |
 | 6.2, 6.3 | the logged calls of each test execution (release `data-2026-11-12`); method in [`preliminary-cost-latency.md`](preliminary-cost-latency.md) |
 | 7, 8 (calibration) | [`preliminary-results.md`](preliminary-results.md), section 4 |
+| 9 | [`results/calibration/post-hoc/filter-control/`](../results/calibration/post-hoc/filter-control) (runs, evaluations, the patch) |

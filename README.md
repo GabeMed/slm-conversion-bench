@@ -113,6 +113,9 @@ Three things a reader should know before quoting this:
   the paper's rule of thumb of ten thousand; this says nothing about larger training sets.
 - **For this task the agent itself is optional with a large model.** One call to Claude Sonnet 5.5, with no agent,
   scores 83.5% at $0.028 per correct answer, less than the hybrid. The 81–89% saving is against the agent it replaces.
+- **The calls the small model took over turned out not to matter here.** In a control run afterwards, answering the
+  column filter with a constant instead of a model gave the same accuracy. The result shows a cheaper agent, not
+  that the small model matched the large one on that task; the per-task comparison is in the results page.
 - **Latency depends on sizing.** Within its GPU's capacity the fine-tuned small model answers its tasks as fast as
   the large LLM or faster; in the test one GPU was overloaded and it was slower. Time per question was the same.
 

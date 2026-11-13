@@ -54,11 +54,13 @@ Small-model costs run from a fully used rented GPU to one used 20% of the time; 
   answer, was trained on 826 examples, about a quarter of them with a wrong label from the teacher; the paper's
   rule of thumb is ten thousand. Our learning curves (25%, 50%, 100% of the rows) are still rising at every
   task. The failure of full conversion is a result about this budget.
-- **The hybrid's result may say more about the task than about the small model.** The calls it took over are
-  the column filter and the agent's fixed control steps. Since a single LLM call matches the whole agent, those
-  calls may matter little to the final answer. On calibration, a filter that always answers "no" would drop a
-  column the large model used in 31% of the questions, which suggests the filter is not vacuous, but the direct
-  control (the hybrid with a constant filter) has not been run.
+- **The hybrid's result says more about the task than about the small model.** The calls it took over are the
+  column filter and the agent's fixed control steps. We ran the control afterwards, on calibration: with the
+  column filter answered by a constant ("no" to every column, or "yes" to every column) the agent scores the
+  same as with the fine-tuned model (69.5% against 70.5%, intervals including 0). So the end-to-end result does
+  not show that the small model does the filter's job; this agent does not need the filter with this LLM. What
+  shows the small model's ability on a narrow task is the per-call comparison (agreement of 0.86 with the large
+  model against 0.97 for the large model with itself).
 - **One run per configuration**, on engines that are not deterministic; intervals cover the sampling of
   questions only. One agent, one domain, one small model, the same databases in training and test.
 - **The execution departed from the protocol** in ways listed in [`prereg/DEVIATIONS.md`](../prereg/DEVIATIONS.md):

@@ -1,0 +1,123 @@
+diff --git a/bench/agent/hooks.py b/bench/agent/hooks.py
+index 240e57a..93978ed 100644
+--- a/bench/agent/hooks.py
++++ b/bench/agent/hooks.py
+@@ -83,6 +83,7 @@ class _RunState:
+     harness_errors: List[str] = field(default_factory=list)
+     unregistered_call_sites: set = field(default_factory=set)
+     stop: Any = None  # an Event shared by the worker processes of one run: set when a question failed in any
++    const_filter: Optional[str] = None  # EXPLORATORY (scratch worktree, never merged): "No" or "Yes", see CONST_FILTER_ENV
+     lock: threading.RLock = field(default_factory=threading.RLock)
+ 
+ 
+@@ -131,6 +132,12 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
+         raise HarnessError("hooks.configure() must run before start_run()")
+     if (arm is None) == (engine is None):
+         raise HarnessError("a run is routed by its arm or has a fixed engine, one of the two")
++    const_filter = os.environ.get(CONST_FILTER_ENV) or None  # EXPLORATORY: read here so the registered runner is untouched
++    if const_filter is not None:  # EXPLORATORY: never on test (a test run is the one with a registered call-site set)
++        if allowed_call_sites is not None:
++            raise HarnessError(f"{CONST_FILTER_ENV} is refused on the test split")
++        if const_filter not in CONST_FILTER_ANSWERS or arm != "B5":
++            raise HarnessError(f"{CONST_FILTER_ENV} is one of {CONST_FILTER_ANSWERS}, on arm B5 only")
+     calls_path.parent.mkdir(parents=True, exist_ok=True)
+     calls_path.touch()
+     if arm in ("B4", "B5"):  # the arms whose router embeds
+@@ -139,7 +146,7 @@ def start_run(run_id: str, arm: Optional[str], calls_path: Path, *, engine: Opti
+                                             for site, steps in few_shot.items()}
+     _run = _RunState(run_id=run_id, arm=arm, calls_path=calls_path, engine=engine, allocation=allocation, few_shot=prefix,
+                      allowed_call_sites=None if allowed_call_sites is None else frozenset(allowed_call_sites),
+-                     stop=stop)
++                     stop=stop, const_filter=const_filter)
+ 
+ 
+ def set_question(question_id: str) -> None:
+@@ -391,9 +398,10 @@ def _invoke(model: Any, messages: List[Any]):
+ 
+ 
+ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Route, messages,
+-            started_at, latency_ms, temperature, output, parsed, parsed_ok, error) -> None:
++            started_at, latency_ms, temperature, output, parsed, parsed_ok, error, spec=None, usage=None) -> None:
++    """`spec` and `usage` are given only for a call no engine served (EXPLORATORY: `_constant_filter`)."""
+     run = _require_run()
+-    spec = engine_spec(_config, chosen.engine)
++    spec = spec or engine_spec(_config, chosen.engine)
+     metadata = (getattr(output, "response_metadata", None) or {}) if output is not None else {}
+     line = json.dumps({
+         "run_id": run.run_id, "call_id": call_id, "retry_of": retry_of, "attempt": attempt,
+@@ -403,7 +411,7 @@ def _record(*, call_id, retry_of, attempt, call_site, invocation_key, chosen: Ro
+         "prompt_messages": messages,
+         "response_text": output.content if output is not None and isinstance(output.content, str) else None,
+         "parsed_output": _jsonable(parsed) if parsed_ok else None, "parsed_ok": parsed_ok,
+-        "usage": _usage(output) if output is not None else dict(NO_USAGE),
++        "usage": usage or (_usage(output) if output is not None else dict(NO_USAGE)),
+         "latency_ms": latency_ms, "started_at": started_at,
+         "temperature": recorded_temperature(spec, temperature),
+         "error": redact(scrub(error), _config) if error is not None else None,  # no local path, no credential
+@@ -544,10 +552,66 @@ def invoke_tool_call(call_site: str, invocation_key: str, lc_messages: List[Any]
+             return None, False, f"OutputParserException: {e}", "parse", None
+         except Exception as e:  # not retried, as in CHESS
+             return None, False, f"{type(e).__name__}: {e}", "failed", e
++    run = _run
++    if run is not None and run.const_filter is not None and call_site == CONST_FILTER_SITE:
++        return _constant_filter(run, invocation_key, lc_messages, parser)
+     return _invocation(call_site, invocation_key, lc_messages, interpret,
+                        _config["retries"]["parse_max_attempts"])[1]
+ 
+ 
++# ---------------------------------------------------------------- EXPLORATORY: the constant column filter
++# A local patch of a scratch worktree, never merged: a post hoc control on a split that is not `test`. With
++# BENCH_CONST_FILTER=No|Yes, `bench run --arm B5` answers every `filter_column` invocation with that constant
++# and calls no model for it; every other call site is routed as B5 routes it.
++
++CONST_FILTER_ENV = "BENCH_CONST_FILTER"
++CONST_FILTER_CLUSTER_ENV = "BENCH_CONST_FILTER_CLUSTER"  # the cluster whose adapter the run then never calls
++CONST_FILTER_SITE = "filter_column"
++CONST_FILTER_ANSWERS = ("No", "Yes")  # drop the column, keep the column (CHESS: `.lower() == "yes"` keeps)
++
++
++def const_filter_engine(answer: str) -> str:
++    return f"const:{answer}"
++
++
++def const_filter_text(answer: str) -> str:
++    """The constant's raw text: the JSON object CHESS's template asks the model for (template_filter_column.txt),
++    which the call site's own parser reads into {"chain_of_thought_reasoning": ..., "is_column_information_relevant": answer}."""
++    return json.dumps({"chain_of_thought_reasoning": f"constant answer ({CONST_FILTER_ENV}={answer}): no model was called",
++                       "is_column_information_relevant": answer})
++
++
++def _constant_filter(run: _RunState, invocation_key: str, lc_messages: List[Any], parser: Any) -> Any:
++    """One `filter_column` invocation answered by the run's constant: the same checks as a routed call (a failed
++    run, the question, the repetition suffix), no router (nothing is embedded: no cluster, no routes line), no
++    engine, and one C1 line: engine `const:<answer>`, the prompt CHESS wrote (never sent), the constant's text
++    and what CHESS's parser makes of it, zero tokens (`estimated`: nothing was billed), a latency of 0.
++    `model_role` and `endpoint` are C1's closed sets: `slm` (the role the constant stands in for) and `fake`."""
++    from langchain_core.messages import AIMessage
++    call_site, answer = CONST_FILTER_SITE, run.const_filter
++    _refuse_if_failed(run, call_site)
++    if run.question_id is None:
++        raise HarnessError("hooks.set_question() was not called for this question")
++    with run.lock:
++        n = run.occurrences.get((call_site, invocation_key), 0) + 1
++        run.occurrences[(call_site, invocation_key)] = n
++    key = invocation_key if n == 1 else f"{invocation_key}@{n}"
++    engine = const_filter_engine(answer)
++    output = AIMessage(content=const_filter_text(answer))
++    parsed = _harness(call_site, lambda: parser.invoke(output))
++    if not isinstance(parsed, dict) or parsed.get("is_column_information_relevant") != answer:
++        raise HarnessError(f"{call_site}: the parser read the constant {answer!r} as {parsed!r}")
++    _harness(call_site, lambda: _record(
++        call_id=str(uuid.uuid4()), retry_of=None, attempt=1, call_site=call_site, invocation_key=key,
++        chosen=Route(engine, None), messages=_message_dicts(lc_messages),
++        started_at=datetime.now(timezone.utc).isoformat(), latency_ms=0,
++        temperature=float(_config["call_sites"][call_site]["temperature"]), output=output, parsed=parsed,
++        parsed_ok=True, error=None,
++        spec={"model_role": "slm", "model": engine, "endpoint": {"kind": "fake"}},
++        usage={"input": 0, "cached_input": 0, "output": 0, "reasoning": 0, "source": "estimated"}))
++    return parsed
++
++
+ def invoke_agent_call(call_site: str, invocation_key: str, message: str, parse: Callable[[str], Any]) -> str:
+     """The agent's next-tool choice: one answer, as in CHESS (transport failures are retried).
+     `parse` is the agent's own reading of the response; the agent raises on it itself."""
